@@ -23,16 +23,14 @@
 | Python | 3.10+ (venv 사용) |
 | frida | 17.x |
 
-
 ## Install
 ```bash
 python -m venv venv
 source venv/bin/activate  # Linux
-.\venv\bin\activate.ps1   # Windows
+.\venv\bin\activate.ps1   # Windows PowerShell
+
+# 개발 모드로 해당 프로젝트를 패키징하여 설치
 pip install -e .
-# 선택적 의존성
-pip install 'venomhook[static]'   # pefile/lief/capstone 등 정적 분석 옵션
-pip install 'venomhook[dynamic]'  # frida
 ```
 
 ## Usage
