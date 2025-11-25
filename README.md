@@ -27,7 +27,7 @@
 ```bash
 python -m venv venv
 source venv/bin/activate  # Linux
-.\venv\bin\activate.ps1   # Windows PowerShell
+.\venv\Scripts\Activate.ps1   # Windows PowerShell
 
 # 개발 모드로 해당 프로젝트를 패키징하여 설치
 pip install -e .
@@ -37,7 +37,7 @@ pip install -e .
 
 ### Step 1. Create StaticMeta JSON File from Ghidra headless
 ```bash
-/opt/ghidra/support/ghidraRun /tmp/ghidra_proj venomhook_project \
+analyzeHeadless /tmp/ghidra_proj venomhook_project \
   -import /path/to/target.exe -overwrite \
   -postScript ghidra_scripts/export_staticmeta.py /tmp/target.static.json
 ```
@@ -59,7 +59,7 @@ venomhook offset-static \
 # 바이너리를 직접 넣을 경우(Ghidra 실행 포함)
 venomhook offset-static \
   --binary /path/to/target.exe \
-  --ghidra-headless /path/to/ghidraRun \
+  --ghidra-headless analyzeHeadless \
   --ghidra-script ghidra_scripts/export_staticmeta.py \
   --out venomhook.json
 
