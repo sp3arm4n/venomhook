@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "venomhook"
+version = "0.1.0"
+description = "Offset-based Native Hook Automation Platform skeleton"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dynamic = ["frida>=17,<18"]
+static = ["lief>=0.14.0", "pefile>=2023.2.7", "capstone>=5.0.0"]
+
+[project.scripts]
+venomhook = "venomhook.cli:app"

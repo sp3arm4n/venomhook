@@ -1,0 +1,184 @@
+# VenomHook: Offset-based Native Hook Automation Platform
+
+<p align="center">
+  <img src="assets/venomhook.png" alt="VenomHook logo" width="240">
+</p>
+
+`venomhook`은 정적 분석 결과(StaticMeta)로부터 offset 기반 HookSpec을 자동 생성하고, Frida 스크립트로 변환해 주는 CLI 도구입니다. `offset_architecture.md`에 정의된 흐름(StaticMeta → EndpointMeta → HookSpec → Frida)을 최소 실행 가능한 형태로 구현했습니다.
+
+## 주요 기능
+- Ghidra 헤드리스 + postScript로 StaticMeta 자동 추출(해시/함수 필터 포함)
+- StaticMeta(JSON) → HookSpec(JSON/SQLite) 생성, 마크다운 리포트 출력 (E2E 모드 `offset-e2e` 제공)
+- HookSpec → Frida 스크립트 자동 생성 (텍스트/JSON 로그, 시나리오, 문자열/버퍼 로깅, 스캔 범위·리트라이 옵션)
+- Frida 실행 오케스트레이션(`offset-run`) 및 런타임 로그 요약(MD/HTML, 문자열 샘플 포함)
+- 프로파일(JSON)로 점수/시그니처/Frida 옵션 기본값 일괄 적용
+- 예제 StaticMeta 포함(`examples/static_meta.sample.json`)
+
+## Requirements
+| 구분 | 환경 |
+| --- | --- |
+| OS | Windows & Linux |
+| Java | OpenJDK 21 |
+| Ghidra | Ghidra 11.4.x |
+| Python | 3.10+ (venv 사용) |
+| frida | 17.x |
+
+
+## Install
+```bash
+python -m venv venv
+source venv/bin/activate  # Linux
+.\venv\bin\activate.ps1   # Windows
+pip install -e .
+# 선택적 의존성
+pip install 'venomhook[static]'   # pefile/lief/capstone 등 정적 분석 옵션
+pip install 'venomhook[dynamic]'  # frida
+```
+
+## Usage
+
+### Step 1. Create StaticMeta JSON File from Ghidra headless
+```bash
+/opt/ghidra/support/ghidraRun /tmp/ghidra_proj venomhook_project \
+  -import /path/to/target.exe -overwrite \
+  -postScript ghidra_scripts/export_staticmeta.py /tmp/target.static.json
+```
+- 결과물: `/tmp/target.static.json` (StaticMeta). 다음 단계 입력으로 사용.
+- Ghidra 옵션: `--ghidra-headless`, `--ghidra-script`, `--ghidra-project-dir`, `--ghidra-project-name`
+  - 샘플 postScript(`ghidra_scripts/export_staticmeta.py`)가 리포지토리에 포함됨. 마지막 인자 경로에 StaticMeta JSON을 써야 함.
+
+### Step 2. StaticMeta → HookSpec / Report
+```bash
+venomhook offset-static \
+  --static-json /tmp/target.static.json \
+  --out venomhook.json \
+  --out-db venomhook.db \
+  --report-md venomhook.md \
+  --top 20 \
+  --sig-max-bytes 12 \
+  --score-network 30 --score-file 20 --score-auth 15 --score-url 10 --score-crypto 10
+
+# 바이너리를 직접 넣을 경우(Ghidra 실행 포함)
+venomhook offset-static \
+  --binary /path/to/target.exe \
+  --ghidra-headless /path/to/ghidraRun \
+  --ghidra-script ghidra_scripts/export_staticmeta.py \
+  --out venomhook.json
+
+# 프로파일(JSON)로 점수/시그니처 기본값 적용
+venomhook offset-static \
+  --static-json /tmp/target.static.json \
+  --profile profile.json \
+  --out venomhook.json
+```
+- 결과물: `venomhook.json`(필수), `venomhook.db`(선택), `venomhook.md`(요약).
+- 주요 옵션: 시그니처 길이(`--sig-max-bytes`), 점수 가중치(`--score-*`), 출력(`--out`, `--out-db`, `--report-md`), 입력(`--static-json` 또는 `--binary`+Ghidra 설정).
+- 프로파일: `--profile`로 `{ "static": { "sig_max_bytes": 14, "score": { ... } } }` 형태 JSON을 넣으면 기본값을 덮어씁니다 (동일 값인 경우에만 적용, CLI 명시 값 우선).
+
+### Step 3. HookSpec → Frida Script
+```bash
+venomhook offset-hook \
+  --hookspec venomhook.json \   # 또는 --hookspec-db venomhook.db
+  --target target.exe \
+  --out-script venomhook.frida.js \
+  --log-format json \
+  --log-prefix "[venomhook]" \
+  --scenario-message "start" \
+  --auto-start-scenario \
+  --hexdump-len 64 \
+  --string-arg 0 --string-ret --string-len 128 \
+  --scan-size 4096 --retry-attach 2 \
+  --print-script
+
+# 프로파일(JSON)로 동적 옵션 기본값 적용
+venomhook offset-hook \
+  --hookspec venomhook.json \
+  --target target.exe \
+  --profile profile.json
+```
+- 결과물: `venomhook.frida.js` (자동 생성된 Frida 후킹 스크립트).
+- 주요 옵션: 입력(`--hookspec`/`--hookspec-db` 둘 중 하나), 로그 포맷(`--log-format text|json`), 접두사(`--log-prefix`), 시나리오 알림(`--scenario-message`, `--auto-start-scenario`), 출력 경로(`--out-script`).
+- hexdump 길이(`--hexdump-len`), 호출 카운트 로그 포함.
+- 문자열 로깅: `--string-arg <idx>` 반복 지정 시 해당 인자를 C-string으로 읽어 로그, `--string-ret`는 반환값을 C-string으로 로그, 길이는 `--string-len`으로 제어.
+- 안정성 옵션: 시그니처 스캔 범위(`--scan-size`), attach 실패 리트라이(`--retry-attach`).
+- 프로파일: `--profile`로 `{ "dynamic": { "hexdump_len": 32, "string_arg": [0], ... } }` 형태 JSON을 넣으면 기본값을 덮어씁니다 (동일 값인 경우에만 적용, CLI 명시 값 우선).
+
+### Step 4. Frida Hooking Execute
+```bash
+# frida 직접 실행
+frida -f /path/to/target.exe -l venomhook.frida.js --no-pause
+
+# 또는 CLI 오케스트레이터 사용
+venomhook offset-run \
+  --script venomhook.frida.js \
+  --target /path/to/target.exe \
+  --frida-path frida \
+  --log-file frida.log \
+  --dry-run   # 실제 실행하려면 제거
+```
+- 결과물: 콘솔 로그(텍스트/JSON), 필요 시 `send()` 이벤트 소비. 실행/입력 시나리오는 별도 조작.
+
+### Step 5. Runtime Log Summary (선택)
+Frida JSON 로그를 Markdown 요약으로 변환합니다.
+```bash
+venomhook offset-report-runtime \
+  --log frida.log \
+  --out-md runtime_summary.md \
+  --out-html runtime_summary.html
+```
+- 결과물: `runtime_summary.md` / `runtime_summary.html` (hook별 enter/leave/hexdump/error 카운트 + 문자열/args/ret 샘플)
+
+### Step 6. One-shot E2E (옵션)
+StaticMeta→HookSpec→Frida 스크립트 생성까지 한 번에 수행하고(기본 frida 실행은 생략, `--run-frida`로 실행 가능), 산출물을 한 디렉터리에 모읍니다.
+```bash
+venomhook offset-e2e \
+  --static-json /tmp/target.static.json \   # 또는 --binary ... (Ghidra 필요)
+  --target target.exe \
+  --out-dir out \
+  --profile profile.json \   # 선택: 기본값 덮어쓰기
+  --run-frida --frida-log out/frida.log --summarize-log   # 실제 frida 실행 시
+```
+- 산출물: `out/venomhook.json` `out/venomhook.db` `out/venomhook.md` `out/venomhook.frida.js` (+옵션: frida.log, runtime_summary)
+
+## 프로젝트 구조
+```
+src/venomhook/
+  models.py          # StaticMeta/EndpointMeta/HookSpec 데이터 모델
+  scoring.py         # 엔드포인트 점수 규칙
+  hookspec_builder.py# HookSpec 생성기
+  static_pipeline.py # StaticMeta -> HookSpec 파이프라인
+  dynamic_pipeline.py# HookSpec -> Frida 스크립트 생성
+  ghidra_runner.py   # Ghidra headless 래퍼
+  orchestrator.py    # Frida 실행 오케스트레이터
+  report.py          # HookSpec 마크다운 리포트
+  runtime_report.py  # Frida 로그(MD/HTML) 요약기 (문자열 샘플 포함)
+  config.py          # 프로파일 로더
+  store.py           # JSON/SQLite 로드·세이브 유틸
+  cli.py             # venomhook offset-static / offset-hook 엔트리포인트
+ghidra_scripts/export_staticmeta.py   # StaticMeta JSON을 내보내는 Ghidra postScript 예시
+examples/static_meta.sample.json # 샘플 StaticMeta
+tests/               # 간단한 파이프라인 테스트
+```
+
+## 개발/테스트
+```bash
+PYTHONPATH=src python3 -m unittest discover -s tests
+```
+
+## Architect
+
+### 🥷 Reverse Engineering & White Hat Hacker
+
+<a href="https://github.com/sp3arm4n"><img src="https://img.shields.io/badge/GitHub-sp3arm4n-181717?logo=github&logoColor=white&style=for-the-badge" alt="GitHub - sp3arm4n"></a>
+
+## Developer
+
+### 👨‍💻 AI Pair Programming
+
+<img src="https://img.shields.io/badge/OpenAI-Codex-0f172a?logo=openai&logoColor=white&style=for-the-badge" alt="OpenAI Codex badge">
+
+## Support
+
+### 🤖 AI Research Assistance
+
+<img src="https://img.shields.io/badge/OpenAI-ChatGPT-7c3aed?logo=openai&logoColor=white&style=for-the-badge" alt="OpenAI ChatGPT badge">
