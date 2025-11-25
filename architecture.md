@@ -1,16 +1,5 @@
 # Architecture
 
-## 0. 개발 환경
-| 구분 | 환경 |
-| --- | --- |
-| OS | Windows & Linux 혼용 (CLI 환경) |
-| Java | JDK 21 |
-| Ghidra | Ghidra 11.4.x |
-| Python | 3.10+ (venv 사용) |
-| frida | 17.x |
-
-개인이 직접 빌드하여 사용하는 도구가 아닌 이미 릴리즈된 파일로 사용하며 옵션 명령어로 각 기능들을 이용.
-
 ## 1. 전체 구조도 (Offset-based Native Hook Automation Platform)
 
 ```text
