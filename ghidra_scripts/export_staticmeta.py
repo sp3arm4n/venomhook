@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 #@category Vahana
 """
 Ghidra postScript to export StaticMeta JSON for venomhook.
