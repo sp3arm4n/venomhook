@@ -1,6 +1,5 @@
 # Environment
 venv/
-sample/
 
 # pip install e .
 src/venomhook.egg-info/
@@ -9,3 +8,11 @@ build/
 # Step 1. StaticMeta
 static/META
 static/project
+
+# test
+examples/
+sample/
+tests/
+
+# src
+src/venomhook/__pycache__
