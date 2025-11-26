@@ -23,6 +23,12 @@
 | Python | 3.10+ (venv 사용) |
 | frida | 17.x |
 
+## Ghidra Environment Setup
+```bash
+$GHIDRA_HOME = "$HOME/ghidra_11.4.x_PUBLIC"
+$GHIDRA_HEADLESS = "$GHIDRA_HOME/support"
+```
+
 ## Install
 ```bash
 python -m venv venv
@@ -37,9 +43,17 @@ pip install -e .
 
 ### Step 1. Create StaticMeta JSON File from Ghidra headless
 ```bash
-analyzeHeadless /tmp/ghidra_proj venomhook_project \
+# Linux
+analyzeHeadless ./tmp/ghidra_proj venomhook_project \
   -import /path/to/target.exe -overwrite \
-  -postScript ghidra_scripts/export_staticmeta.py /tmp/target.static.json
+  -scriptPath $HOME/Tools/venomhook/ghidra_scripts \
+  -postScript export_staticmeta.py ./tmp/target_static.json
+
+# Windows
+analyzeHeadless .\tmp\ghidra_proj venomhook_project \
+  -import C:\target.exe -overwrite \
+  -scriptPath $HOME\Tools\venomhook\ghidra_scripts \
+  -postScript export_staticmeta.py .\tmp\target_static.json
 ```
 - 결과물: `/tmp/target.static.json` (StaticMeta). 다음 단계 입력으로 사용.
 - Ghidra 옵션: `--ghidra-headless`, `--ghidra-script`, `--ghidra-project-dir`, `--ghidra-project-name`
@@ -165,13 +179,14 @@ PYTHONPATH=src python3 -m unittest discover -s tests
 
 ## Architect
 
-### 🥷 Reverse Engineering & White Hat Hacker
+### 👾 Reverse Engineering & White Hat Hacker
 
 <a href="https://github.com/sp3arm4n"><img src="https://img.shields.io/badge/GitHub-sp3arm4n-181717?logo=github&logoColor=white&style=for-the-badge" alt="GitHub - sp3arm4n"></a>
 
 ### 🤝 Collaborators
 
-<a href="https://github.com/kilkat"><img src="https://img.shields.io/badge/GitHub-kilkat-181717?logo=github&logoColor=white&style=for-the-badge" alt="GitHub - kilkat"></a> <a href="https://github.com/leelsey"><img src="https://img.shields.io/badge/GitHub-Leelsey-181717?logo=github&logoColor=white&style=for-the-badge" alt="GitHub - Leelsey"></a>
+<a href="https://github.com/kilkat"><img src="https://img.shields.io/badge/GitHub-kilkat-181717?logo=github&logoColor=white&style=for-the-badge" alt="GitHub - kilkat"></a>
+<a href="https://github.com/leelsey"><img src="https://img.shields.io/badge/GitHub-Leelsey-181717?logo=github&logoColor=white&style=for-the-badge" alt="GitHub - Leelsey"></a>
 
 ## Developer
 
