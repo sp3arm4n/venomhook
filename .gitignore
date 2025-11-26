@@ -1,1 +1,11 @@
+# Environment
 venv/
+sample/
+
+# pip install e .
+src/venomhook.egg-info/
+build/
+
+# Step 1. StaticMeta
+static/META
+static/project
