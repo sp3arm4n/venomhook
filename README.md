@@ -44,25 +44,25 @@ pip install -e .
 ### Step 1. Create StaticMeta JSON File from Ghidra headless
 ```bash
 # Linux
-analyzeHeadless ./tmp/ghidra_proj venomhook_project \
+analyzeHeadless ./static/project venomhook_project \
   -import /path/to/target.exe -overwrite \
   -scriptPath $HOME/Tools/venomhook/ghidra_scripts \
-  -postScript export_staticmeta.py ./tmp/target_static.json
+  -postScript export_staticmeta.py ./static/META/target.json
 
 # Windows
-analyzeHeadless .\tmp\ghidra_proj venomhook_project \
+analyzeHeadless .\static\project venomhook_project \
   -import C:\target.exe -overwrite \
   -scriptPath $HOME\Tools\venomhook\ghidra_scripts \
-  -postScript export_staticmeta.py .\tmp\target_static.json
+  -postScript export_staticmeta.py .\static\META\target.json
 ```
-- 결과물: `/tmp/target.static.json` (StaticMeta). 다음 단계 입력으로 사용.
+- 결과물: `/static/META/target.json` (StaticMeta). 다음 단계 입력으로 사용.
 - Ghidra 옵션: `--ghidra-headless`, `--ghidra-script`, `--ghidra-project-dir`, `--ghidra-project-name`
-  - 샘플 postScript(`ghidra_scripts/export_staticmeta.py`)가 리포지토리에 포함됨. 마지막 인자 경로에 StaticMeta JSON을 써야 함.
+  - 샘플 postScript(`export_staticmeta.py`)가 리포지토리에 포함됨. 마지막 인자 경로에 StaticMeta JSON을 써야 함.
 
 ### Step 2. StaticMeta → HookSpec / Report
 ```bash
 venomhook offset-static \
-  --static-json /tmp/target.static.json \
+  --static-json /static/META/target.json \
   --out venomhook.json \
   --out-db venomhook.db \
   --report-md venomhook.md \
@@ -79,7 +79,7 @@ venomhook offset-static \
 
 # 프로파일(JSON)로 점수/시그니처 기본값 적용
 venomhook offset-static \
-  --static-json /tmp/target.static.json \
+  --static-json /static/META/target.json \
   --profile profile.json \
   --out venomhook.json
 ```
@@ -144,7 +144,7 @@ venomhook offset-report-runtime \
 StaticMeta→HookSpec→Frida 스크립트 생성까지 한 번에 수행하고(기본 frida 실행은 생략, `--run-frida`로 실행 가능), 산출물을 한 디렉터리에 모읍니다.
 ```bash
 venomhook offset-e2e \
-  --static-json /tmp/target.static.json \   # 또는 --binary ... (Ghidra 필요)
+  --static-json /static/META/target.json \   # 또는 --binary ... (Ghidra 필요)
   --target target.exe \
   --out-dir out \
   --profile profile.json \   # 선택: 기본값 덮어쓰기
