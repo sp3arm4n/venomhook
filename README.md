@@ -169,6 +169,10 @@ PYTHONPATH=src python3 -m unittest discover -s tests
 
 <a href="https://github.com/sp3arm4n"><img src="https://img.shields.io/badge/GitHub-sp3arm4n-181717?logo=github&logoColor=white&style=for-the-badge" alt="GitHub - sp3arm4n"></a>
 
+### 🤝 Collaborators
+
+<a href="https://github.com/kilkat"><img src="https://img.shields.io/badge/GitHub-kilkat-181717?logo=github&logoColor=white&style=for-the-badge" alt="GitHub - kilkat"></a>
+
 ## Developer
 
 ### 👨‍💻 AI Pair Programming
