@@ -134,7 +134,7 @@ venomhook offset-e2e \
 ```
 - 산출물: `reports/hook/venomhook.json` `reports/hook/venomhook.db` `reports/hook/venomhook.md` `frida_scripts/venomhook.js` (+옵션: frida.log, runtime_summary)
 
-## 주요 스크립트
+## 디렉토리 구조
 ```
 venomhook/
 │
