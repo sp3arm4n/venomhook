@@ -169,7 +169,7 @@ def main():
         "name": os.path.basename(binary_path),
         "hash": binary_hash,
         "arch": prog.getLanguage().getProcessor().toString(),
-        "image_base": hex(image_base),
+        "image_base": safe_hex(image_base),
     }
 
     payload = {"binary": binary_info, "functions": funcs}

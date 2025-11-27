@@ -39,49 +39,39 @@ source venv/bin/activate  # Linux
 pip install -e .
 ```
 
+## Set Up
+```bash
+# Linux
+chmod +x ./setup/env.sh && ./setup/env.sh
+chmod +x ./setup/dirs.sh && ./setup/dirs.sh
+
+# Windows
+powershell -ExecutionPolicy Bypass -File .\setup\dirs.ps1
+```
+
 ## Usage
 
 ### Step 1. Create StaticMeta JSON File from Ghidra headless
 ```bash
 # Linux
-analyzeHeadless ./static/project venomhook_project \
-  -import /path/to/target.exe -overwrite \
-  -scriptPath $HOME/Tools/venomhook/ghidra_scripts \
-  -postScript export_staticmeta.py ./static/META/target.json
+analyzeHeadless ./static/project venomhook_project -import ./sample/putty.exe -overwrite -scriptPath $HOME/Tools/venomhook/ghidra_scripts -postScript export_staticmeta.py ./static/META/staticmeta.json
 
 # Windows
-analyzeHeadless .\static\project venomhook_project \
-  -import C:\target.exe -overwrite \
-  -scriptPath $HOME\Tools\venomhook\ghidra_scripts \
-  -postScript export_staticmeta.py .\static\META\target.json
+analyzeHeadless .\static\project venomhook_project -import .\sample\putty.exe -overwrite -scriptPath $HOME\Tools\venomhook\ghidra_scripts -postScript export_staticmeta.py .\static\META\staticmeta.json
 ```
-- 결과물: `/static/META/target.json` (StaticMeta). 다음 단계 입력으로 사용.
+- 결과물: `/static/META/staticmeta.json` (StaticMeta). 다음 단계 입력으로 사용.
 - Ghidra 옵션: `--ghidra-headless`, `--ghidra-script`, `--ghidra-project-dir`, `--ghidra-project-name`
   - 샘플 postScript(`export_staticmeta.py`)가 리포지토리에 포함됨. 마지막 인자 경로에 StaticMeta JSON을 써야 함.
 
 ### Step 2. StaticMeta → HookSpec / Report
 ```bash
-venomhook offset-static \
-  --static-json /static/META/target.json \
-  --out venomhook.json \
-  --out-db venomhook.db \
-  --report-md venomhook.md \
-  --top 20 \
-  --sig-max-bytes 12 \
-  --score-network 30 --score-file 20 --score-auth 15 --score-url 10 --score-crypto 10
+venomhook offset-static --static-json ./static/META/staticmeta.json --out ./reports/hook/venomhook.json --out-db ./reports/hook/venomhook.db --report-md ./reports/hook/venomhook.md --top 20 --sig-max-bytes 12 --score-network 30 --score-file 20 --score-auth 15 --score-url 10 --score-crypto 10
 
 # 바이너리를 직접 넣을 경우(Ghidra 실행 포함)
-venomhook offset-static \
-  --binary /path/to/target.exe \
-  --ghidra-headless analyzeHeadless \
-  --ghidra-script ghidra_scripts/export_staticmeta.py \
-  --out venomhook.json
+venomhook offset-static --binary ./sample/putty.exe --ghidra-headless analyzeHeadless --ghidra-script ghidra_scripts/export_staticmeta.py --out ./reports/hook/venomhook.json
 
 # 프로파일(JSON)로 점수/시그니처 기본값 적용
-venomhook offset-static \
-  --static-json /static/META/target.json \
-  --profile profile.json \
-  --out venomhook.json
+venomhook offset-static --static-json ./static/META/staticmeta.json --profile profile.json --out ./reports/hook/venomhook.json
 ```
 - 결과물: `venomhook.json`(필수), `venomhook.db`(선택), `venomhook.md`(요약).
 - 주요 옵션: 시그니처 길이(`--sig-max-bytes`), 점수 가중치(`--score-*`), 출력(`--out`, `--out-db`, `--report-md`), 입력(`--static-json` 또는 `--binary`+Ghidra 설정).
@@ -89,24 +79,14 @@ venomhook offset-static \
 
 ### Step 3. HookSpec → Frida Script
 ```bash
-venomhook offset-hook \
-  --hookspec venomhook.json \   # 또는 --hookspec-db venomhook.db
-  --target target.exe \
-  --out-script venomhook.frida.js \
-  --log-format json \
-  --log-prefix "[venomhook]" \
-  --scenario-message "start" \
-  --auto-start-scenario \
-  --hexdump-len 64 \
-  --string-arg 0 --string-ret --string-len 128 \
-  --scan-size 4096 --retry-attach 2 \
-  --print-script
+# Create from JSON file
+venomhook offset-hook --hookspec ./reports/hook/venomhook.json --target putty.exe --out-script ./frida_scripts/venomhook.frida.js --log-format json --log-prefix "[venomhook]" --scenario-message "start" --auto-start-scenario --hexdump-len 64 --string-arg 0 --string-ret --string-len 128 --scan-size 4096 --retry-attach 2 --print-script
+
+# Create from DB file
+venomhook offset-hook --hookspec-db ./reports/hook/venomhook.db --target putty.exe --out-script ./frida_scripts/venomhook.frida.js --log-format json --log-prefix "[venomhook]" --scenario-message "start" --auto-start-scenario --hexdump-len 64 --string-arg 0 --string-ret --string-len 128 --scan-size 4096 --retry-attach 2 --print-script
 
 # 프로파일(JSON)로 동적 옵션 기본값 적용
-venomhook offset-hook \
-  --hookspec venomhook.json \
-  --target target.exe \
-  --profile profile.json
+venomhook offset-hook --hookspec ./reports/hook/venomhook.json --target putty.exe --profile profile.json
 ```
 - 결과물: `venomhook.frida.js` (자동 생성된 Frida 후킹 스크립트).
 - 주요 옵션: 입력(`--hookspec`/`--hookspec-db` 둘 중 하나), 로그 포맷(`--log-format text|json`), 접두사(`--log-prefix`), 시나리오 알림(`--scenario-message`, `--auto-start-scenario`), 출력 경로(`--out-script`).
@@ -118,25 +98,17 @@ venomhook offset-hook \
 ### Step 4. Frida Hooking Execute
 ```bash
 # frida 직접 실행
-frida -f /path/to/target.exe -l venomhook.frida.js --no-pause
+frida -f ./sample/putty.exe -l ./frida_scripts/venomhook.js --no-pause
 
-# 또는 CLI 오케스트레이터 사용
-venomhook offset-run \
-  --script venomhook.frida.js \
-  --target /path/to/target.exe \
-  --frida-path frida \
-  --log-file frida.log \
-  --dry-run   # 실제 실행하려면 제거
+# 또는 CLI 오케스트레이터 사용 (사용 시 --dry-run 옵션 제거)
+venomhook offset-run --script ./frida_scripts/venomhook.js --target ./sample/putty.exe --frida-path frida --log-file ./.log/frida.log --dry-run
 ```
 - 결과물: 콘솔 로그(텍스트/JSON), 필요 시 `send()` 이벤트 소비. 실행/입력 시나리오는 별도 조작.
 
 ### Step 5. Runtime Log Summary (선택)
 Frida JSON 로그를 Markdown 요약으로 변환합니다.
 ```bash
-venomhook offset-report-runtime \
-  --log frida.log \
-  --out-md runtime_summary.md \
-  --out-html runtime_summary.html
+venomhook offset-report-runtime --log ./.log/frida.log --out-md ./reports/runtime_summary.md --out-html ./reports/runtime_summary.html
 ```
 - 결과물: `runtime_summary.md` / `runtime_summary.html` (hook별 enter/leave/hexdump/error 카운트 + 문자열/args/ret 샘플)
 
@@ -144,13 +116,13 @@ venomhook offset-report-runtime \
 StaticMeta→HookSpec→Frida 스크립트 생성까지 한 번에 수행하고(기본 frida 실행은 생략, `--run-frida`로 실행 가능), 산출물을 한 디렉터리에 모읍니다.
 ```bash
 venomhook offset-e2e \
-  --static-json /static/META/target.json \   # 또는 --binary ... (Ghidra 필요)
-  --target target.exe \
+  --static-json ./static/META/staticmeta.json \   # 또는 --binary ... (Ghidra 필요)
+  --target putty.exe \
   --out-dir out \
   --profile profile.json \   # 선택: 기본값 덮어쓰기
-  --run-frida --frida-log out/frida.log --summarize-log   # 실제 frida 실행 시
+  --run-frida --frida-log ./.log/frida.log --summarize-log   # 실제 frida 실행 시
 ```
-- 산출물: `out/venomhook.json` `out/venomhook.db` `out/venomhook.md` `out/venomhook.frida.js` (+옵션: frida.log, runtime_summary)
+- 산출물: `reports/hook/venomhook.json` `reports/hook/venomhook.db` `reports/hook/venomhook.md` `frida_scripts/venomhook.js` (+옵션: frida.log, runtime_summary)
 
 ## 프로젝트 구조
 ```
