@@ -23,12 +23,6 @@
 | Python | 3.10+ (venv 사용) |
 | frida | 17.x |
 
-## Ghidra Environment Setup
-```bash
-$GHIDRA_HOME = "$HOME/ghidra_11.4.x_PUBLIC"
-$GHIDRA_HEADLESS = "$GHIDRA_HOME/support"
-```
-
 ## Install
 ```bash
 python -m venv venv
@@ -40,13 +34,29 @@ pip install -e .
 ```
 
 ## Set Up
-```bash
-# Linux
-chmod +x ./setup/env.sh && ./setup/env.sh
-chmod +x ./setup/dirs.sh && ./setup/dirs.sh
 
-# Windows
-powershell -ExecutionPolicy Bypass -File .\setup\dirs.ps1
+### Linux
+```bash
+# 1) Ghidra 환경 변수 자동 설정
+chmod +x ./setup/env.sh && ./setup/env.sh <Ghidra 설치 경로>
+
+# 예시
+# chmod +x ./setup/env.sh && ./setup/env.sh "$HOME/tools/ghidra_11.4.2_PUBLIC"
+
+# 2) 프로젝트용 필수 디렉토리 자동 생성
+chmod +x ./setup/mkdir.sh && ./setup/mkdir.sh
+```
+
+### Windows (PowerShell)
+```powershell
+# 1) Ghidra 환경 변수 자동 설정
+powershell -ExecutionPolicy Bypass -File .\setup\env.ps1 <Ghidra 설치 경로>
+
+# 예시
+# powershell -ExecutionPolicy Bypass -File .\setup\env.ps1 "$env:USERPROFILE\Tools\ghidra_11.4.2_PUBLIC"
+
+# 2) 프로젝트용 필수 디렉토리 자동 생성
+powershell -ExecutionPolicy Bypass -File .\setup\mkdir.ps1
 ```
 
 ## Usage
