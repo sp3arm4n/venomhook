@@ -98,7 +98,7 @@ venomhook offset-hook --hookspec-db ./reports/hook/venomhook.db --target putty.e
 # 프로파일(JSON)로 동적 옵션 기본값 적용
 venomhook offset-hook --hookspec ./reports/hook/venomhook.json --target putty.exe --profile profile.json
 ```
-- 결과물: `venomhook.frida.js` (자동 생성된 Frida 후킹 스크립트).
+- 결과물: `venomhook.js` (자동 생성된 Frida 후킹 스크립트).
 - 주요 옵션: 입력(`--hookspec`/`--hookspec-db` 둘 중 하나), 로그 포맷(`--log-format text|json`), 접두사(`--log-prefix`), 시나리오 알림(`--scenario-message`, `--auto-start-scenario`), 출력 경로(`--out-script`).
 - hexdump 길이(`--hexdump-len`), 호출 카운트 로그 포함.
 - 문자열 로깅: `--string-arg <idx>` 반복 지정 시 해당 인자를 C-string으로 읽어 로그, `--string-ret`는 반환값을 C-string으로 로그, 길이는 `--string-len`으로 제어.
@@ -134,24 +134,58 @@ venomhook offset-e2e \
 ```
 - 산출물: `reports/hook/venomhook.json` `reports/hook/venomhook.db` `reports/hook/venomhook.md` `frida_scripts/venomhook.js` (+옵션: frida.log, runtime_summary)
 
-## 프로젝트 구조
+## 주요 스크립트
 ```
-src/venomhook/
-  models.py          # StaticMeta/EndpointMeta/HookSpec 데이터 모델
-  scoring.py         # 엔드포인트 점수 규칙
-  hookspec_builder.py# HookSpec 생성기
-  static_pipeline.py # StaticMeta -> HookSpec 파이프라인
-  dynamic_pipeline.py# HookSpec -> Frida 스크립트 생성
-  ghidra_runner.py   # Ghidra headless 래퍼
-  orchestrator.py    # Frida 실행 오케스트레이터
-  report.py          # HookSpec 마크다운 리포트
-  runtime_report.py  # Frida 로그(MD/HTML) 요약기 (문자열 샘플 포함)
-  config.py          # 프로파일 로더
-  store.py           # JSON/SQLite 로드·세이브 유틸
-  cli.py             # venomhook offset-static / offset-hook 엔트리포인트
-ghidra_scripts/export_staticmeta.py   # StaticMeta JSON을 내보내는 Ghidra postScript 예시
-examples/static_meta.sample.json # 샘플 StaticMeta
-tests/               # 간단한 파이프라인 테스트
+venomhook/
+│
+├── .log/                                 # Frida 로그
+│
+├── setup/                                # 환경 설정
+│   ├── env.ps1
+│   ├── env.sh
+│   ├── mkdir.ps1
+│   └── mkdir.sh
+│
+├── ghidra_scripts/
+│   └── export_staticmeta.py              # StaticMeta JSON을 내보내는 Ghidra postScript
+│
+├── src/
+│   └── venomhook/
+│       ├── models.py                     # StaticMeta/EndpointMeta/HookSpec 데이터 모델
+│       ├── scoring.py                    # 엔드포인트 점수 규칙
+│       ├── hookspec_builder.py           # HookSpec 생성기
+│       ├── static_pipeline.py            # StaticMeta -> HookSpec 파이프라인
+│       ├── dynamic_pipeline.py           # HookSpec -> Frida 스크립트 생성
+│       ├── ghidra_runner.py              # Ghidra headless 래퍼
+│       ├── orchestrator.py               # Frida 실행 오케스트레이터
+│       ├── report.py                     # HookSpec 마크다운 리포트
+│       ├── runtime_report.py             # Frida 로그(MD/HTML) 요약기 (문자열 샘플 포함)
+│       ├── config.py                     # 프로파일 로더
+│       ├── store.py                      # JSON/SQLite 로드·세이브 유틸
+│       └── cli.py                        # venomhook offset-static / offset-hook 엔트리포인트
+│
+├── static/
+│   ├── frida_manager.py
+│   ├── META/
+│   │   └── staticmeta.json               # StaticMeta JSON 파일
+│   └── project/                          # ghidra 정적 분석 파일
+│
+├── frida_scripts/
+│   └── venomhook.js                      # Frida Hooking 스크립트
+│
+├── reports/
+│   ├── hook/                             # HookSpec
+│   │   ├── venomhook.json
+│   │   ├── venomhook.db
+│   │   └── venomhook.md
+│   ├── runtime_summary.md
+│   └── runtime_summary.html
+│
+└── sample/
+    ├── examples/
+    │   └── static_meta.sample.json       # 샘플 StaticMeta
+    ├── tests/                            # 간단한 파이프라인 테스트
+    └── putty.exe                         # 테스트용 EXE 파일
 ```
 
 ## 개발/테스트
