@@ -23,16 +23,6 @@
 | Python | 3.10+ (venv 사용) |
 | frida | 17.x |
 
-## Install
-```bash
-python -m venv venv
-source venv/bin/activate  # Linux
-.\venv\Scripts\Activate.ps1   # Windows PowerShell
-
-# 개발 모드로 해당 프로젝트를 패키징하여 설치
-pip install -e .
-```
-
 ## Set Up
 
 ### Linux
@@ -57,6 +47,16 @@ powershell -ExecutionPolicy Bypass -File .\setup\env.ps1 <Ghidra 설치 경로>
 
 # 2) 프로젝트용 필수 디렉토리 자동 생성
 powershell -ExecutionPolicy Bypass -File .\setup\mkdir.ps1
+```
+
+## Install
+```bash
+python -m venv venv
+source venv/bin/activate  # Linux
+.\venv\Scripts\Activate.ps1   # Windows PowerShell
+
+# 개발 모드로 해당 프로젝트를 패키징하여 설치
+pip install -e .
 ```
 
 ## Usage
@@ -90,10 +90,10 @@ venomhook offset-static --static-json ./static/META/staticmeta.json --profile pr
 ### Step 3. HookSpec → Frida Script
 ```bash
 # Create from JSON file
-venomhook offset-hook --hookspec ./reports/hook/venomhook.json --target putty.exe --out-script ./frida_scripts/venomhook.frida.js --log-format json --log-prefix "[venomhook]" --scenario-message "start" --auto-start-scenario --hexdump-len 64 --string-arg 0 --string-ret --string-len 128 --scan-size 4096 --retry-attach 2 --print-script
+venomhook offset-hook --hookspec ./reports/hook/venomhook.json --target putty.exe --out-script ./frida_scripts/venomhook.js --log-format json --log-prefix "[venomhook]" --scenario-message "start" --auto-start-scenario --hexdump-len 64 --string-arg 0 --string-ret --string-len 128 --scan-size 4096 --retry-attach 2 --print-script
 
 # Create from DB file
-venomhook offset-hook --hookspec-db ./reports/hook/venomhook.db --target putty.exe --out-script ./frida_scripts/venomhook.frida.js --log-format json --log-prefix "[venomhook]" --scenario-message "start" --auto-start-scenario --hexdump-len 64 --string-arg 0 --string-ret --string-len 128 --scan-size 4096 --retry-attach 2 --print-script
+venomhook offset-hook --hookspec-db ./reports/hook/venomhook.db --target putty.exe --out-script ./frida_scripts/venomhook.js --log-format json --log-prefix "[venomhook]" --scenario-message "start" --auto-start-scenario --hexdump-len 64 --string-arg 0 --string-ret --string-len 128 --scan-size 4096 --retry-attach 2 --print-script
 
 # 프로파일(JSON)로 동적 옵션 기본값 적용
 venomhook offset-hook --hookspec ./reports/hook/venomhook.json --target putty.exe --profile profile.json
@@ -190,7 +190,7 @@ venomhook/
 
 ## 개발/테스트
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests
+PYTHONPATH=src python3 -m unittest discover -s ./sample/tests
 ```
 
 ## Architect
