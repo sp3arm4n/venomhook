@@ -6,3 +6,4 @@ static/META
 reports/
 frida_scripts/
 .log/
+.DS_Store

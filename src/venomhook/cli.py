@@ -127,7 +127,7 @@ def main(argv: list[str] | None = None) -> None:
         "--out-script",
         "-o",
         type=Path,
-        default=Path("venomhook.frida.js"),
+        default=Path("venomhook.js"),
         help="Where to write the generated Frida script",
     )
     hook_parser.add_argument(
@@ -199,7 +199,7 @@ def main(argv: list[str] | None = None) -> None:
     hook_parser.set_defaults(func=cmd_offset_hook)
 
     run_parser = subparsers.add_parser("offset-run", help="Run Frida with generated script")
-    run_parser.add_argument("--script", "-s", type=Path, required=True, help="Frida script to load (e.g., venomhook.frida.js)")
+    run_parser.add_argument("--script", "-s", type=Path, required=True, help="Frida script to load (e.g., venomhook.js)")
     run_parser.add_argument(
         "--target",
         "-t",
@@ -443,7 +443,7 @@ def cmd_offset_e2e(args: argparse.Namespace) -> None:
     hook_json = out_dir / "venomhook.json"
     hook_db = out_dir / "venomhook.db"
     hook_md = out_dir / "venomhook.md"
-    frida_js = out_dir / "venomhook.frida.js"
+    frida_js = out_dir / "venomhook.js"
 
     static_pipe = StaticPipeline(top_n=args.top, score_config=score_cfg, sig_max_bytes=args.sig_max_bytes, ghidra_runner=ghidra_runner)
     hooks = static_pipe.run(static_meta=args.static_json, binary=args.binary, out=hook_json, report_md=hook_md, ghidra_runner=ghidra_runner)

@@ -20,7 +20,7 @@
 | OS | Windows & Linux |
 | Java | OpenJDK 21 |
 | Ghidra | Ghidra 11.4.x |
-| Python | 3.10+ (venv 사용) |
+| Python | 3.12+ (venv 사용) |
 | frida | 17.x |
 
 ## Set Up
@@ -134,7 +134,7 @@ venomhook offset-e2e \
 ```
 - 산출물: `reports/hook/venomhook.json` `reports/hook/venomhook.db` `reports/hook/venomhook.md` `frida_scripts/venomhook.js` (+옵션: frida.log, runtime_summary)
 
-## 디렉토리 구조
+## 최종 디렉토리 구조
 ```
 venomhook/
 │
