@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Iterable
 
 from venomhook.models import HookSpec
 from venomhook.store import HookSpecStore
+
+
+def _js_str(value: str | None) -> str:
+    """Encode a Python string as a safe JS string literal (handles quotes/backslashes/newlines)."""
+    return json.dumps(value if value is not None else "")
 
 
 class DynamicPipeline:
@@ -38,22 +44,28 @@ class DynamicPipeline:
         hooks = list(specs)
         blocks = [self._render_hook_block(spec) for spec in hooks]
         calls = [f"hook_{self._safe_name(spec)}();" for spec in hooks]
-        scenario_block = []
+        scenario_block: list[str] = []
         if self.scenario_message:
             scenario_block = [
                 "",
-                f'function runScenario() {{ send({{type: "scenario", message: "{self.scenario_message}"}}); }}',
+                "function runScenario() { send({type: \"scenario\", message: "
+                + _js_str(self.scenario_message)
+                + "}); }",
             ]
         main_calls = ["  " + call for call in calls]
         if self.scenario_message and self.auto_start_scenario:
             main_calls.append("  runScenario();")
+
+        # Comment line — sanitize newlines so JS comment doesn't break
+        target_for_comment = (self.target or "").replace("\n", " ").replace("\r", " ")
+
         return "\n".join(
             [
                 "// Auto-generated Frida script",
-                f"// target: {self.target}",
+                f"// target: {target_for_comment}",
                 "",
-                f'const LOG_FORMAT = "{self.log_format}";',
-                f'const LOG_PREFIX = "{self.log_prefix}";',
+                f"const LOG_FORMAT = {_js_str(self.log_format)};",
+                f"const LOG_PREFIX = {_js_str(self.log_prefix)};",
                 "const ptrToHex = function (ptrVal) {",
                 "  return ptrVal ? ptrVal.toString(16) : '0x0';",
                 "};",
@@ -70,6 +82,23 @@ class DynamicPipeline:
                 "    const msg = detail && detail.msg ? detail.msg : '';",
                 "    console.log(`${LOG_PREFIX}[${event}] ${hook} ${msg}`);",
                 "  }",
+                "}",
+                "",
+                # Helper: sigMatchesAt — compare bytes at addr to space-separated hex sig (?? = wildcard)
+                "function sigMatchesAt(addr, sig) {",
+                "  const tokens = sig.split(/\\s+/).filter(function (t) { return t.length > 0; });",
+                "  if (tokens.length === 0) return false;",
+                "  let bytes;",
+                "  try {",
+                "    bytes = new Uint8Array(addr.readByteArray(tokens.length));",
+                "  } catch (e) {",
+                "    return false;",
+                "  }",
+                "  for (let i = 0; i < tokens.length; i++) {",
+                "    if (tokens[i] === '??') continue;",
+                "    if (bytes[i] !== parseInt(tokens[i], 16)) return false;",
+                "  }",
+                "  return true;",
                 "}",
                 "",
                 *scenario_block,
@@ -98,6 +127,8 @@ class DynamicPipeline:
         import json as _json  # local import to avoid touching module-level imports on this branch
 
         name = self._safe_name(spec)
+        name_lit = _js_str(name)
+        module_lit = _js_str(spec.module)
         offset_hex = hex(spec.offset)
         log_args = spec.hook.onEnter.log_args or []
         hexdump_args = spec.hook.onEnter.hexdump_args or []
@@ -114,36 +145,107 @@ class DynamicPipeline:
         lines = [
             f"function hook_{name}() {{",
             f"  const moduleCandidates = {candidates_js};",
-            "  let base = null;",
+            "  let mod = null;",
             "  let moduleName = null;",
             "  for (const candidate of moduleCandidates) {",
-            "    const found = Module.findBaseAddress(candidate);",
-            "    if (found) { base = found; moduleName = candidate; break; }",
+            "    try { mod = Process.getModuleByName(candidate); } catch (e) {}",
+            "    if (mod) { moduleName = candidate; break; }",
             "  }",
-            "  if (!base) {",
+            "  if (!mod) {",
             '    logEvent("error", moduleCandidates[0], {msg: "module not loaded; tried " + moduleCandidates.join(", ")});',
             "    return;",
             "  }",
+            "  const base = mod.base;",
             f"  let target = base.add({offset_hex});",
         ]
 
         if spec.sig:
+            sig_lit = _js_str(spec.sig)
             lines.extend(
                 [
-                    f'  const sig = "{spec.sig}";',
-                    "  if (!target.readByteArray(1)) {",
-                    "    const scanLen = SCAN_SIZE > 0 ? SCAN_SIZE : Module.getBaseSize(moduleName);",
-                    "    Memory.scan(base, scanLen, sig, {",
-                    "      onMatch(addr) {",
-                    "        target = addr;",
-                    '        logEvent("sigmatch", moduleName, {addr: ptrToHex(target)});',
-                    "      },",
-                    "      onError(reason) {",
-                    '        logEvent("error", moduleName, {msg: `signature scan error: ${reason}`});',
-                    "      },",
-                    "      onComplete() {},",
-                    "    });",
+                    f"  const sig = {sig_lit};",
+                    # Trigger fallback when bytes at base+offset don't match expected sig
+                    "  if (!sigMatchesAt(target, sig)) {",
+                    "    const scanLen = SCAN_SIZE > 0 ? SCAN_SIZE : mod.size;",
+                    "    try {",
+                    "      const matches = Memory.scanSync(base, scanLen, sig);",
+                    "      if (matches && matches.length > 0) {",
+                    "        target = matches[0].address;",
+                    f"        logEvent(\"sigmatch\", moduleName, {{hook: {name_lit}, addr: ptrToHex(target)}});",
+                    "      } else {",
+                    f"        logEvent(\"error\", moduleName, {{hook: {name_lit}, msg: \"signature not found in module\"}});",
+                    "      }",
+                    "    } catch (e) {",
+                    f"      logEvent(\"error\", moduleName, {{hook: {name_lit}, msg: \"signature scan error: \" + e}});",
+                    "    }",
                     "  }",
+                ]
+            )
+
+        # ----- onEnter body -----
+        on_enter_lines: list[str] = [
+            # Counter increments ONCE per call (was bugged: incremented per arg)
+            f"            hookStats[{name_lit}] = (hookStats[{name_lit}] || 0) + 1;",
+            f"            const _count = hookStats[{name_lit}];",
+        ]
+        for index in log_args:
+            on_enter_lines.append(
+                f'            logEvent("enter", {name_lit}, '
+                f"{{arg: {index}, value: ptrToHex(args[{index}]), count: _count}});"
+            )
+        for index in hexdump_args:
+            on_enter_lines.extend(
+                [
+                    "            try {",
+                    f'              logEvent("hexdump", {name_lit}, '
+                    f"{{arg: {index}, msg: hexdump(args[{index}], {{length: HEXDUMP_LEN}})}});",
+                    "            } catch (e) {",
+                    f'              logEvent("error", {name_lit}, '
+                    f'{{msg: "hexdump failed for arg{index}: " + e}});',
+                    "            }",
+                ]
+            )
+        for index in string_args:
+            on_enter_lines.extend(
+                [
+                    "            try {",
+                    f"              const s = Memory.readCString(args[{index}], STRING_LEN);",
+                    f'              logEvent("string", {name_lit}, {{arg: {index}, msg: s}});',
+                    "            } catch (e) {",
+                    f'              logEvent("error", {name_lit}, '
+                    f'{{msg: "string read failed for arg{index}: " + e}});',
+                    "            }",
+                ]
+            )
+
+        # ----- onLeave body -----
+        on_leave_lines: list[str] = []
+        if log_ret:
+            on_leave_lines.append(
+                f'            logEvent("leave", {name_lit}, {{ret: ptrToHex(retval)}});'
+            )
+        if hexdump_ret:
+            on_leave_lines.extend(
+                [
+                    "            try {",
+                    f'              logEvent("hexdump", {name_lit}, '
+                    f"{{msg: hexdump(retval, {{length: HEXDUMP_LEN}})}});",
+                    "            } catch (e) {",
+                    f'              logEvent("error", {name_lit}, '
+                    f'{{msg: "hexdump failed for retval: " + e}});',
+                    "            }",
+                ]
+            )
+        if string_ret:
+            on_leave_lines.extend(
+                [
+                    "            try {",
+                    "              const s = Memory.readCString(retval, STRING_LEN);",
+                    f'              logEvent("string", {name_lit}, {{msg: s}});',
+                    "            } catch (e) {",
+                    f'              logEvent("error", {name_lit}, '
+                    f'{{msg: "string read failed for retval: " + e}});',
+                    "            }",
                 ]
             )
 
@@ -155,77 +257,17 @@ class DynamicPipeline:
                 "      try {",
                 "        Interceptor.attach(target, {",
                 "          onEnter(args) {",
-            ]
-        )
-
-        for index in log_args:
-            lines.extend(
-                [
-                    f'        hookStats["{name}"] = (hookStats["{name}"] || 0) + 1;',
-                    f'        logEvent("enter", "{name}", {{arg: {index}, value: ptrToHex(args[{index}]), count: hookStats["{name}"]}});',
-                ]
-            )
-        for index in hexdump_args:
-            lines.extend(
-                [
-                    f"        try {{",
-                    f'          logEvent("hexdump", "{name}", {{arg: {index}, msg: hexdump(args[{index}], {{length: HEXDUMP_LEN}})}});',
-                    "        } catch (e) {",
-                    f'          logEvent("error", "{name}", {{msg: "hexdump failed for arg{index}: " + e}});',
-                    f"        }}",
-                ]
-            )
-        for index in string_args:
-            lines.extend(
-                [
-                    "        try {",
-                    f'          const s = Memory.readCString(args[{index}], STRING_LEN);',
-                    f'          logEvent("string", "{name}", {{arg: {index}, msg: s}});',
-                    "        } catch (e) {",
-                    f'          logEvent("error", "{name}", {{msg: "string read failed for arg{index}: " + e}});',
-                    "        }",
-                ]
-            )
-
-        lines.extend(
-            [
-                "      },",
-                "      onLeave(retval) {",
-            ]
-        )
-
-        if log_ret:
-            lines.append(f'        logEvent("leave", "{name}", {{ret: ptrToHex(retval)}});')
-        if hexdump_ret:
-            lines.extend(
-                [
-                    "        try {",
-                    f'          logEvent("hexdump", "{name}", {{msg: hexdump(retval, {{length: HEXDUMP_LEN}})}});',
-                    "        } catch (e) {",
-                    '          logEvent("error", "{name}", {msg: "hexdump failed for retval: " + e});',
-                    "        }",
-                ]
-            )
-        if string_ret:
-            lines.extend(
-                [
-                    "        try {",
-                    f'          const s = Memory.readCString(retval, STRING_LEN);',
-                    f'          logEvent("string", "{name}", {{msg: s}});',
-                    "        } catch (e) {",
-                    f'          logEvent("error", "{name}", {{msg: "string read failed for retval: " + e}});',
-                    "        }",
-                ]
-            )
-
-        lines.extend(
-            [
+                *on_enter_lines,
+                "          },",
+                "          onLeave(retval) {",
+                *on_leave_lines,
                 "          },",
                 "        });",
-                f'        logEvent("hooked", "{name}", {{addr: ptrToHex(target)}});',
+                f'        logEvent("hooked", {name_lit}, {{addr: ptrToHex(target)}});',
                 "        break;",
                 "      } catch (e) {",
-                f'        logEvent("error", "{name}", {{msg: "failed to hook attempt " + attempt + ": " + e}});',
+                f'        logEvent("error", {name_lit}, '
+                '{msg: "failed to hook attempt " + attempt + ": " + e});',
                 "        if (attempt === RETRY_ATTACH) {",
                 "          throw e;",
                 "        }",
@@ -233,7 +275,8 @@ class DynamicPipeline:
                 "      }",
                 "    }",
                 "  } catch (e) {",
-                f'    logEvent("error", "{name}", {{msg: "failed to hook: " + e}});',
+                f'    logEvent("error", {name_lit}, '
+                '{msg: "failed to hook: " + e});',
                 "  }",
                 "}",
             ]
