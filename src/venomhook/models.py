@@ -21,6 +21,7 @@ class BinaryInfo:
     hash: Optional[str] = None
     arch: Optional[str] = None
     image_base: Optional[int] = None
+    os: Optional[str] = None  # "windows" | "linux" | "android" | "macos" | "ios" | None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "BinaryInfo":
@@ -29,12 +30,16 @@ class BinaryInfo:
             hash=data.get("hash"),
             arch=data.get("arch"),
             image_base=_parse_hex_int(data.get("image_base")),
+            os=data.get("os"),
         )
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
         if self.image_base is not None:
             result["image_base"] = hex(self.image_base)
+        # Drop os when None to keep parity with existing JSON shapes
+        if self.os is None:
+            result.pop("os", None)
         return result
 
 
