@@ -25,6 +25,7 @@ STATIC_DEFAULTS = {
     "score_auth": 15,
     "score_url": 10,
     "score_crypto": 10,
+    "score_jni": 30,
     "score_callers_per": 2,
     "score_callers_cap": 10,
     "score_callees_per": 1,
@@ -79,6 +80,7 @@ def main(argv: list[str] | None = None) -> None:
     static_parser.add_argument("--score-auth", type=int, default=15, help="Weight: auth keywords (per distinct)")
     static_parser.add_argument("--score-url", type=int, default=10, help="Weight: url/http strings")
     static_parser.add_argument("--score-crypto", type=int, default=10, help="Weight: crypto keywords")
+    static_parser.add_argument("--score-jni", type=int, default=30, help="Weight: JNI / Android (Java_* symbol or JNI imports)")
     static_parser.add_argument("--score-callers-per", type=int, default=2, help="Weight per caller (capped)")
     static_parser.add_argument("--score-callers-cap", type=int, default=10, help="Cap for caller weight")
     static_parser.add_argument("--score-callees-per", type=int, default=1, help="Weight per callee (capped)")
@@ -234,6 +236,7 @@ def main(argv: list[str] | None = None) -> None:
     e2e_parser.add_argument("--score-auth", type=int, default=STATIC_DEFAULTS["score_auth"], help="Weight: auth keywords")
     e2e_parser.add_argument("--score-url", type=int, default=STATIC_DEFAULTS["score_url"], help="Weight: url/http strings")
     e2e_parser.add_argument("--score-crypto", type=int, default=STATIC_DEFAULTS["score_crypto"], help="Weight: crypto keywords")
+    e2e_parser.add_argument("--score-jni", type=int, default=STATIC_DEFAULTS["score_jni"], help="Weight: JNI / Android")
     e2e_parser.add_argument("--score-callers-per", type=int, default=STATIC_DEFAULTS["score_callers_per"], help="Weight per caller")
     e2e_parser.add_argument("--score-callers-cap", type=int, default=STATIC_DEFAULTS["score_callers_cap"], help="Cap for caller weight")
     e2e_parser.add_argument("--score-callees-per", type=int, default=STATIC_DEFAULTS["score_callees_per"], help="Weight per callee")
@@ -276,6 +279,7 @@ def cmd_offset_static(args: argparse.Namespace) -> None:
         auth_weight=args.score_auth,
         url_weight=args.score_url,
         crypto_weight=args.score_crypto,
+        jni_weight=args.score_jni,
         callers_per=args.score_callers_per,
         callers_cap=args.score_callers_cap,
         callees_per=args.score_callees_per,
@@ -350,6 +354,7 @@ def apply_static_profile(args: argparse.Namespace, profile: dict) -> None:
         "auth_weight": "score_auth",
         "url_weight": "score_url",
         "crypto_weight": "score_crypto",
+        "jni_weight": "score_jni",
         "callers_per": "score_callers_per",
         "callers_cap": "score_callers_cap",
         "callees_per": "score_callees_per",
@@ -422,6 +427,7 @@ def cmd_offset_e2e(args: argparse.Namespace) -> None:
         auth_weight=args.score_auth,
         url_weight=args.score_url,
         crypto_weight=args.score_crypto,
+        jni_weight=args.score_jni,
         callers_per=args.score_callers_per,
         callers_cap=args.score_callers_cap,
         callees_per=args.score_callees_per,

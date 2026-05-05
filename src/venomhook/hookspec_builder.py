@@ -20,6 +20,21 @@ def build_hookspecs(
     sig_max_bytes: int = 12,
 ) -> list[HookSpec]:
     fn_by_rva = {fn.rva: fn for fn in functions or [] if fn.rva is not None}
+    seen_safe_names: set[str] = set()
+
+    def _make_name(ep: EndpointMeta, fn: FunctionMeta | None) -> str:
+        """Prefer reason, then function name, and uniquify in sanitized form."""
+
+        def _to_safe(value: str) -> str:
+            return "".join(ch if ch.isalnum() else "_" for ch in value)
+
+        base = ep.reason[0] if ep.reason else (fn.name if fn and fn.name else f"endpoint_{hex(ep.rva)}")
+        safe = _to_safe(base)
+        if safe in seen_safe_names:
+            base = f"{base}_{hex(ep.rva)}"
+            safe = _to_safe(base)
+        seen_safe_names.add(safe)
+        return base
     hooks: list[HookSpec] = []
     for ep in endpoints:
         fn = fn_by_rva.get(ep.rva)
@@ -29,7 +44,7 @@ def build_hookspecs(
             onLeave=OnLeaveHook(log_ret=True, hexdump_ret=False),
         )
         proto = HookProto(ret=None, args=[])
-        name = ep.reason[0] if ep.reason else f"endpoint_{hex(ep.rva)}"
+        name = _make_name(ep, fn)
         hooks.append(
             HookSpec(
                 module=ep.module,
