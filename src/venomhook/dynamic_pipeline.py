@@ -124,6 +124,8 @@ class DynamicPipeline:
         return f"offset_{hex(spec.offset)[2:]}"
 
     def _render_hook_block(self, spec: HookSpec) -> str:
+        import json as _json  # local import to avoid touching module-level imports on this branch
+
         name = self._safe_name(spec)
         name_lit = _js_str(name)
         module_lit = _js_str(spec.module)
@@ -135,14 +137,22 @@ class DynamicPipeline:
         string_args = self.string_args
         string_ret = self.string_ret
 
+        # Build [primary, *aliases] candidate list. JSON-encoded to safely embed
+        # arbitrary names (handles quotes / backslashes / unicode in module names).
+        candidates = [spec.module, *spec.module_aliases]
+        candidates_js = _json.dumps(candidates)
+
         lines = [
             f"function hook_{name}() {{",
-            f"  const moduleName = {module_lit};",
+            f"  const moduleCandidates = {candidates_js};",
             "  let mod = null;",
-            "  try {",
-            "    mod = Process.getModuleByName(moduleName);",
-            "  } catch (e) {",
-            f'    logEvent("error", moduleName, {{msg: "module not loaded"}});',
+            "  let moduleName = null;",
+            "  for (const candidate of moduleCandidates) {",
+            "    try { mod = Process.getModuleByName(candidate); } catch (e) {}",
+            "    if (mod) { moduleName = candidate; break; }",
+            "  }",
+            "  if (!mod) {",
+            '    logEvent("error", moduleCandidates[0], {msg: "module not loaded; tried " + moduleCandidates.join(", ")});',
             "    return;",
             "  }",
             "  const base = mod.base;",

@@ -208,6 +208,12 @@ def main(argv: list[str] | None = None) -> None:
         type=Path,
         help="Profile JSON for dynamic options (hexdump_len, string args, scan_size, etc.)",
     )
+    hook_parser.add_argument(
+        "--module-alias",
+        action="append",
+        help="Additional module name candidate for Frida lookup (can repeat). "
+        "Useful for ELF version suffixes (libfoo.so.1.2.3) or Mach-O variants.",
+    )
     hook_parser.set_defaults(func=cmd_offset_hook)
 
     run_parser = subparsers.add_parser("offset-run", help="Run Frida with generated script")
@@ -272,6 +278,11 @@ def main(argv: list[str] | None = None) -> None:
     e2e_parser.add_argument("--string-len", type=int, default=DYNAMIC_DEFAULTS["string_len"], help="String length")
     e2e_parser.add_argument("--scan-size", type=int, help="Signature scan length")
     e2e_parser.add_argument("--retry-attach", type=int, default=DYNAMIC_DEFAULTS["retry_attach"], help="Attach retry count")
+    e2e_parser.add_argument(
+        "--module-alias",
+        action="append",
+        help="Additional module name candidate for Frida lookup (can repeat).",
+    )
     e2e_parser.add_argument("--frida-path", type=str, default="frida", help="frida executable path")
     e2e_parser.add_argument("--frida-log", type=Path, help="frida stdout/stderr log path")
     e2e_parser.add_argument("--run-frida", action="store_true", help="Run frida (otherwise skip)")
@@ -375,6 +386,12 @@ def cmd_offset_hook(args: argparse.Namespace) -> None:
     profile_data = load_profile(args.profile) if getattr(args, "profile", None) else {}
     apply_dynamic_profile(args, profile_data)
     specs = HookSpecStore.load(hookspec_path)
+    # Apply CLI-provided module aliases to every spec, preserving any aliases
+    # already attached during HookSpec construction.
+    extra_aliases = getattr(args, "module_alias", None) or []
+    if extra_aliases:
+        for spec in specs:
+            spec.module_aliases = list(spec.module_aliases) + extra_aliases
     pipeline = DynamicPipeline(
         target=args.target,
         log_format=args.log_format,
@@ -509,6 +526,10 @@ def cmd_offset_e2e(args: argparse.Namespace) -> None:
 
     static_pipe = StaticPipeline(top_n=args.top, score_config=score_cfg, sig_max_bytes=args.sig_max_bytes, ghidra_runner=ghidra_runner)
     hooks = static_pipe.run(static_meta=args.static_json, binary=args.binary, out=hook_json, report_md=hook_md, ghidra_runner=ghidra_runner)
+    extra_aliases = getattr(args, "module_alias", None) or []
+    if extra_aliases:
+        for spec in hooks:
+            spec.module_aliases = list(spec.module_aliases) + extra_aliases
     HookSpecStore.save(hook_db, hooks)
 
     apply_dynamic_profile(args, profile_data)

@@ -61,10 +61,20 @@ class HookSpecSqliteStore:
                     tags TEXT,
                     proto TEXT,
                     hook TEXT,
+                    module_aliases TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
+            # Defensive migration: existing DBs created before module_aliases.
+            # ALTER TABLE ADD COLUMN is idempotent-friendly via try/except.
+            try:
+                conn.execute(
+                    f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN module_aliases TEXT"
+                )
+            except sqlite3.OperationalError:
+                # Column already present (fresh schema or prior migration)
+                pass
             conn.commit()
         finally:
             conn.close()
@@ -77,8 +87,8 @@ class HookSpecSqliteStore:
                 conn.execute(
                     f"""
                     INSERT INTO {self.TABLE_NAME}
-                    (module, arch, offset, sig, name, tags, proto, hook)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (module, arch, offset, sig, name, tags, proto, hook, module_aliases)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         spec.module,
@@ -89,6 +99,7 @@ class HookSpecSqliteStore:
                         json.dumps(spec.tags),
                         json.dumps(spec.proto.to_dict() if spec.proto else None),
                         json.dumps(spec.hook.to_dict()),
+                        json.dumps(list(spec.module_aliases)) if spec.module_aliases else None,
                     ),
                 )
             conn.commit()
@@ -100,7 +111,7 @@ class HookSpecSqliteStore:
         try:
             rows = conn.execute(
                 f"""
-                SELECT module, arch, offset, sig, name, tags, proto, hook
+                SELECT module, arch, offset, sig, name, tags, proto, hook, module_aliases
                 FROM {self.TABLE_NAME}
                 ORDER BY id ASC
                 """
@@ -109,7 +120,7 @@ class HookSpecSqliteStore:
         finally:
             conn.close()
         specs: list[HookSpec] = []
-        for module, arch, offset, sig, name, tags, proto, hook in rows:
+        for module, arch, offset, sig, name, tags, proto, hook, module_aliases in rows:
             spec_dict = {
                 "module": module,
                 "arch": arch,
@@ -119,6 +130,7 @@ class HookSpecSqliteStore:
                 "tags": json.loads(tags) if tags else [],
                 "proto": json.loads(proto) if proto else None,
                 "hook": json.loads(hook) if hook else {},
+                "module_aliases": json.loads(module_aliases) if module_aliases else [],
             }
             specs.append(HookSpec.from_dict(spec_dict))
         return specs
