@@ -209,7 +209,7 @@ class HookConfig:
 
 @dataclass
 class HookSpec:
-    module: str
+    module: str  # primary module name (Frida tries this first)
     arch: str
     offset: int
     sig: Optional[str] = None
@@ -217,6 +217,11 @@ class HookSpec:
     tags: list[str] = field(default_factory=list)
     proto: Optional[HookProto] = None
     hook: HookConfig = field(default_factory=HookConfig)
+    # Alternate module names tried in order if `module` doesn't resolve.
+    # Useful for ELF version suffixes (libfoo.so vs libfoo.so.1.2.3),
+    # Mach-O dylib variants (libfoo.dylib vs libfoo.1.dylib), and PE/wine
+    # name differences (app.exe vs app).
+    module_aliases: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "HookSpec":
@@ -235,6 +240,7 @@ class HookSpec:
             tags=data.get("tags", []),
             proto=proto,
             hook=hook_cfg,
+            module_aliases=list(data.get("module_aliases", [])),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -249,6 +255,9 @@ class HookSpec:
         }
         if self.proto:
             payload["proto"] = self.proto.to_dict()
+        # Omit when empty to keep parity with pre-PR-4 JSON shapes
+        if self.module_aliases:
+            payload["module_aliases"] = list(self.module_aliases)
         return payload
 
 
