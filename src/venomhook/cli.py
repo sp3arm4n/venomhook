@@ -6,6 +6,12 @@ import sys
 from pathlib import Path
 
 from venomhook import __version__
+from venomhook.apk_extractor import (
+    ApkExtractError,
+    extract_apk_meta,
+    extract_native_lib,
+    select_abi,
+)
 from venomhook.dynamic_pipeline import DynamicPipeline
 from venomhook.ghidra_runner import GhidraRunner
 from venomhook.orchestrator import run_frida
@@ -55,9 +61,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    static_parser = subparsers.add_parser("offset-static", help="Build HookSpec from StaticMeta JSON or binary (Ghidra)")
+    static_parser = subparsers.add_parser("offset-static", help="Build HookSpec from StaticMeta JSON, binary, or APK (Ghidra)")
     static_parser.add_argument("--static-json", "-s", type=Path, help="Path to StaticMeta JSON")
     static_parser.add_argument("--binary", "-b", type=Path, help="Path to binary (Ghidra headless)")
+    static_parser.add_argument("--apk", type=Path, help="Path to Android APK; a native .so is extracted and analyzed via Ghidra")
+    static_parser.add_argument("--abi", type=str, default="auto", help='ABI to extract from APK ("auto"/"arm64-v8a"/"armeabi-v7a"/"x86_64"/"x86")')
+    static_parser.add_argument("--apk-lib", type=str, help="Specific .so basename within the chosen ABI (default: first available)")
+    static_parser.add_argument("--apk-extract-dir", type=Path, help="Where to write the extracted .so (default: temp dir)")
     static_parser.add_argument("--out", "-o", type=Path, default=Path("venomhook.json"), help="Output HookSpec JSON")
     static_parser.add_argument(
         "--out-db",
@@ -223,9 +233,13 @@ def main(argv: list[str] | None = None) -> None:
     runtime_parser.add_argument("--out-html", type=Path, help="HTML summary output")
     runtime_parser.set_defaults(func=cmd_offset_report_runtime)
 
-    e2e_parser = subparsers.add_parser("offset-e2e", help="Run static->hook->frida script pipeline (optional frida run)")
+    e2e_parser = subparsers.add_parser("offset-e2e", help="Run static->hook->frida script pipeline (optional frida run); supports APK input")
     e2e_parser.add_argument("--static-json", "-s", type=Path, help="Path to StaticMeta JSON")
     e2e_parser.add_argument("--binary", "-b", type=Path, help="Path to binary (Ghidra headless)")
+    e2e_parser.add_argument("--apk", type=Path, help="Path to Android APK; a native .so is extracted and analyzed via Ghidra")
+    e2e_parser.add_argument("--abi", type=str, default="auto", help='ABI to extract from APK ("auto" prefers arm64-v8a)')
+    e2e_parser.add_argument("--apk-lib", type=str, help="Specific .so basename to extract (default: first available)")
+    e2e_parser.add_argument("--apk-extract-dir", type=Path, help="Where to write the extracted .so (default: <out-dir>/extracted)")
     e2e_parser.add_argument("--target", "-t", type=str, required=True, help="Target module/process name")
     e2e_parser.add_argument("--out-dir", type=Path, default=Path("out"), help="Output directory for artifacts")
     e2e_parser.add_argument("--profile", type=Path, help="Profile JSON for static/dynamic defaults")
@@ -270,7 +284,48 @@ def main(argv: list[str] | None = None) -> None:
     args.func(args)
 
 
+def _resolve_apk_to_binary(args: argparse.Namespace, default_extract_dir: Path | None = None) -> None:
+    """If --apk is set, extract a .so and route it through args.binary.
+
+    Mutually exclusive with --binary and --static-json. Raises SystemExit on conflict
+    or extraction failure.
+    """
+    apk_path = getattr(args, "apk", None)
+    if not apk_path:
+        return
+
+    if getattr(args, "binary", None):
+        raise SystemExit("--apk and --binary are mutually exclusive")
+    if getattr(args, "static_json", None):
+        raise SystemExit("--apk and --static-json are mutually exclusive")
+
+    try:
+        meta = extract_apk_meta(apk_path)
+        chosen_abi = select_abi(meta, getattr(args, "abi", "auto") or "auto")
+        extract_dir = (
+            getattr(args, "apk_extract_dir", None)
+            or default_extract_dir
+            or Path(__import__("tempfile").mkdtemp(prefix="venomhook_apk_"))
+        )
+        so_path = extract_native_lib(
+            apk_path,
+            abi=chosen_abi,
+            lib_name=getattr(args, "apk_lib", None),
+            dest_dir=extract_dir,
+        )
+    except ApkExtractError as e:
+        raise SystemExit(f"APK extraction failed: {e}") from e
+
+    logging.info(
+        "APK %s -> abi=%s lib=%s extracted to %s",
+        meta.name, chosen_abi, so_path.name, extract_dir,
+    )
+    # Route through the existing --binary path. Ghidra options must still be set.
+    args.binary = so_path
+
+
 def cmd_offset_static(args: argparse.Namespace) -> None:
+    _resolve_apk_to_binary(args)
     profile_data = load_profile(args.profile) if getattr(args, "profile", None) else {}
     apply_static_profile(args, profile_data)
     score_cfg = ScoreConfig(
@@ -417,6 +472,7 @@ def cmd_offset_report_runtime(args: argparse.Namespace) -> None:
 def cmd_offset_e2e(args: argparse.Namespace) -> None:
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+    _resolve_apk_to_binary(args, default_extract_dir=out_dir / "extracted")
     profile_data = load_profile(args.profile) if getattr(args, "profile", None) else {}
     apply_static_profile(args, profile_data)
     if not args.static_json and not args.binary:
