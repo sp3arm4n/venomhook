@@ -268,3 +268,115 @@ class HookSpec:
 
 def iter_hookspecs(items: Iterable[dict[str, Any]]) -> list[HookSpec]:
     return [HookSpec.from_dict(item) for item in items]
+
+
+@dataclass
+class AndroidComponent:
+    """An activity / service / receiver / provider declared in AndroidManifest.xml.
+
+    Class names are resolved relative to the application package per Android
+    convention: leading '.' is replaced with the package, and bare names get
+    the package prepended. Already-qualified names pass through unchanged.
+
+    `exported` reflects only the literal `android:exported="true"` attribute;
+    Android's full inference rule (which depends on intent-filter presence
+    and target SDK) is intentionally NOT applied here — callers can layer it
+    on top using `intent_actions` if needed.
+    """
+
+    type: str  # "activity" | "service" | "receiver" | "provider"
+    name: str  # FQN class name (resolved against package)
+    exported: bool = False
+    permission: Optional[str] = None
+    intent_actions: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AndroidComponent":
+        return cls(
+            type=data["type"],
+            name=data["name"],
+            exported=bool(data.get("exported", False)),
+            permission=data.get("permission"),
+            intent_actions=list(data.get("intent_actions", [])),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "type": self.type,
+            "name": self.name,
+            "exported": self.exported,
+        }
+        if self.permission is not None:
+            result["permission"] = self.permission
+        if self.intent_actions:
+            result["intent_actions"] = list(self.intent_actions)
+        return result
+
+
+@dataclass
+class AndroidAppMeta:
+    """Decoded Android application metadata extracted from AndroidManifest.xml.
+
+    Produced by `apk_decoder.parse_android_manifest`. Consumed by the Android
+    pipeline (PR #9) to score components, identify entry points that load
+    native libraries, and surface attack-surface info for the report layer.
+    """
+
+    package_name: str
+    application_class: Optional[str] = None
+    permissions: list[str] = field(default_factory=list)
+    components: list[AndroidComponent] = field(default_factory=list)
+    min_sdk: Optional[int] = None
+    target_sdk: Optional[int] = None
+    debuggable: bool = False
+    extract_native_libs: Optional[bool] = None
+
+    @property
+    def activities(self) -> list[AndroidComponent]:
+        return [c for c in self.components if c.type == "activity"]
+
+    @property
+    def services(self) -> list[AndroidComponent]:
+        return [c for c in self.components if c.type == "service"]
+
+    @property
+    def receivers(self) -> list[AndroidComponent]:
+        return [c for c in self.components if c.type == "receiver"]
+
+    @property
+    def providers(self) -> list[AndroidComponent]:
+        return [c for c in self.components if c.type == "provider"]
+
+    @property
+    def exported_components(self) -> list[AndroidComponent]:
+        return [c for c in self.components if c.exported]
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AndroidAppMeta":
+        return cls(
+            package_name=data.get("package_name", ""),
+            application_class=data.get("application_class"),
+            permissions=list(data.get("permissions", [])),
+            components=[AndroidComponent.from_dict(c) for c in data.get("components", [])],
+            min_sdk=data.get("min_sdk"),
+            target_sdk=data.get("target_sdk"),
+            debuggable=bool(data.get("debuggable", False)),
+            extract_native_libs=data.get("extract_native_libs"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "package_name": self.package_name,
+            "permissions": list(self.permissions),
+            "components": [c.to_dict() for c in self.components],
+            "debuggable": self.debuggable,
+        }
+        if self.application_class is not None:
+            result["application_class"] = self.application_class
+        if self.min_sdk is not None:
+            result["min_sdk"] = self.min_sdk
+        if self.target_sdk is not None:
+            result["target_sdk"] = self.target_sdk
+        if self.extract_native_libs is not None:
+            result["extract_native_libs"] = self.extract_native_libs
+        return result
