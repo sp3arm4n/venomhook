@@ -268,3 +268,48 @@ class HookSpec:
 
 def iter_hookspecs(items: Iterable[dict[str, Any]]) -> list[HookSpec]:
     return [HookSpec.from_dict(item) for item in items]
+
+
+@dataclass
+class JavaNativeMethod:
+    """A `native` method declaration recovered from Java/Kotlin sources.
+
+    Produced by `jadx_runner.extract_native_methods`. Consumed by the JNI bridge
+    module (PR #7) to predict the corresponding C symbol name (`Java_<pkg>_<cls>_<m>`)
+    or to anchor RegisterNatives correlation.
+
+    `arg_types` and `return_type` are raw Java type strings as they appeared in
+    source (e.g. `"byte[]"`, `"Map<String, String>"`); JNI signature conversion
+    (`Ljava/util/Map;`) is intentionally deferred to the bridge so this module
+    stays a pure extractor.
+    """
+
+    class_fqn: str  # fully-qualified class name, e.g. "com.example.foo.Bar"
+    method_name: str
+    return_type: str
+    arg_types: list[str] = field(default_factory=list)
+    is_static: bool = False  # affects JNI second-arg type (jclass vs jobject)
+    source_file: Optional[str] = None  # path relative to jadx output root
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "JavaNativeMethod":
+        return cls(
+            class_fqn=data["class_fqn"],
+            method_name=data["method_name"],
+            return_type=data.get("return_type", "void"),
+            arg_types=list(data.get("arg_types", [])),
+            is_static=bool(data.get("is_static", False)),
+            source_file=data.get("source_file"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "class_fqn": self.class_fqn,
+            "method_name": self.method_name,
+            "return_type": self.return_type,
+            "arg_types": list(self.arg_types),
+            "is_static": self.is_static,
+        }
+        if self.source_file is not None:
+            result["source_file"] = self.source_file
+        return result
