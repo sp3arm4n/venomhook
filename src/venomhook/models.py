@@ -109,18 +109,27 @@ class FunctionMeta:
 class StaticMeta:
     binary: BinaryInfo
     functions: list[FunctionMeta]
+    # Optional Android-specific metadata. Populated by android_pipeline when
+    # the input is an APK; remains None for plain PE/ELF/Mach-O inputs so
+    # existing JSON shapes stay backward-compatible.
+    android: Optional["AndroidAppMeta"] = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "StaticMeta":
         binary = BinaryInfo.from_dict(data["binary"])
         functions = [FunctionMeta.from_dict(fn) for fn in data.get("functions", [])]
-        return cls(binary=binary, functions=functions)
+        android_data = data.get("android")
+        android = AndroidAppMeta.from_dict(android_data) if android_data else None
+        return cls(binary=binary, functions=functions, android=android)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "binary": self.binary.to_dict(),
             "functions": [fn.to_dict() for fn in self.functions],
         }
+        if self.android is not None:
+            result["android"] = self.android.to_dict()
+        return result
 
 
 @dataclass
@@ -444,8 +453,8 @@ def iter_hookspecs(items: Iterable[dict[str, Any]]) -> list[HookSpec]:
       @property
       def providers(self) -> list[AndroidComponent]:
           return [c for c in self.components if c.type == "provider"]
-      def providers(self) -> list[AndroidComponent]:
-          return [c for c in self.components if c.type == "provider"]
+
+      @property
 
       @property
       def exported_components(self) -> list[AndroidComponent]:
