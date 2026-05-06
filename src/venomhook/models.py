@@ -389,6 +389,9 @@ class AndroidComponent:
     exported: bool = False
     permission: Optional[str] = None
     intent_actions: list[str] = field(default_factory=list)
+    # Provider-only attribute audited by manifest_audit (PR #11). Defaults to
+    # False; True signals possible URI-based path traversal if not validated.
+    grant_uri_permissions: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AndroidComponent":
@@ -398,6 +401,7 @@ class AndroidComponent:
             exported=bool(data.get("exported", False)),
             permission=data.get("permission"),
             intent_actions=list(data.get("intent_actions", [])),
+            grant_uri_permissions=bool(data.get("grant_uri_permissions", False)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -410,6 +414,8 @@ class AndroidComponent:
             result["permission"] = self.permission
         if self.intent_actions:
             result["intent_actions"] = list(self.intent_actions)
+        if self.grant_uri_permissions:
+            result["grant_uri_permissions"] = True
         return result
 
 
@@ -430,6 +436,12 @@ class AndroidAppMeta:
     target_sdk: Optional[int] = None
     debuggable: bool = False
     extract_native_libs: Optional[bool] = None
+    # PR #11 additions for manifest audit. None = "attribute not specified" —
+    # distinct from explicit True/False, because Android's actual default
+    # depends on targetSdkVersion (audit rules apply that logic).
+    uses_cleartext_traffic: Optional[bool] = None  # default: targetSdk<28 → true
+    allow_backup: Optional[bool] = None              # default: targetSdk<31 → true
+    network_security_config: Optional[str] = None  # resource ref like "@xml/nsc"
 
     @property
     def activities(self) -> list[AndroidComponent]:
@@ -462,6 +474,9 @@ class AndroidAppMeta:
             target_sdk=data.get("target_sdk"),
             debuggable=bool(data.get("debuggable", False)),
             extract_native_libs=data.get("extract_native_libs"),
+            uses_cleartext_traffic=data.get("uses_cleartext_traffic"),
+            allow_backup=data.get("allow_backup"),
+            network_security_config=data.get("network_security_config"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -479,4 +494,113 @@ class AndroidAppMeta:
             result["target_sdk"] = self.target_sdk
         if self.extract_native_libs is not None:
             result["extract_native_libs"] = self.extract_native_libs
+        if self.uses_cleartext_traffic is not None:
+            result["uses_cleartext_traffic"] = self.uses_cleartext_traffic
+        if self.allow_backup is not None:
+            result["allow_backup"] = self.allow_backup
+        if self.network_security_config is not None:
+            result["network_security_config"] = self.network_security_config
         return result
+
+
+@dataclass
+class ManifestFinding:
+    """A single rule violation surfaced by manifest_audit.
+
+    Self-contained record so callers can render reports without re-running
+    rules. `severity` ∈ {critical, high, medium, low, info}; `references`
+    are usually OWASP MASVS / CWE / Android docs identifiers.
+    """
+
+    rule_id: str           # e.g. "MANIFEST-001"
+    title: str             # short human-readable label
+    severity: str          # critical | high | medium | low | info
+    detail: str = ""
+    remediation: str = ""
+    component: Optional[str] = None  # FQN of the offending component, or None for app-level
+    references: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ManifestFinding":
+        return cls(
+            rule_id=data["rule_id"],
+            title=data["title"],
+            severity=data.get("severity", "info"),
+            detail=data.get("detail", ""),
+            remediation=data.get("remediation", ""),
+            component=data.get("component"),
+            references=list(data.get("references", [])),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "rule_id": self.rule_id,
+            "title": self.title,
+            "severity": self.severity,
+        }
+        if self.detail:
+            result["detail"] = self.detail
+        if self.remediation:
+            result["remediation"] = self.remediation
+        if self.component is not None:
+            result["component"] = self.component
+        if self.references:
+            result["references"] = list(self.references)
+        return result
+
+
+@dataclass
+class AndroidAuditReport:
+    """Aggregated manifest_audit findings for an APK.
+
+    `findings` order matches rule registration order in manifest_audit.RULES;
+    callers wanting severity-grouped output use `by_severity`.
+    """
+
+    package_name: str
+    findings: list[ManifestFinding] = field(default_factory=list)
+
+    _SEVERITY_ORDER: tuple[str, ...] = field(
+        default=("critical", "high", "medium", "low", "info"),
+        init=False,
+        repr=False,
+    )
+
+    @property
+    def by_severity(self) -> dict[str, list[ManifestFinding]]:
+        result: dict[str, list[ManifestFinding]] = {}
+        for f in self.findings:
+            result.setdefault(f.severity, []).append(f)
+        return result
+
+    @property
+    def severity_counts(self) -> dict[str, int]:
+        return {sev: len(items) for sev, items in self.by_severity.items()}
+
+    def has_severity_at_least(self, threshold: str) -> bool:
+        """True if any finding's severity is >= threshold (critical highest).
+
+        Useful for CI/CD gates: ``report.has_severity_at_least("high")``.
+        """
+        order = self._SEVERITY_ORDER
+        if threshold not in order:
+            return False
+        cutoff = order.index(threshold)
+        for f in self.findings:
+            if f.severity in order and order.index(f.severity) <= cutoff:
+                return True
+        return False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AndroidAuditReport":
+        return cls(
+            package_name=data.get("package_name", ""),
+            findings=[ManifestFinding.from_dict(f) for f in data.get("findings", [])],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "package_name": self.package_name,
+            "findings": [f.to_dict() for f in self.findings],
+            "severity_counts": self.severity_counts,
+        }
