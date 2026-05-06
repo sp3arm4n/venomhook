@@ -7,6 +7,10 @@ name = "venomhook"
 version = "0.1.0"
 description = "Offset-based Native Hook Automation Platform skeleton"
 requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+]
 dependencies = []
 
 [project.optional-dependencies]
