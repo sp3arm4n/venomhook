@@ -270,6 +270,9 @@ def _parse_component(elem: ET.Element, comp_type: str, package: str) -> AndroidC
     exported_attr = elem.attrib.get(f"{ANDROID_NS}exported")
     exported = exported_attr == "true"
     permission = elem.attrib.get(f"{ANDROID_NS}permission")
+    # grantUriPermissions is meaningful for providers; harmless on others
+    # (manifest_audit only fires the rule when type == "provider").
+    grant_uri = elem.attrib.get(f"{ANDROID_NS}grantUriPermissions") == "true"
 
     intent_actions: list[str] = []
     for ifilter in elem.findall("intent-filter"):
@@ -284,6 +287,7 @@ def _parse_component(elem: ET.Element, comp_type: str, package: str) -> AndroidC
         exported=exported,
         permission=permission,
         intent_actions=intent_actions,
+        grant_uri_permissions=grant_uri,
     )
 
 
@@ -353,6 +357,9 @@ def parse_android_manifest(manifest_path: str | Path) -> AndroidAppMeta:
     components: list[AndroidComponent] = []
     debuggable = False
     extract_native_libs: Optional[bool] = None
+    uses_cleartext_traffic: Optional[bool] = None
+    allow_backup: Optional[bool] = None
+    network_security_config: Optional[str] = None
 
     app = root.find("application")
     if app is not None:
@@ -363,6 +370,17 @@ def parse_android_manifest(manifest_path: str | Path) -> AndroidAppMeta:
         ext_attr = app.attrib.get(f"{ANDROID_NS}extractNativeLibs")
         if ext_attr in ("true", "false"):
             extract_native_libs = ext_attr == "true"
+        # PR #11 manifest_audit feeds — preserve the unset/true/false trichotomy
+        # because Android's actual default depends on targetSdk.
+        ct_attr = app.attrib.get(f"{ANDROID_NS}usesCleartextTraffic")
+        if ct_attr in ("true", "false"):
+            uses_cleartext_traffic = ct_attr == "true"
+        ab_attr = app.attrib.get(f"{ANDROID_NS}allowBackup")
+        if ab_attr in ("true", "false"):
+            allow_backup = ab_attr == "true"
+        nsc_attr = app.attrib.get(f"{ANDROID_NS}networkSecurityConfig")
+        if nsc_attr:
+            network_security_config = nsc_attr
 
         for tag, comp_type in _COMPONENT_TAGS:
             for elem in app.findall(tag):
@@ -377,6 +395,9 @@ def parse_android_manifest(manifest_path: str | Path) -> AndroidAppMeta:
         target_sdk=target_sdk,
         debuggable=debuggable,
         extract_native_libs=extract_native_libs,
+        uses_cleartext_traffic=uses_cleartext_traffic,
+        allow_backup=allow_backup,
+        network_security_config=network_security_config,
     )
 
 

@@ -278,214 +278,288 @@ def iter_hookspecs(items: Iterable[dict[str, Any]]) -> list[HookSpec]:
     return [HookSpec.from_dict(item) for item in items]
 
 @dataclass
-  class JavaNativeMethod:
-      """A `native` method declaration recovered from Java/Kotlin sources.
-
-      Produced by `jadx_runner.extract_native_methods`. Consumed by the JNI bridge
-      module (PR #7) to predict the corresponding C symbol name (`Java_<pkg>_<cls>_<m>`)
-      or to anchor RegisterNatives correlation.
-
-      `arg_types` and `return_type` are raw Java type strings as they appeared in
-      source (e.g. `"byte[]"`, `"Map<String, String>"`); JNI signature conversion
-      (`Ljava/util/Map;`) is intentionally deferred to the bridge so this module
-      stays a pure extractor.
-      """
-
-      class_fqn: str  # fully-qualified class name, e.g. "com.example.foo.Bar"
-      method_name: str
-      return_type: str
-      arg_types: list[str] = field(default_factory=list)
-      is_static: bool = False  # affects JNI second-arg type (jclass vs jobject)
-      source_file: Optional[str] = None  # path relative to jadx output root
-
-      @classmethod
-      def from_dict(cls, data: dict[str, Any]) -> "JavaNativeMethod":
-          return cls(
-              class_fqn=data["class_fqn"],
-              method_name=data["method_name"],
-              return_type=data.get("return_type", "void"),
-              arg_types=list(data.get("arg_types", [])),
-              is_static=bool(data.get("is_static", False)),
-              source_file=data.get("source_file"),
-          )
-
-      def to_dict(self) -> dict[str, Any]:
-          result: dict[str, Any] = {
-              "class_fqn": self.class_fqn,
-              "method_name": self.method_name,
-              "return_type": self.return_type,
-              "arg_types": list(self.arg_types),
-              "is_static": self.is_static,
-          }
-          if self.source_file is not None:
-              result["source_file"] = self.source_file
-          return result
-
-
-  @dataclass
-  class JniBridge:
-      """Mapping between a Java native method and its predicted/matched C symbol.
-
-      Produced by ``jni_bridge.build_bridges`` from a list of JavaNativeMethod
-      records. ``predicted_short`` is always present (Java_<class>_<method>);
-      ``predicted_long`` is set only when overload disambiguation is needed
-      (multiple natives in the same class share a name). ``matched_symbol`` is
-      populated by ``jni_bridge.correlate_symbols`` when an actual exported
-      symbol matches one of the predictions.
-
-      ``unresolved_arg_types`` lists Java type expressions that could not be
-      converted to a JNI signature (typically third-party classes whose FQN
-      isn't recoverable from the source alone). When non-empty, the long-form
-      prediction may be unavailable or imprecise.
-      """
-
-      java_method: JavaNativeMethod
-      predicted_short: str
-      predicted_long: Optional[str] = None
-      matched_symbol: Optional[str] = None
-      unresolved_arg_types: list[str] = field(default_factory=list)
-
-      @property
-      def is_matched(self) -> bool:
-          return self.matched_symbol is not None
-
-      @property
-      def is_overloaded(self) -> bool:
-          return self.predicted_long is not None
-
-      @classmethod
-      def from_dict(cls, data: dict[str, Any]) -> "JniBridge":
-          return cls(
-              java_method=JavaNativeMethod.from_dict(data["java_method"]),
-              predicted_short=data["predicted_short"],
-              predicted_long=data.get("predicted_long"),
-              matched_symbol=data.get("matched_symbol"),
-              unresolved_arg_types=list(data.get("unresolved_arg_types", [])),
-          )
-
-      def to_dict(self) -> dict[str, Any]:
-          result: dict[str, Any] = {
-              "java_method": self.java_method.to_dict(),
-              "predicted_short": self.predicted_short,
-          }
-          if self.predicted_long is not None:
-              result["predicted_long"] = self.predicted_long
-          if self.matched_symbol is not None:
-              result["matched_symbol"] = self.matched_symbol
-          if self.unresolved_arg_types:
-              result["unresolved_arg_types"] = list(self.unresolved_arg_types)
-          return result
-
-
-  @dataclass
-  class AndroidComponent:
-      """An activity / service / receiver / provider declared in AndroidManifest.xml.
-
-      Class names are resolved relative to the application package per Android
-      convention: leading '.' is replaced with the package, and bare names get
-      the package prepended. Already-qualified names pass through unchanged.
-
-      `exported` reflects only the literal `android:exported="true"` attribute;
-      Android's full inference rule (which depends on intent-filter presence
-      and target SDK) is intentionally NOT applied here — callers can layer it
-      on top using `intent_actions` if needed.
-      """
-
-      type: str  # "activity" | "service" | "receiver" | "provider"
-      name: str  # FQN class name (resolved against package)
-      exported: bool = False
-      permission: Optional[str] = None
-      intent_actions: list[str] = field(default_factory=list)
-
-      @classmethod
-      def from_dict(cls, data: dict[str, Any]) -> "AndroidComponent":
-          return cls(
-              type=data["type"],
-              name=data["name"],
-              exported=bool(data.get("exported", False)),
-              permission=data.get("permission"),
-              intent_actions=list(data.get("intent_actions", [])),
-          )
-
-      def to_dict(self) -> dict[str, Any]:
-          result: dict[str, Any] = {
-              "type": self.type,
-              "name": self.name,
-              "exported": self.exported,
-          }
-          if self.permission is not None:
-              result["permission"] = self.permission
-          if self.intent_actions:
-              result["intent_actions"] = list(self.intent_actions)
-          return result
-
-
-  @dataclass
-  class AndroidAppMeta:
-      """Decoded Android application metadata extracted from AndroidManifest.xml.
-
-      Produced by `apk_decoder.parse_android_manifest`. Consumed by the Android
-      pipeline (PR #9) to score components, identify entry points that load
-      native libraries, and surface attack-surface info for the report layer.
-      """
-
-      package_name: str
-      application_class: Optional[str] = None
-      permissions: list[str] = field(default_factory=list)
-      components: list[AndroidComponent] = field(default_factory=list)
-      min_sdk: Optional[int] = None
-      target_sdk: Optional[int] = None
-      debuggable: bool = False
-      extract_native_libs: Optional[bool] = None
-
-      @property
-      def activities(self) -> list[AndroidComponent]:
-          return [c for c in self.components if c.type == "activity"]
-
-      @property
-      def services(self) -> list[AndroidComponent]:
-          return [c for c in self.components if c.type == "service"]
-
-      @property
-      def receivers(self) -> list[AndroidComponent]:
-          return [c for c in self.components if c.type == "receiver"]
-
-      @property
-      def providers(self) -> list[AndroidComponent]:
-          return [c for c in self.components if c.type == "provider"]
-
-      @property
-
-      @property
-      def exported_components(self) -> list[AndroidComponent]:
-          return [c for c in self.components if c.exported]
-
-      @classmethod
-      def from_dict(cls, data: dict[str, Any]) -> "AndroidAppMeta":
-          return cls(
-              package_name=data.get("package_name", ""),
-              application_class=data.get("application_class"),
-              permissions=list(data.get("permissions", [])),
-              components=[AndroidComponent.from_dict(c) for c in data.get("components", [])],
-              min_sdk=data.get("min_sdk"),
-              target_sdk=data.get("target_sdk"),
-              debuggable=bool(data.get("debuggable", False)),
-              extract_native_libs=data.get("extract_native_libs"),
-          )
-
-      def to_dict(self) -> dict[str, Any]:
-          result: dict[str, Any] = {
-              "package_name": self.package_name,
-              "permissions": list(self.permissions),
-              "components": [c.to_dict() for c in self.components],
-              "debuggable": self.debuggable,
-          }
-          if self.application_class is not None:
-              result["application_class"] = self.application_class
-          if self.min_sdk is not None:
-              result["min_sdk"] = self.min_sdk
-          if self.target_sdk is not None:
-              result["target_sdk"] = self.target_sdk
-          if self.extract_native_libs is not None:
-              result["extract_native_libs"] = self.extract_native_libs
-          return result
+class JavaNativeMethod:
+    """A `native` method declaration recovered from Java/Kotlin sources.
+    Produced by `jadx_runner.extract_native_methods`. Consumed by the JNI bridge
+    module (PR #7) to predict the corresponding C symbol name (`Java_<pkg>_<cls>_<m>`)
+    or to anchor RegisterNatives correlation.
+    `arg_types` and `return_type` are raw Java type strings as they appeared in
+    source (e.g. `"byte[]"`, `"Map<String, String>"`); JNI signature conversion
+    (`Ljava/util/Map;`) is intentionally deferred to the bridge so this module
+    stays a pure extractor.
+    """
+    class_fqn: str  # fully-qualified class name, e.g. "com.example.foo.Bar"
+    method_name: str
+    return_type: str
+    arg_types: list[str] = field(default_factory=list)
+    is_static: bool = False  # affects JNI second-arg type (jclass vs jobject)
+    source_file: Optional[str] = None  # path relative to jadx output root
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "JavaNativeMethod":
+        return cls(
+            class_fqn=data["class_fqn"],
+            method_name=data["method_name"],
+            return_type=data.get("return_type", "void"),
+            arg_types=list(data.get("arg_types", [])),
+            is_static=bool(data.get("is_static", False)),
+            source_file=data.get("source_file"),
+        )
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "class_fqn": self.class_fqn,
+            "method_name": self.method_name,
+            "return_type": self.return_type,
+            "arg_types": list(self.arg_types),
+            "is_static": self.is_static,
+        }
+        if self.source_file is not None:
+            result["source_file"] = self.source_file
+        return result
+@dataclass
+class JniBridge:
+    """Mapping between a Java native method and its predicted/matched C symbol.
+    Produced by ``jni_bridge.build_bridges`` from a list of JavaNativeMethod
+    records. ``predicted_short`` is always present (Java_<class>_<method>);
+    ``predicted_long`` is set only when overload disambiguation is needed
+    (multiple natives in the same class share a name). ``matched_symbol`` is
+    populated by ``jni_bridge.correlate_symbols`` when an actual exported
+    symbol matches one of the predictions.
+    ``unresolved_arg_types`` lists Java type expressions that could not be
+    converted to a JNI signature (typically third-party classes whose FQN
+    isn't recoverable from the source alone). When non-empty, the long-form
+    prediction may be unavailable or imprecise.
+    """
+    java_method: JavaNativeMethod
+    predicted_short: str
+    predicted_long: Optional[str] = None
+    matched_symbol: Optional[str] = None
+    unresolved_arg_types: list[str] = field(default_factory=list)
+    @property
+    def is_matched(self) -> bool:
+        return self.matched_symbol is not None
+    @property
+    def is_overloaded(self) -> bool:
+        return self.predicted_long is not None
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "JniBridge":
+        return cls(
+            java_method=JavaNativeMethod.from_dict(data["java_method"]),
+            predicted_short=data["predicted_short"],
+            predicted_long=data.get("predicted_long"),
+            matched_symbol=data.get("matched_symbol"),
+            unresolved_arg_types=list(data.get("unresolved_arg_types", [])),
+        )
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "java_method": self.java_method.to_dict(),
+            "predicted_short": self.predicted_short,
+        }
+        if self.predicted_long is not None:
+            result["predicted_long"] = self.predicted_long
+        if self.matched_symbol is not None:
+            result["matched_symbol"] = self.matched_symbol
+        if self.unresolved_arg_types:
+            result["unresolved_arg_types"] = list(self.unresolved_arg_types)
+        return result
+@dataclass
+class AndroidComponent:
+    """An activity / service / receiver / provider declared in AndroidManifest.xml.
+    Class names are resolved relative to the application package per Android
+    convention: leading '.' is replaced with the package, and bare names get
+    the package prepended. Already-qualified names pass through unchanged.
+    `exported` reflects only the literal `android:exported="true"` attribute;
+    Android's full inference rule (which depends on intent-filter presence
+    and target SDK) is intentionally NOT applied here — callers can layer it
+    on top using `intent_actions` if needed.
+    """
+    type: str  # "activity" | "service" | "receiver" | "provider"
+    name: str  # FQN class name (resolved against package)
+    exported: bool = False
+    permission: Optional[str] = None
+    intent_actions: list[str] = field(default_factory=list)
+    # Provider-only attribute audited by manifest_audit (PR #11). Defaults to
+    # False; True signals possible URI-based path traversal if not validated.
+    grant_uri_permissions: bool = False
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AndroidComponent":
+        return cls(
+            type=data["type"],
+            name=data["name"],
+            exported=bool(data.get("exported", False)),
+            permission=data.get("permission"),
+            intent_actions=list(data.get("intent_actions", [])),
+            grant_uri_permissions=bool(data.get("grant_uri_permissions", False)),
+        )
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "type": self.type,
+            "name": self.name,
+            "exported": self.exported,
+        }
+        if self.permission is not None:
+            result["permission"] = self.permission
+        if self.intent_actions:
+            result["intent_actions"] = list(self.intent_actions)
+        if self.grant_uri_permissions:
+            result["grant_uri_permissions"] = True
+        return result
+@dataclass
+class AndroidAppMeta:
+    """Decoded Android application metadata extracted from AndroidManifest.xml.
+    Produced by `apk_decoder.parse_android_manifest`. Consumed by the Android
+    pipeline (PR #9) to score components, identify entry points that load
+    native libraries, and surface attack-surface info for the report layer.
+    """
+    package_name: str
+    application_class: Optional[str] = None
+    permissions: list[str] = field(default_factory=list)
+    components: list[AndroidComponent] = field(default_factory=list)
+    min_sdk: Optional[int] = None
+    target_sdk: Optional[int] = None
+    debuggable: bool = False
+    extract_native_libs: Optional[bool] = None
+    # PR #11 additions for manifest audit. None = "attribute not specified" —
+    # distinct from explicit True/False, because Android's actual default
+    # depends on targetSdkVersion (audit rules apply that logic).
+    uses_cleartext_traffic: Optional[bool] = None  # default: targetSdk<28 → true
+    allow_backup: Optional[bool] = None              # default: targetSdk<31 → true
+    network_security_config: Optional[str] = None  # resource ref like "@xml/nsc"
+    @property
+    def activities(self) -> list[AndroidComponent]:
+        return [c for c in self.components if c.type == "activity"]
+    @property
+    def services(self) -> list[AndroidComponent]:
+        return [c for c in self.components if c.type == "service"]
+    @property
+    def receivers(self) -> list[AndroidComponent]:
+        return [c for c in self.components if c.type == "receiver"]
+    @property
+    def providers(self) -> list[AndroidComponent]:
+        return [c for c in self.components if c.type == "provider"]
+    @property
+    def exported_components(self) -> list[AndroidComponent]:
+        return [c for c in self.components if c.exported]
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AndroidAppMeta":
+        return cls(
+            package_name=data.get("package_name", ""),
+            application_class=data.get("application_class"),
+            permissions=list(data.get("permissions", [])),
+            components=[AndroidComponent.from_dict(c) for c in data.get("components", [])],
+            min_sdk=data.get("min_sdk"),
+            target_sdk=data.get("target_sdk"),
+            debuggable=bool(data.get("debuggable", False)),
+            extract_native_libs=data.get("extract_native_libs"),
+            uses_cleartext_traffic=data.get("uses_cleartext_traffic"),
+            allow_backup=data.get("allow_backup"),
+            network_security_config=data.get("network_security_config"),
+        )
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "package_name": self.package_name,
+            "permissions": list(self.permissions),
+            "components": [c.to_dict() for c in self.components],
+            "debuggable": self.debuggable,
+        }
+        if self.application_class is not None:
+            result["application_class"] = self.application_class
+        if self.min_sdk is not None:
+            result["min_sdk"] = self.min_sdk
+        if self.target_sdk is not None:
+            result["target_sdk"] = self.target_sdk
+        if self.extract_native_libs is not None:
+            result["extract_native_libs"] = self.extract_native_libs
+        if self.uses_cleartext_traffic is not None:
+            result["uses_cleartext_traffic"] = self.uses_cleartext_traffic
+        if self.allow_backup is not None:
+            result["allow_backup"] = self.allow_backup
+        if self.network_security_config is not None:
+            result["network_security_config"] = self.network_security_config
+        return result
+@dataclass
+class ManifestFinding:
+    """A single rule violation surfaced by manifest_audit.
+    Self-contained record so callers can render reports without re-running
+    rules. `severity` ∈ {critical, high, medium, low, info}; `references`
+    are usually OWASP MASVS / CWE / Android docs identifiers.
+    """
+    rule_id: str           # e.g. "MANIFEST-001"
+    title: str             # short human-readable label
+    severity: str          # critical | high | medium | low | info
+    detail: str = ""
+    remediation: str = ""
+    component: Optional[str] = None  # FQN of the offending component, or None for app-level
+    references: list[str] = field(default_factory=list)
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ManifestFinding":
+        return cls(
+            rule_id=data["rule_id"],
+            title=data["title"],
+            severity=data.get("severity", "info"),
+            detail=data.get("detail", ""),
+            remediation=data.get("remediation", ""),
+            component=data.get("component"),
+            references=list(data.get("references", [])),
+        )
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "rule_id": self.rule_id,
+            "title": self.title,
+            "severity": self.severity,
+        }
+        if self.detail:
+            result["detail"] = self.detail
+        if self.remediation:
+            result["remediation"] = self.remediation
+        if self.component is not None:
+            result["component"] = self.component
+        if self.references:
+            result["references"] = list(self.references)
+        return result
+@dataclass
+class AndroidAuditReport:
+    """Aggregated manifest_audit findings for an APK.
+    `findings` order matches rule registration order in manifest_audit.RULES;
+    callers wanting severity-grouped output use `by_severity`.
+    """
+    package_name: str
+    findings: list[ManifestFinding] = field(default_factory=list)
+    _SEVERITY_ORDER: tuple[str, ...] = field(
+        default=("critical", "high", "medium", "low", "info"),
+        init=False,
+        repr=False,
+    )
+    @property
+    def by_severity(self) -> dict[str, list[ManifestFinding]]:
+        result: dict[str, list[ManifestFinding]] = {}
+        for f in self.findings:
+        for f in self.findings:
+            result.setdefault(f.severity, []).append(f)
+        return result
+    @property
+    def severity_counts(self) -> dict[str, int]:
+        return {sev: len(items) for sev, items in self.by_severity.items()}
+    def has_severity_at_least(self, threshold: str) -> bool:
+        """True if any finding's severity is >= threshold (critical highest).
+        Useful for CI/CD gates: ``report.has_severity_at_least("high")``.
+        """
+        order = self._SEVERITY_ORDER
+        if threshold not in order:
+            return False
+        cutoff = order.index(threshold)
+        for f in self.findings:
+            if f.severity in order and order.index(f.severity) <= cutoff:
+                return True
+        return False
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AndroidAuditReport":
+        return cls(
+            package_name=data.get("package_name", ""),
+            findings=[ManifestFinding.from_dict(f) for f in data.get("findings", [])],
+        )
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "package_name": self.package_name,
+            "findings": [f.to_dict() for f in self.findings],
+            "severity_counts": self.severity_counts,
+        }

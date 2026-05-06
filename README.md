@@ -17,6 +17,7 @@
 - StaticMeta(JSON) → HookSpec(JSON/SQLite) 생성, 마크다운 리포트 출력 (E2E 모드 `offset-e2e` 제공)
 - **StaticMeta.android** — APK 분석 결과의 AndroidAppMeta를 StaticMeta에 옵션 필드로 부착(기존 JSON 형식과 하위 호환)
 - **OS별 키워드 사전 분리**(WIN/POSIX/DARWIN) + **JNI 1급 카테고리**(`Java_*` 심볼·JNI imports → `jni`/`android` 태그, 30점 가중치)
+- **AndroidManifest 취약점 감사**(`manifest_audit`) — 9개 룰(debuggable / cleartext / allowBackup / exported / grantUriPermissions / dangerous perms / SDK 버전) 자동 검출, OWASP MASVS·CWE 참조 포함, CI 게이트용 severity threshold 지원
 - HookSpec → Frida 스크립트 자동 생성 (텍스트/JSON 로그, 시나리오, 문자열/버퍼 로깅, 스캔 범위·리트라이 옵션)
 - **모듈 이름 폴백**(`--module-alias`) — primary 실패 시 alias 후보를 순차 시도(ELF 버전 suffix, Mach-O dylib 변형 등)
 - Frida 실행 오케스트레이션(`offset-run`) 및 런타임 로그 요약(MD/HTML, 문자열 샘플 포함)
@@ -203,6 +204,46 @@ print('warnings:', r.warnings)
 - **strict 모드**: `analyze_apk(..., fail_on_missing_tools=True)`로 apktool/jadx 미설치 시 즉시 실패하도록 강제.
 - 추출된 .so는 `<work_dir>/lib/`, apktool 출력은 `<work_dir>/apktool/`, jadx 출력은 `<work_dir>/jadx/`에 저장됩니다. Ghidra 함수-수준 분석을 추가로 원하면 추출된 .so 경로를 `static_pipeline`에 넘기세요.
 
+### (Phase 2) AndroidManifest 취약점 감사 (`manifest_audit`)
+APK의 `AndroidAppMeta`(매니페스트 디코드 결과) 위에서 동작하는 **순수 Python 룰 엔진** — 외부 도구·서브프로세스·네트워크 호출 없음. 9개 룰을 OWASP MASVS / CWE 참조와 함께 검출합니다.
+
+```bash
+PYTHONPATH=src python -c "
+from venomhook.apk_decoder import decode_apk, ApktoolConfig
+from venomhook.manifest_audit import audit_manifest, format_audit_summary
+
+_, app = decode_apk('./sample/myapp.apk', './out_audit/apktool')
+report = audit_manifest(app)
+print(format_audit_summary(report))
+
+# CI 게이트 — high 이상 발견 시 exit 1
+import sys
+if report.has_severity_at_least('high'):
+    sys.exit(1)
+"
+```
+
+**검출 룰**:
+
+| Rule ID | Title | Severity | 트리거 조건 |
+|---|---|---|---|
+| MANIFEST-001 | Debuggable Application | high | `application/@debuggable=true` |
+| MANIFEST-002 | Cleartext Traffic Permitted | high | `usesCleartextTraffic=true` 또는 (unset + `targetSdk<28` + NSC 미지정) |
+| MANIFEST-003 | Allow Backup Enabled | medium | `allowBackup=true` 또는 (unset + `targetSdk<31`) |
+| MANIFEST-004 | Exported Component without Permission | high | `exported=true` + intent-filter + `permission=None` (provider 제외) |
+| MANIFEST-005 | Exported Content Provider | high | `provider/@exported=true` |
+| MANIFEST-006 | Provider with grantUriPermissions | medium | `provider/@grantUriPermissions=true` |
+| MANIFEST-007 | Dangerous Permission Surface | info | READ_SMS·RECORD_AUDIO·CAMERA·FINE_LOCATION 등 30+ 분류 |
+| MANIFEST-008 | Outdated minSdkVersion | medium | `minSdk<23` (Android 6.0 미만) |
+| MANIFEST-009 | Outdated targetSdkVersion | medium | `targetSdk<30` |
+
+- 각 finding은 `rule_id` / `title` / `severity` / `detail` / `remediation` / `references`(OWASP MASVS·CWE) / 해당 시 `component`(FQN)를 포함.
+- `AndroidAuditReport.has_severity_at_least(threshold)` — CI/CD 게이트에 사용 (critical/high/medium/low/info 정렬).
+- `format_audit_summary(report)` — 터미널용 요약 한 줄 + finding 리스트.
+- PoC 자동 도출은 Phase 3 범위로 분리 — 현재 PR은 정적 검출까지.
+
+▎ 위 4-backtick 블록의 내부 내용만 복사해서 붙여넣으세요. bash 코드 펜스(```bash)는 본문의 일부로 그대로 들어갑니다.
+
 ### Step 5. Runtime Log Summary (선택)
 Frida JSON 로그를 Markdown 요약으로 변환합니다.
 ```bash
@@ -258,6 +299,7 @@ venomhook/
 │       ├── jadx_runner.py                # jadx 래퍼 — DEX→Java + native 메서드 추출 (Phase 2)
 │       ├── jni_bridge.py                 # Java native ↔ C 심볼 매퍼 (JNI §11.1) (Phase 2)
 │       ├── android_pipeline.py           # APK→매니페스트+natives+.so+브리지 오케스트레이터 (Phase 2)
+│       ├── manifest_audit.py             # AndroidManifest 취약점 룰 엔진 (9 rules, Phase 2)
 │       ├── ghidra_runner.py              # Ghidra headless 래퍼
 │       ├── orchestrator.py               # Frida 실행 오케스트레이터
 │       ├── report.py                     # HookSpec 마크다운 리포트
