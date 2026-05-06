@@ -4,13 +4,18 @@
   <img src="assets/venomhook.png" alt="VenomHook logo" width="240">
 </p>
 
-`venomhook`은 정적 분석 결과(StaticMeta)로부터 offset 기반 HookSpec을 자동 생성하고, Frida 스크립트로 변환해 주는 CLI 도구입니다. `architecture.md`에 정의된 흐름(StaticMeta → EndpointMeta → HookSpec → Frida)을 최소 실행 가능한 형태로 구현했으며, **운영체제 무관(Windows / Linux / macOS / Android) 네이티브 앱 자동 분석**을 지향합니다. 실 활용 1순위는 Windows 네이티브(PE)와 Android 네이티브(APK·.so)입니다.
+`venomhook`은 정적 분석 결과(StaticMeta)로부터 offset 기반 HookSpec을 자동 생성하고, Frida 스크립트로 변환해 주는 CLI 도구입니다. `architecture.md`에 정의된 흐름(StaticMeta → EndpointMeta → HookSpec → Frida)을 최소 실행 가능한 형태로 구현했으며, **운영체제 무관(Windows / Linux / macOS / Android) 네이티브 앱 자동 분석**을 지향합니다. 실 활용 1순위는 Windows 네이티브(PE)와 Android 네이티브(APK·.so)이며, Phase 2에서 **Android는 apktool + jadx + JNI 브리지까지 일관 자동화**합니다.
 
 ## 주요 기능
 - Ghidra 헤드리스 + postScript로 StaticMeta 자동 추출(해시/함수 필터 포함)
-- **lief 기반 PE/ELF/Mach-O 단일 메타 추출기**(`binary_meta`) — format/arch/OS/imagebase/ASLR·PIE/sections/imports를 한 번에
+- **lief 기반 PE/ELF/Mach-O 단일 메타 추출기**(`binary_meta`) — format/arch/OS/imagebase/ASLR·PIE/sections/imports/**exports**를 한 번에
 - **Android APK 입력 지원**(`--apk`/`--abi`) — APK ZIP에서 `lib/<abi>/*.so`를 추출해 기존 파이프라인으로 위임
+- **Android 풀 자동화 파이프라인**(`android_pipeline.analyze_apk`) — APK → AndroidManifest + Java natives + .so + JNI 브리지를 한 번에 생성
+- **apktool 래퍼**(`apk_decoder`) — 바이너리 AndroidManifest.xml을 디코드해 `AndroidAppMeta`(package/permissions/components/SDK 버전)로 추출
+- **jadx 래퍼**(`jadx_runner`) — DEX→Java 디컴파일 + `native` 메서드 자동 추출(`JavaNativeMethod`), Kotlin `external fun`도 지원
+- **JNI 브리지**(`jni_bridge`) — Java 네이티브 메서드 → C 심볼 자동 매핑(JNI §11.1 망글링), 오버로드 자동 감지, .so 익스포트와 자동 상관
 - StaticMeta(JSON) → HookSpec(JSON/SQLite) 생성, 마크다운 리포트 출력 (E2E 모드 `offset-e2e` 제공)
+- **StaticMeta.android** — APK 분석 결과의 AndroidAppMeta를 StaticMeta에 옵션 필드로 부착(기존 JSON 형식과 하위 호환)
 - **OS별 키워드 사전 분리**(WIN/POSIX/DARWIN) + **JNI 1급 카테고리**(`Java_*` 심볼·JNI imports → `jni`/`android` 태그, 30점 가중치)
 - HookSpec → Frida 스크립트 자동 생성 (텍스트/JSON 로그, 시나리오, 문자열/버퍼 로깅, 스캔 범위·리트라이 옵션)
 - **모듈 이름 폴백**(`--module-alias`) — primary 실패 시 alias 후보를 순차 시도(ELF 버전 suffix, Mach-O dylib 변형 등)
@@ -27,6 +32,8 @@
 | Python | 3.10+ (venv 권장) |
 | frida | 17.x |
 | lief | 선택(optional `static` extra) — `binary_meta` 모듈에서 사용 |
+| jadx | 선택 — Android Java↔Native 분석 시 권장. PATH 또는 `VENOMHOOK_JADX` 환경 변수에 등록 |
+| apktool | 선택 — AndroidManifest 디코드 시 권장. PATH 또는 `VENOMHOOK_APKTOOL` 환경 변수에 등록 |
 
 ## Set Up
 
@@ -172,6 +179,30 @@ frida -U -n com.example.app -l ./frida_scripts/venomhook.js
 - `--apk`로 만든 HookSpec은 `lib/<abi>/libfoo.so`에서 추출한 .so를 분석한 결과이므로, 디바이스에서 실제 로드되는 모듈 이름(`libfoo.so`)이 `--target`이 됩니다.
 - 디바이스에 동일 이름의 .so가 여러 위치에 존재하거나 버전 suffix가 붙는 경우 `--module-alias`로 보강하세요.
 
+### (Phase 2) Android 풀 파이프라인 — APK → 매니페스트 + Java natives + .so + JNI 브리지
+APK 한 번에서 Phase 2의 모든 Android 컨텍스트를 추출합니다. `apktool`/`jadx`는 선택 의존성이며 미설치 시 해당 단계만 건너뛰고 경고를 기록한 채 진행합니다.
+```bash
+# 의존성 등록(둘 다 선택)
+export VENOMHOOK_JADX=/usr/local/bin/jadx
+export VENOMHOOK_APKTOOL=/usr/local/bin/apktool
+
+PYTHONPATH=src python -c "
+from venomhook.android_pipeline import analyze_apk
+r = analyze_apk('./sample/myapp.apk', './out_android', abi='auto')
+print('ABI:', r.selected_abi, 'so:', r.extracted_so_path)
+print('manifest pkg:', r.app_meta.package_name if r.app_meta else 'apktool 미설치')
+print('java natives:', len(r.java_natives))
+print('matched bridges:', len(r.matched_bridges), '/ total:', len(r.bridges))
+for b in r.matched_bridges[:3]:
+    print(' ', b.java_method.class_fqn + '.' + b.java_method.method_name, '->', b.matched_symbol)
+print('warnings:', r.warnings)
+"
+```
+- 산출물: `AndroidAnalysis`(ApkMeta + 선택된 ABI + 추출된 .so 경로 + BinaryMeta + AndroidAppMeta + JavaNativeMethod[] + JniBridge[] + warnings).
+- 단계: ① `apk_extractor`로 APK 메타·.so 추출 → ② `binary_meta`(lief)로 .so 익스포트 수집 → ③ `apk_decoder`(apktool)로 매니페스트 → ④ `jadx_runner`(jadx)로 Java native 메서드 → ⑤ `jni_bridge`로 `Java_<class>_<method>` 심볼 예측·상관.
+- **strict 모드**: `analyze_apk(..., fail_on_missing_tools=True)`로 apktool/jadx 미설치 시 즉시 실패하도록 강제.
+- 추출된 .so는 `<work_dir>/lib/`, apktool 출력은 `<work_dir>/apktool/`, jadx 출력은 `<work_dir>/jadx/`에 저장됩니다. Ghidra 함수-수준 분석을 추가로 원하면 추출된 .so 경로를 `static_pipeline`에 넘기세요.
+
 ### Step 5. Runtime Log Summary (선택)
 Frida JSON 로그를 Markdown 요약으로 변환합니다.
 ```bash
@@ -223,6 +254,10 @@ venomhook/
 │       ├── dynamic_pipeline.py           # HookSpec -> Frida 스크립트 생성
 │       ├── binary_meta.py                # lief 기반 PE/ELF/Mach-O 메타 추출 (선택 dep)
 │       ├── apk_extractor.py              # Android APK -> lib/<abi>/*.so 추출
+│       ├── apk_decoder.py                # apktool 래퍼 — AndroidManifest 디코드/파서 (Phase 2)
+│       ├── jadx_runner.py                # jadx 래퍼 — DEX→Java + native 메서드 추출 (Phase 2)
+│       ├── jni_bridge.py                 # Java native ↔ C 심볼 매퍼 (JNI §11.1) (Phase 2)
+│       ├── android_pipeline.py           # APK→매니페스트+natives+.so+브리지 오케스트레이터 (Phase 2)
 │       ├── ghidra_runner.py              # Ghidra headless 래퍼
 │       ├── orchestrator.py               # Frida 실행 오케스트레이터
 │       ├── report.py                     # HookSpec 마크다운 리포트
