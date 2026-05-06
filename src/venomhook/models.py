@@ -265,31 +265,71 @@ class HookSpec:
             payload["module_aliases"] = list(self.module_aliases)
         return payload
 
-
 def iter_hookspecs(items: Iterable[dict[str, Any]]) -> list[HookSpec]:
     return [HookSpec.from_dict(item) for item in items]
 
-
+@dataclass
+class JniBridge:
+    """Mapping between a Java native method and its predicted/matched C symbol.
+    Produced by ``jni_bridge.build_bridges`` from a list of JavaNativeMethod
+    records. ``predicted_short`` is always present (Java_<class>_<method>);
+    ``predicted_long`` is set only when overload disambiguation is needed
+    (multiple natives in the same class share a name). ``matched_symbol`` is
+    populated by ``jni_bridge.correlate_symbols`` when an actual exported
+    symbol matches one of the predictions.
+    ``unresolved_arg_types`` lists Java type expressions that could not be
+    converted to a JNI signature (typically third-party classes whose FQN
+    isn't recoverable from the source alone). When non-empty, the long-form
+    prediction may be unavailable or imprecise.
+    """
+    java_method: JavaNativeMethod
+    predicted_short: str
+    predicted_long: Optional[str] = None
+    matched_symbol: Optional[str] = None
+    unresolved_arg_types: list[str] = field(default_factory=list)
+    @property
+    def is_matched(self) -> bool:
+        return self.matched_symbol is not None
+    @property
+    def is_overloaded(self) -> bool:
+        return self.predicted_long is not None
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "JniBridge":
+        return cls(
+            java_method=JavaNativeMethod.from_dict(data["java_method"]),
+            predicted_short=data["predicted_short"],
+            predicted_long=data.get("predicted_long"),
+            matched_symbol=data.get("matched_symbol"),
+            unresolved_arg_types=list(data.get("unresolved_arg_types", [])),
+        )
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "java_method": self.java_method.to_dict(),
+            "predicted_short": self.predicted_short,
+        }
+        if self.predicted_long is not None:
+            result["predicted_long"] = self.predicted_long
+        if self.matched_symbol is not None:
+            result["matched_symbol"] = self.matched_symbol
+        if self.unresolved_arg_types:
+            result["unresolved_arg_types"] = list(self.unresolved_arg_types)
+        return result
 @dataclass
 class AndroidComponent:
     """An activity / service / receiver / provider declared in AndroidManifest.xml.
-
     Class names are resolved relative to the application package per Android
     convention: leading '.' is replaced with the package, and bare names get
     the package prepended. Already-qualified names pass through unchanged.
-
     `exported` reflects only the literal `android:exported="true"` attribute;
     Android's full inference rule (which depends on intent-filter presence
     and target SDK) is intentionally NOT applied here — callers can layer it
     on top using `intent_actions` if needed.
     """
-
     type: str  # "activity" | "service" | "receiver" | "provider"
     name: str  # FQN class name (resolved against package)
     exported: bool = False
     permission: Optional[str] = None
     intent_actions: list[str] = field(default_factory=list)
-
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AndroidComponent":
         return cls(
@@ -299,7 +339,6 @@ class AndroidComponent:
             permission=data.get("permission"),
             intent_actions=list(data.get("intent_actions", [])),
         )
-
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             "type": self.type,
@@ -311,17 +350,13 @@ class AndroidComponent:
         if self.intent_actions:
             result["intent_actions"] = list(self.intent_actions)
         return result
-
-
 @dataclass
 class AndroidAppMeta:
     """Decoded Android application metadata extracted from AndroidManifest.xml.
-
     Produced by `apk_decoder.parse_android_manifest`. Consumed by the Android
     pipeline (PR #9) to score components, identify entry points that load
     native libraries, and surface attack-surface info for the report layer.
     """
-
     package_name: str
     application_class: Optional[str] = None
     permissions: list[str] = field(default_factory=list)
@@ -330,27 +365,23 @@ class AndroidAppMeta:
     target_sdk: Optional[int] = None
     debuggable: bool = False
     extract_native_libs: Optional[bool] = None
-
     @property
     def activities(self) -> list[AndroidComponent]:
         return [c for c in self.components if c.type == "activity"]
-
     @property
     def services(self) -> list[AndroidComponent]:
         return [c for c in self.components if c.type == "service"]
-
     @property
     def receivers(self) -> list[AndroidComponent]:
         return [c for c in self.components if c.type == "receiver"]
-
+    @property
+    def providers(self) -> list[AndroidComponent]:
     @property
     def providers(self) -> list[AndroidComponent]:
         return [c for c in self.components if c.type == "provider"]
-
     @property
     def exported_components(self) -> list[AndroidComponent]:
         return [c for c in self.components if c.exported]
-
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AndroidAppMeta":
         return cls(
@@ -363,7 +394,6 @@ class AndroidAppMeta:
             debuggable=bool(data.get("debuggable", False)),
             extract_native_libs=data.get("extract_native_libs"),
         )
-
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             "package_name": self.package_name,
