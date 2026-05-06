@@ -1,340 +1,485 @@
-# VenomHook: Offset-based Native Hook Automation Platform
+# VenomHook
 
 <p align="center">
-  <img src="assets/venomhook.png" alt="VenomHook logo" width="240">
+  <img src="assets/venomhook.png" alt="VenomHook logo" width="220">
 </p>
 
-`venomhook`은 정적 분석 결과(StaticMeta)로부터 offset 기반 HookSpec을 자동 생성하고, Frida 스크립트로 변환해 주는 CLI 도구입니다. `architecture.md`에 정의된 흐름(StaticMeta → EndpointMeta → HookSpec → Frida)을 최소 실행 가능한 형태로 구현했으며, **운영체제 무관(Windows / Linux / macOS / Android) 네이티브 앱 자동 분석**을 지향합니다. 실 활용 1순위는 Windows 네이티브(PE)와 Android 네이티브(APK·.so)이며, Phase 2에서 **Android는 apktool + jadx + JNI 브리지까지 일관 자동화**합니다.
+VenomHook은 네이티브 바이너리와 Android APK를 정적 분석해 후킹 후보 함수를 찾고, offset 기반 HookSpec과 Frida 스크립트를 생성하는 CLI 도구입니다.
 
-## 주요 기능
-- Ghidra 헤드리스 + postScript로 StaticMeta 자동 추출(해시/함수 필터 포함)
-- **lief 기반 PE/ELF/Mach-O 단일 메타 추출기**(`binary_meta`) — format/arch/OS/imagebase/ASLR·PIE/sections/imports/**exports**를 한 번에
-- **Android APK 입력 지원**(`--apk`/`--abi`) — APK ZIP에서 `lib/<abi>/*.so`를 추출해 기존 파이프라인으로 위임
-- **Android 풀 자동화 파이프라인**(`android_pipeline.analyze_apk`) — APK → AndroidManifest + Java natives + .so + JNI 브리지를 한 번에 생성
-- **apktool 래퍼**(`apk_decoder`) — 바이너리 AndroidManifest.xml을 디코드해 `AndroidAppMeta`(package/permissions/components/SDK 버전)로 추출
-- **jadx 래퍼**(`jadx_runner`) — DEX→Java 디컴파일 + `native` 메서드 자동 추출(`JavaNativeMethod`), Kotlin `external fun`도 지원
-- **JNI 브리지**(`jni_bridge`) — Java 네이티브 메서드 → C 심볼 자동 매핑(JNI §11.1 망글링), 오버로드 자동 감지, .so 익스포트와 자동 상관
-- StaticMeta(JSON) → HookSpec(JSON/SQLite) 생성, 마크다운 리포트 출력 (E2E 모드 `offset-e2e` 제공)
-- **StaticMeta.android** — APK 분석 결과의 AndroidAppMeta를 StaticMeta에 옵션 필드로 부착(기존 JSON 형식과 하위 호환)
-- **OS별 키워드 사전 분리**(WIN/POSIX/DARWIN) + **JNI 1급 카테고리**(`Java_*` 심볼·JNI imports → `jni`/`android` 태그, 30점 가중치)
-- **AndroidManifest 취약점 감사**(`manifest_audit`) — 9개 룰(debuggable / cleartext / allowBackup / exported / grantUriPermissions / dangerous perms / SDK 버전) 자동 검출, OWASP MASVS·CWE 참조 포함, CI 게이트용 severity threshold 지원
-- HookSpec → Frida 스크립트 자동 생성 (텍스트/JSON 로그, 시나리오, 문자열/버퍼 로깅, 스캔 범위·리트라이 옵션)
-- **모듈 이름 폴백**(`--module-alias`) — primary 실패 시 alias 후보를 순차 시도(ELF 버전 suffix, Mach-O dylib 변형 등)
-- Frida 실행 오케스트레이션(`offset-run`) 및 런타임 로그 요약(MD/HTML, 문자열 샘플 포함)
-- 프로파일(JSON)로 점수/시그니처/Frida 옵션 기본값 일괄 적용
-- 예제 StaticMeta 포함(`examples/static_meta.sample.json`)
+주요 흐름은 다음과 같습니다.
 
-## Requirements
-| 구분 | 환경 |
-| --- | --- |
-| OS | Windows / Linux / macOS / Android (Tier 1: Windows·Android) |
-| Java | OpenJDK 21 |
-| Ghidra | Ghidra 11.4.x |
-| Python | 3.10+ (venv 권장) |
-| frida | 17.x |
-| lief | 선택(optional `static` extra) — `binary_meta` 모듈에서 사용 |
-| jadx | 선택 — Android Java↔Native 분석 시 권장. PATH 또는 `VENOMHOOK_JADX` 환경 변수에 등록 |
-| apktool | 선택 — AndroidManifest 디코드 시 권장. PATH 또는 `VENOMHOOK_APKTOOL` 환경 변수에 등록 |
-
-## Set Up
-
-### Linux
-```bash
-# 1) Ghidra 환경 변수 자동 설정
-chmod +x ./setup/env.sh && ./setup/env.sh <Ghidra 설치 경로>
-
-# 예시
-# chmod +x ./setup/env.sh && ./setup/env.sh "$HOME/tools/ghidra_11.4.2_PUBLIC"
-
-# 2) 프로젝트용 필수 디렉토리 자동 생성
-chmod +x ./setup/mkdir.sh && ./setup/mkdir.sh
+```text
+Binary/APK -> StaticMeta -> Endpoint scoring -> HookSpec -> Frida script -> Runtime report
 ```
 
-### Windows (PowerShell)
-```powershell
-# 1) Ghidra 환경 변수 자동 설정
-powershell -ExecutionPolicy Bypass -File .\setup\env.ps1 <Ghidra 설치 경로>
+Windows PE, Linux/Android ELF, macOS Mach-O를 같은 데이터 모델로 다루며, Android APK에서는 native library 추출, manifest 감사, jadx 기반 Java native 메서드 추출, JNI symbol bridge 분석까지 제공합니다.
 
-# 예시
-# powershell -ExecutionPolicy Bypass -File .\setup\env.ps1 "$env:USERPROFILE\Tools\ghidra_11.4.2_PUBLIC"
+이 도구는 권한이 있는 분석 대상에서 리버스 엔지니어링, 보안 검증, 동적 계측 자동화를 돕기 위한 용도입니다.
 
-# 2) 프로젝트용 필수 디렉토리 자동 생성
-powershell -ExecutionPolicy Bypass -File .\setup\mkdir.ps1
+## What It Does
+
+- Ghidra headless postScript로 함수 RVA, imports, strings, raw bytes를 `StaticMeta` JSON으로 추출
+- `StaticMeta`를 점수화해 네트워크, 파일, 인증, URL, 암호화, JNI 관련 후킹 후보를 선별
+- 후킹 후보를 `HookSpec` JSON/SQLite로 저장
+- `HookSpec`에서 Frida JavaScript를 생성
+- signature fallback, module alias, 문자열/버퍼/return logging 옵션 지원
+- APK에서 `lib/<abi>/*.so`를 추출해 기존 native 분석 파이프라인으로 연결
+- apktool/jadx가 있으면 AndroidManifest, Java native method, JNI bridge까지 분석
+- Frida JSON 로그를 Markdown/HTML runtime summary로 변환
+
+## Quick Start
+
+가장 빠른 확인은 포함된 샘플 `StaticMeta`로 HookSpec과 Frida 스크립트를 생성하는 것입니다. Ghidra, Frida 실행 대상, Android 도구가 없어도 동작합니다.
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -e .
+
+venomhook offset-e2e \
+  --static-json ./sample/examples/static_meta.sample.json \
+  --target sample.exe \
+  --out-dir ./out
+```
+
+생성되는 파일:
+
+```text
+out/
+├── venomhook.json      # HookSpec JSON
+├── venomhook.db        # HookSpec SQLite
+├── venomhook.md        # HookSpec summary
+└── venomhook.js        # Generated Frida script
+```
+
+생성된 스크립트를 확인하려면:
+
+```bash
+sed -n '1,120p' ./out/venomhook.js
 ```
 
 ## Install
+
+기본 CLI만 사용할 경우:
+
 ```bash
-python -m venv venv
-source venv/bin/activate  # Linux/macOS
-.\venv\Scripts\Activate.ps1   # Windows PowerShell
-
-# 개발 모드로 해당 프로젝트를 패키징하여 설치
+python3 -m venv venv
+source venv/bin/activate
 pip install -e .
+```
 
-# (선택) 정적 분석용 lief/pefile/capstone 추가 (binary_meta 모듈, ELF/Mach-O 메타 추출 등)
+정적 바이너리 메타데이터 추출(`binary_meta`)도 사용할 경우:
+
+```bash
 pip install -e '.[static]'
+```
 
-# (선택) Frida 의존성도 함께 설치
+Frida 실행까지 CLI에서 처리할 경우:
+
+```bash
 pip install -e '.[dynamic]'
 ```
 
-## Usage
+Windows PowerShell:
 
-### Step 1. Create StaticMeta JSON File from Ghidra headless
-```bash
-# Linux
-analyzeHeadless ./static/project venomhook_project -import ./sample/putty.exe -overwrite -scriptPath $HOME/Tools/venomhook/ghidra_scripts -postScript export_staticmeta.py ./static/META/staticmeta.json
-
-# Windows
-analyzeHeadless .\static\project venomhook_project -import .\sample\putty.exe -overwrite -scriptPath $HOME\Tools\venomhook\ghidra_scripts -postScript export_staticmeta.py .\static\META\staticmeta.json
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -e .
 ```
-- 결과물: `/static/META/staticmeta.json` (StaticMeta). 다음 단계 입력으로 사용.
-- Ghidra 옵션: `--ghidra-headless`, `--ghidra-script`, `--ghidra-project-dir`, `--ghidra-project-name`
-  - 샘플 postScript(`export_staticmeta.py`)가 리포지토리에 포함됨. 마지막 인자 경로에 StaticMeta JSON을 써야 함.
 
-### (보조) lief 기반 모듈 메타 추출 (`binary_meta`)
-PE/ELF/Mach-O 어떤 포맷이든 동일 인터페이스로 모듈-수준 메타데이터를 얻을 수 있습니다. Ghidra의 함수-수준 분석을 보완합니다.
+## Requirements
+
+| Tool | Required | Purpose |
+| --- | --- | --- |
+| Python 3.10+ | yes | CLI 실행 |
+| Ghidra 11.x | real binary 분석 시 | Binary -> StaticMeta |
+| Java/OpenJDK | Ghidra/apktool 사용 시 | Java 기반 도구 실행 |
+| Frida 17.x | 동적 후킹 실행 시 | Generated script 실행 |
+| lief | optional `.[static]` | PE/ELF/Mach-O module metadata |
+| apktool | Android manifest 분석 시 | Binary AndroidManifest.xml decode |
+| jadx | Android Java 분석 시 | DEX -> Java native method extraction |
+
+환경 변수로 외부 도구 경로를 지정할 수 있습니다.
+
 ```bash
-PYTHONPATH=src python -c "
-from venomhook.binary_meta import extract_binary_meta
-m = extract_binary_meta('./sample/putty.exe')
-print(m.format, m.arch, m.os_hint, hex(m.image_base), 'aslr=', m.aslr)
-print('libs:', m.libraries[:3])
-print('imports[:5]:', m.imports[:5])
-"
+export VENOMHOOK_APKTOOL=/path/to/apktool
+export VENOMHOOK_JADX=/path/to/jadx
 ```
-- 추출 항목: `format`(PE/ELF/MACHO), `arch`(x86/x64/arm/arm64), `os_hint`(windows/linux/android/macos), `image_base`, `aslr`/PIE, `sections`, `imports`(평탄화된 함수 심볼), `libraries`(DLL/.so/.dylib 이름).
-- ELF의 경우 imports 내 Bionic 마커(`__android_log_print`, `JNI_OnLoad` 등)를 보고 `os_hint`를 `android`로 자동 감지합니다.
-- lief 미설치 시 `BinaryMetaError`로 안내. `pip install -e '.[static]'`로 설치.
 
-### Step 2. StaticMeta → HookSpec / Report
+Ghidra 경로 설정 helper:
+
 ```bash
-venomhook offset-static --static-json ./static/META/staticmeta.json --out ./reports/hook/venomhook.json --out-db ./reports/hook/venomhook.db --report-md ./reports/hook/venomhook.md --top 20 --sig-max-bytes 12 --score-network 30 --score-file 20 --score-auth 15 --score-url 10 --score-crypto 10 --score-jni 30
-
-# 바이너리를 직접 넣을 경우(Ghidra 실행 포함)
-venomhook offset-static --binary ./sample/putty.exe --ghidra-headless analyzeHeadless --ghidra-script ghidra_scripts/export_staticmeta.py --out ./reports/hook/venomhook.json
-
-# Android APK를 직접 넣을 경우 — APK에서 .so를 추출 후 Ghidra 실행
-venomhook offset-static --apk ./sample/myapp.apk --abi arm64-v8a --ghidra-headless analyzeHeadless --ghidra-script ghidra_scripts/export_staticmeta.py --out ./reports/hook/venomhook.json
-
-# 프로파일(JSON)로 점수/시그니처 기본값 적용
-venomhook offset-static --static-json ./static/META/staticmeta.json --profile profile.json --out ./reports/hook/venomhook.json
+chmod +x ./setup/env.sh
+./setup/env.sh "$HOME/tools/ghidra_11.4.2_PUBLIC"
 ```
-- 결과물: `venomhook.json`(필수), `venomhook.db`(선택), `venomhook.md`(요약).
-- 주요 옵션: 시그니처 길이(`--sig-max-bytes`), 점수 가중치(`--score-*`), 출력(`--out`, `--out-db`, `--report-md`), 입력(`--static-json` / `--binary`+Ghidra / `--apk`+ABI+Ghidra).
-- **점수 가중치**: 네트워크/파일/암호화/인증/URL 외에 `--score-jni`(기본 30) — `Java_*` 심볼이나 JNI imports(`JNI_OnLoad`/`RegisterNatives` 등)에 가중. Tier 1의 Android 분석을 1급으로 다룬다.
-- **APK 옵션**: `--apk <path>` + `--abi <auto|arm64-v8a|armeabi-v7a|x86_64|x86>` + `--apk-lib <basename>`(선택, 기본은 첫 번째 .so) + `--apk-extract-dir <dir>`(선택, 기본은 임시 디렉터리). `--apk`는 `--binary`/`--static-json`과 상호 배타.
-- 프로파일: `--profile`로 `{ "static": { "sig_max_bytes": 14, "score": { ... } } }` 형태 JSON을 넣으면 기본값을 덮어씁니다 (동일 값인 경우에만 적용, CLI 명시 값 우선).
 
-### Step 3. HookSpec → Frida Script
-```bash
-# Create from JSON file
-venomhook offset-hook --hookspec ./reports/hook/venomhook.json --target putty.exe --out-script ./frida_scripts/venomhook.js --log-format json --log-prefix "[venomhook]" --scenario-message "start" --auto-start-scenario --hexdump-len 64 --string-arg 0 --string-ret --string-len 128 --scan-size 4096 --retry-attach 2 --print-script
+Windows:
 
-# Create from DB file
-venomhook offset-hook --hookspec-db ./reports/hook/venomhook.db --target putty.exe --out-script ./frida_scripts/venomhook.js --log-format json --log-prefix "[venomhook]" --scenario-message "start" --auto-start-scenario --hexdump-len 64 --string-arg 0 --string-ret --string-len 128 --scan-size 4096 --retry-attach 2 --print-script
-
-# 모듈 이름이 환경에 따라 다를 수 있는 경우(ELF 버전 suffix, Mach-O 변형 등) 후보 alias 추가
-venomhook offset-hook --hookspec ./reports/hook/venomhook.json --target libfoo.so --module-alias libfoo.so.1 --module-alias libfoo.so.1.0
-
-# 프로파일(JSON)로 동적 옵션 기본값 적용
-venomhook offset-hook --hookspec ./reports/hook/venomhook.json --target putty.exe --profile profile.json
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup\env.ps1 "$env:USERPROFILE\Tools\ghidra_11.4.2_PUBLIC"
 ```
-- 결과물: `venomhook.js` (자동 생성된 Frida 후킹 스크립트).
-- 주요 옵션: 입력(`--hookspec`/`--hookspec-db` 둘 중 하나), 로그 포맷(`--log-format text|json`), 접두사(`--log-prefix`), 시나리오 알림(`--scenario-message`, `--auto-start-scenario`), 출력 경로(`--out-script`).
-- hexdump 길이(`--hexdump-len`), 호출 카운트 로그 포함.
-- 문자열 로깅: `--string-arg <idx>` 반복 지정 시 해당 인자를 C-string으로 읽어 로그, `--string-ret`는 반환값을 C-string으로 로그, 길이는 `--string-len`으로 제어.
-- 안정성 옵션: 시그니처 스캔 범위(`--scan-size`), attach 실패 리트라이(`--retry-attach`).
-- **모듈 이름 폴백**: `--module-alias <name>` 반복 지정 시 primary 모듈 이름이 매칭되지 않을 때 alias를 순차 시도. ELF 버전 suffix(`libfoo.so` → `libfoo.so.1.2.3`), Mach-O dylib 변형, PE/wine 이름 차이 등에 대응. 모든 후보가 실패하면 후보 목록을 에러 로그에 노출.
-- 프로파일: `--profile`로 `{ "dynamic": { "hexdump_len": 32, "string_arg": [0], ... } }` 형태 JSON을 넣으면 기본값을 덮어씁니다 (동일 값인 경우에만 적용, CLI 명시 값 우선).
 
-### Step 4. Frida Hooking Execute
+작업 디렉터리 생성:
+
 ```bash
-# frida 직접 실행 (로컬 PE/ELF/Mach-O)
+chmod +x ./setup/mkdir.sh
+./setup/mkdir.sh
+```
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup\mkdir.ps1
+```
+
+## Core Workflow
+
+### 1. StaticMeta 생성
+
+이미 `StaticMeta` JSON이 있으면 이 단계는 건너뛰어도 됩니다.
+
+Ghidra headless로 샘플 PE를 분석:
+
+```bash
+analyzeHeadless ./static/project venomhook_project \
+  -import ./sample/putty.exe \
+  -overwrite \
+  -scriptPath ./ghidra_scripts \
+  -postScript export_staticmeta.py ./static/META/staticmeta.json
+```
+
+출력 파일:
+
+```text
+static/META/staticmeta.json
+```
+
+### 2. StaticMeta -> HookSpec
+
+```bash
+venomhook offset-static \
+  --static-json ./static/META/staticmeta.json \
+  --out ./reports/hook/venomhook.json \
+  --out-db ./reports/hook/venomhook.db \
+  --report-md ./reports/hook/venomhook.md \
+  --top 20
+```
+
+바이너리를 직접 넣고 Ghidra 실행까지 맡기려면:
+
+```bash
+venomhook offset-static \
+  --binary ./sample/putty.exe \
+  --ghidra-headless analyzeHeadless \
+  --ghidra-script ./ghidra_scripts/export_staticmeta.py \
+  --out ./reports/hook/venomhook.json
+```
+
+주요 옵션:
+
+| Option | Meaning |
+| --- | --- |
+| `--top` | 상위 N개 후킹 후보만 출력 |
+| `--sig-max-bytes` | signature prefix 최대 byte 수 |
+| `--score-network` | network import 가중치 |
+| `--score-file` | file import 가중치 |
+| `--score-auth` | auth keyword 가중치 |
+| `--score-url` | URL/string 가중치 |
+| `--score-crypto` | crypto import/string 가중치 |
+| `--score-jni` | JNI/Android 가중치 |
+
+### 3. HookSpec -> Frida Script
+
+```bash
+venomhook offset-hook \
+  --hookspec ./reports/hook/venomhook.json \
+  --target putty.exe \
+  --out-script ./frida_scripts/venomhook.js \
+  --log-format json \
+  --hexdump-len 64 \
+  --string-arg 0 \
+  --string-ret \
+  --scan-size 4096 \
+  --retry-attach 2
+```
+
+SQLite HookSpec을 사용할 수도 있습니다.
+
+```bash
+venomhook offset-hook \
+  --hookspec-db ./reports/hook/venomhook.db \
+  --target putty.exe \
+  --out-script ./frida_scripts/venomhook.js
+```
+
+모듈 이름이 런타임에서 달라질 수 있으면 alias를 추가합니다.
+
+```bash
+venomhook offset-hook \
+  --hookspec ./reports/hook/venomhook.json \
+  --target libfoo.so \
+  --module-alias libfoo.so.1 \
+  --module-alias libfoo.so.1.0 \
+  --out-script ./frida_scripts/venomhook.js
+```
+
+### 4. Frida 실행
+
+Frida CLI를 직접 사용할 경우:
+
+```bash
 frida -f ./sample/putty.exe -l ./frida_scripts/venomhook.js --no-pause
-
-# 또는 CLI 오케스트레이터 사용 (사용 시 --dry-run 옵션 제거)
-venomhook offset-run --script ./frida_scripts/venomhook.js --target ./sample/putty.exe --frida-path frida --log-file ./.log/frida.log --dry-run
 ```
-- 결과물: 콘솔 로그(텍스트/JSON), 필요 시 `send()` 이벤트 소비. 실행/입력 시나리오는 별도 조작.
 
-#### Android (USB / `frida-server`)
-Android 디바이스에서 실행하려면 Frida 서버를 디바이스에 푸시하고 USB로 연결한 뒤 `-U`(USB) 플래그로 attach합니다.
+VenomHook 오케스트레이터를 사용할 경우:
+
 ```bash
-# 1) 디바이스에 frida-server 푸시 (한 번만)
-adb push frida-server-<ver>-android-<arch> /data/local/tmp/frida-server
-adb shell "chmod 755 /data/local/tmp/frida-server"
-
-# 2) frida-server 실행 (root 필요)
-adb shell "su -c '/data/local/tmp/frida-server &'"
-
-# 3) 호스트에서 USB로 attach 가능한 프로세스 확인
-frida-ps -Uai
-
-# 4) 패키지 spawn + 스크립트 로드
-frida -U -f com.example.app -l ./frida_scripts/venomhook.js --no-pause
-
-# 또는 이미 실행 중인 프로세스에 attach
-frida -U -n com.example.app -l ./frida_scripts/venomhook.js
+venomhook offset-run \
+  --script ./frida_scripts/venomhook.js \
+  --target ./sample/putty.exe \
+  --frida-path frida \
+  --log-file ./.log/frida.log
 ```
-- `--apk`로 만든 HookSpec은 `lib/<abi>/libfoo.so`에서 추출한 .so를 분석한 결과이므로, 디바이스에서 실제 로드되는 모듈 이름(`libfoo.so`)이 `--target`이 됩니다.
-- 디바이스에 동일 이름의 .so가 여러 위치에 존재하거나 버전 suffix가 붙는 경우 `--module-alias`로 보강하세요.
 
-### (Phase 2) Android 풀 파이프라인 — APK → 매니페스트 + Java natives + .so + JNI 브리지
-APK 한 번에서 Phase 2의 모든 Android 컨텍스트를 추출합니다. `apktool`/`jadx`는 선택 의존성이며 미설치 시 해당 단계만 건너뛰고 경고를 기록한 채 진행합니다.
+실행하지 않고 command만 확인:
+
 ```bash
-# 의존성 등록(둘 다 선택)
-export VENOMHOOK_JADX=/usr/local/bin/jadx
-export VENOMHOOK_APKTOOL=/usr/local/bin/apktool
+venomhook offset-run \
+  --script ./frida_scripts/venomhook.js \
+  --target ./sample/putty.exe \
+  --dry-run
+```
 
-PYTHONPATH=src python -c "
+### 5. Runtime Report
+
+Frida script를 `--log-format json`으로 생성하고 로그를 저장했다면 runtime summary를 만들 수 있습니다.
+
+```bash
+venomhook offset-report-runtime \
+  --log ./.log/frida.log \
+  --out-md ./reports/runtime_summary.md \
+  --out-html ./reports/runtime_summary.html
+```
+
+## Android Workflow
+
+### APK에서 native library HookSpec 생성
+
+APK 안의 `lib/<abi>/*.so`를 추출한 뒤 Ghidra 분석으로 넘깁니다.
+
+```bash
+venomhook offset-static \
+  --apk ./sample/myapp.apk \
+  --abi arm64-v8a \
+  --ghidra-headless analyzeHeadless \
+  --ghidra-script ./ghidra_scripts/export_staticmeta.py \
+  --out ./reports/hook/myapp.json
+```
+
+옵션:
+
+| Option | Meaning |
+| --- | --- |
+| `--abi auto` | `arm64-v8a`, `armeabi-v7a`, `x86_64`, `x86` 순서로 자동 선택 |
+| `--apk-lib libfoo.so` | 특정 `.so`만 선택 |
+| `--apk-extract-dir ./out/lib` | 추출 위치 지정 |
+
+생성된 HookSpec의 target은 디바이스에서 로드되는 실제 모듈 이름입니다. 보통 `libfoo.so` 형태입니다.
+
+```bash
+venomhook offset-hook \
+  --hookspec ./reports/hook/myapp.json \
+  --target libfoo.so \
+  --out-script ./frida_scripts/myapp.js
+```
+
+Android 디바이스에서 실행:
+
+```bash
+frida -U -f com.example.app -l ./frida_scripts/myapp.js --no-pause
+```
+
+이미 실행 중인 프로세스에 attach:
+
+```bash
+frida -U -n com.example.app -l ./frida_scripts/myapp.js
+```
+
+### APK 전체 컨텍스트 분석
+
+`android_pipeline.analyze_apk`는 APK에서 native library, module metadata, AndroidManifest, Java native methods, JNI bridge를 한 번에 수집합니다.
+
+```bash
+python -c "
 from venomhook.android_pipeline import analyze_apk
+
 r = analyze_apk('./sample/myapp.apk', './out_android', abi='auto')
-print('ABI:', r.selected_abi, 'so:', r.extracted_so_path)
-print('manifest pkg:', r.app_meta.package_name if r.app_meta else 'apktool 미설치')
+print('ABI:', r.selected_abi)
+print('SO:', r.extracted_so_path)
+print('manifest:', r.app_meta.package_name if r.app_meta else 'not decoded')
 print('java natives:', len(r.java_natives))
-print('matched bridges:', len(r.matched_bridges), '/ total:', len(r.bridges))
-for b in r.matched_bridges[:3]:
-    print(' ', b.java_method.class_fqn + '.' + b.java_method.method_name, '->', b.matched_symbol)
+print('matched bridges:', len(r.matched_bridges), '/', len(r.bridges))
 print('warnings:', r.warnings)
 "
 ```
-- 산출물: `AndroidAnalysis`(ApkMeta + 선택된 ABI + 추출된 .so 경로 + BinaryMeta + AndroidAppMeta + JavaNativeMethod[] + JniBridge[] + warnings).
-- 단계: ① `apk_extractor`로 APK 메타·.so 추출 → ② `binary_meta`(lief)로 .so 익스포트 수집 → ③ `apk_decoder`(apktool)로 매니페스트 → ④ `jadx_runner`(jadx)로 Java native 메서드 → ⑤ `jni_bridge`로 `Java_<class>_<method>` 심볼 예측·상관.
-- **strict 모드**: `analyze_apk(..., fail_on_missing_tools=True)`로 apktool/jadx 미설치 시 즉시 실패하도록 강제.
-- 추출된 .so는 `<work_dir>/lib/`, apktool 출력은 `<work_dir>/apktool/`, jadx 출력은 `<work_dir>/jadx/`에 저장됩니다. Ghidra 함수-수준 분석을 추가로 원하면 추출된 .so 경로를 `static_pipeline`에 넘기세요.
 
-### (Phase 2) AndroidManifest 취약점 감사 (`manifest_audit`)
-APK의 `AndroidAppMeta`(매니페스트 디코드 결과) 위에서 동작하는 **순수 Python 룰 엔진** — 외부 도구·서브프로세스·네트워크 호출 없음. 9개 룰을 OWASP MASVS / CWE 참조와 함께 검출합니다.
+`apktool` 또는 `jadx`가 없으면 해당 단계만 warning으로 남기고 계속 진행합니다. 반드시 필요하게 만들려면:
+
+```python
+analyze_apk("./sample/myapp.apk", "./out_android", fail_on_missing_tools=True)
+```
+
+### AndroidManifest 감사
+
+`apk_decoder`로 디코드한 manifest metadata를 `manifest_audit` 룰 엔진에 넣습니다.
 
 ```bash
-PYTHONPATH=src python -c "
-from venomhook.apk_decoder import decode_apk, ApktoolConfig
+python -c "
+from venomhook.apk_decoder import decode_apk
 from venomhook.manifest_audit import audit_manifest, format_audit_summary
 
 _, app = decode_apk('./sample/myapp.apk', './out_audit/apktool')
 report = audit_manifest(app)
 print(format_audit_summary(report))
-
-# CI 게이트 — high 이상 발견 시 exit 1
-import sys
-if report.has_severity_at_least('high'):
-    sys.exit(1)
 "
 ```
 
-**검출 룰**:
+CI gate 예시:
 
-| Rule ID | Title | Severity | 트리거 조건 |
-|---|---|---|---|
-| MANIFEST-001 | Debuggable Application | high | `application/@debuggable=true` |
-| MANIFEST-002 | Cleartext Traffic Permitted | high | `usesCleartextTraffic=true` 또는 (unset + `targetSdk<28` + NSC 미지정) |
-| MANIFEST-003 | Allow Backup Enabled | medium | `allowBackup=true` 또는 (unset + `targetSdk<31`) |
-| MANIFEST-004 | Exported Component without Permission | high | `exported=true` + intent-filter + `permission=None` (provider 제외) |
-| MANIFEST-005 | Exported Content Provider | high | `provider/@exported=true` |
-| MANIFEST-006 | Provider with grantUriPermissions | medium | `provider/@grantUriPermissions=true` |
-| MANIFEST-007 | Dangerous Permission Surface | info | READ_SMS·RECORD_AUDIO·CAMERA·FINE_LOCATION 등 30+ 분류 |
-| MANIFEST-008 | Outdated minSdkVersion | medium | `minSdk<23` (Android 6.0 미만) |
-| MANIFEST-009 | Outdated targetSdkVersion | medium | `targetSdk<30` |
-
-- 각 finding은 `rule_id` / `title` / `severity` / `detail` / `remediation` / `references`(OWASP MASVS·CWE) / 해당 시 `component`(FQN)를 포함.
-- `AndroidAuditReport.has_severity_at_least(threshold)` — CI/CD 게이트에 사용 (critical/high/medium/low/info 정렬).
-- `format_audit_summary(report)` — 터미널용 요약 한 줄 + finding 리스트.
-- PoC 자동 도출은 Phase 3 범위로 분리 — 현재 PR은 정적 검출까지.
-
-▎ 위 4-backtick 블록의 내부 내용만 복사해서 붙여넣으세요. bash 코드 펜스(```bash)는 본문의 일부로 그대로 들어갑니다.
-
-### Step 5. Runtime Log Summary (선택)
-Frida JSON 로그를 Markdown 요약으로 변환합니다.
 ```bash
-venomhook offset-report-runtime --log ./.log/frida.log --out-md ./reports/runtime_summary.md --out-html ./reports/runtime_summary.html
-```
-- 결과물: `runtime_summary.md` / `runtime_summary.html` (hook별 enter/leave/hexdump/error 카운트 + 문자열/args/ret 샘플)
+python -c "
+import sys
+from venomhook.apk_decoder import decode_apk
+from venomhook.manifest_audit import audit_manifest
 
-### Step 6. One-shot E2E (옵션)
-StaticMeta→HookSpec→Frida 스크립트 생성까지 한 번에 수행하고(기본 frida 실행은 생략, `--run-frida`로 실행 가능), 산출물을 한 디렉터리에 모읍니다.
+_, app = decode_apk('./sample/myapp.apk', './out_audit/apktool')
+report = audit_manifest(app)
+sys.exit(1 if report.has_severity_at_least('high') else 0)
+"
+```
+
+현재 manifest audit rule:
+
+| Rule ID | Title | Severity |
+| --- | --- | --- |
+| `MANIFEST-001` | Debuggable Application | high |
+| `MANIFEST-002` | Cleartext Traffic Permitted | high |
+| `MANIFEST-003` | Allow Backup Enabled | medium |
+| `MANIFEST-004` | Exported Component without Permission | high |
+| `MANIFEST-005` | Exported Content Provider | high |
+| `MANIFEST-006` | Provider with grantUriPermissions | medium |
+| `MANIFEST-007` | Dangerous Permission Surface | info |
+| `MANIFEST-008` | Outdated minSdkVersion | medium |
+| `MANIFEST-009` | Outdated targetSdkVersion | medium |
+
+## Binary Metadata Helper
+
+Ghidra 함수 분석 없이 module-level metadata만 빠르게 확인할 수 있습니다. `lief`가 필요합니다.
+
 ```bash
-venomhook offset-e2e \
-  --static-json ./static/META/staticmeta.json \   # 또는 --binary ... (Ghidra 필요)
-  --target putty.exe \
-  --out-dir out \
-  --profile profile.json \   # 선택: 기본값 덮어쓰기
-  --run-frida --frida-log ./.log/frida.log --summarize-log   # 실제 frida 실행 시
+pip install -e '.[static]'
 
-# Android APK를 한 번에 분석하려면
-venomhook offset-e2e \
-  --apk ./sample/myapp.apk --abi arm64-v8a \
-  --ghidra-headless analyzeHeadless --ghidra-script ghidra_scripts/export_staticmeta.py \
-  --target libfoo.so --module-alias libfoo.so.1 \
-  --out-dir out_android
-```
-- 산출물: `reports/hook/venomhook.json` `reports/hook/venomhook.db` `reports/hook/venomhook.md` `frida_scripts/venomhook.js` (+옵션: frida.log, runtime_summary)
-- APK 사용 시 추출된 .so는 `<out-dir>/extracted/`에 저장됨.
+python -c "
+from venomhook.binary_meta import extract_binary_meta
 
-## 최종 디렉토리 구조
+m = extract_binary_meta('./sample/putty.exe')
+print(m.format, m.arch, m.os_hint, hex(m.image_base), 'aslr=', m.aslr)
+print('libraries:', m.libraries[:5])
+print('imports:', m.imports[:10])
+print('exports:', m.exports[:10])
+"
 ```
+
+## Profile Defaults
+
+반복 실행 옵션은 JSON profile로 관리할 수 있습니다.
+
+```json
+{
+  "static": {
+    "sig_max_bytes": 14,
+    "score": {
+      "network_weight": 30,
+      "file_weight": 20,
+      "auth_weight": 15,
+      "url_weight": 10,
+      "crypto_weight": 10,
+      "jni_weight": 30
+    }
+  },
+  "dynamic": {
+    "hexdump_len": 64,
+    "string_arg": [0],
+    "string_ret": true,
+    "string_len": 128,
+    "scan_size": 4096,
+    "retry_attach": 2
+  }
+}
+```
+
+사용:
+
+```bash
+venomhook offset-static \
+  --static-json ./sample/examples/static_meta.sample.json \
+  --profile ./profile.json \
+  --out ./out/venomhook.json
+
+venomhook offset-hook \
+  --hookspec ./out/venomhook.json \
+  --target sample.exe \
+  --profile ./profile.json \
+  --out-script ./out/venomhook.js
+```
+
+## Project Layout
+
+```text
 venomhook/
-│
-├── .log/                                 # Frida 로그
-│
-├── setup/                                # 환경 설정
+├── ghidra_scripts/
+│   └── export_staticmeta.py
+├── sample/
+│   ├── examples/
+│   │   └── static_meta.sample.json
+│   ├── tests/
+│   └── putty.exe
+├── setup/
 │   ├── env.ps1
 │   ├── env.sh
 │   ├── mkdir.ps1
 │   └── mkdir.sh
-│
-├── ghidra_scripts/
-│   └── export_staticmeta.py              # StaticMeta JSON을 내보내는 Ghidra postScript
-│
 ├── src/
 │   └── venomhook/
-│       ├── models.py                     # StaticMeta/EndpointMeta/HookSpec 데이터 모델
-│       ├── scoring.py                    # 엔드포인트 점수 규칙 (OS별 사전 + JNI 1급)
-│       ├── hookspec_builder.py           # HookSpec 생성기
-│       ├── static_pipeline.py            # StaticMeta -> HookSpec 파이프라인
-│       ├── dynamic_pipeline.py           # HookSpec -> Frida 스크립트 생성
-│       ├── binary_meta.py                # lief 기반 PE/ELF/Mach-O 메타 추출 (선택 dep)
-│       ├── apk_extractor.py              # Android APK -> lib/<abi>/*.so 추출
-│       ├── apk_decoder.py                # apktool 래퍼 — AndroidManifest 디코드/파서 (Phase 2)
-│       ├── jadx_runner.py                # jadx 래퍼 — DEX→Java + native 메서드 추출 (Phase 2)
-│       ├── jni_bridge.py                 # Java native ↔ C 심볼 매퍼 (JNI §11.1) (Phase 2)
-│       ├── android_pipeline.py           # APK→매니페스트+natives+.so+브리지 오케스트레이터 (Phase 2)
-│       ├── manifest_audit.py             # AndroidManifest 취약점 룰 엔진 (9 rules, Phase 2)
-│       ├── ghidra_runner.py              # Ghidra headless 래퍼
-│       ├── orchestrator.py               # Frida 실행 오케스트레이터
-│       ├── report.py                     # HookSpec 마크다운 리포트
-│       ├── runtime_report.py             # Frida 로그(MD/HTML) 요약기 (문자열 샘플 포함)
-│       ├── config.py                     # 프로파일 로더
-│       ├── store.py                      # JSON/SQLite 로드·세이브 유틸
-│       └── cli.py                        # venomhook offset-static / offset-hook 엔트리포인트
-│
-├── static/
-│   ├── frida_manager.py
-│   ├── META/
-│   │   └── staticmeta.json               # StaticMeta JSON 파일
-│   └── project/                          # ghidra 정적 분석 파일
-│
-├── frida_scripts/
-│   └── venomhook.js                      # Frida Hooking 스크립트
-│
-├── reports/
-│   ├── hook/                             # HookSpec
-│   │   ├── venomhook.json
-│   │   ├── venomhook.db
-│   │   └── venomhook.md
-│   ├── runtime_summary.md
-│   └── runtime_summary.html
-│
-└── sample/
-    ├── examples/
-    │   └── static_meta.sample.json       # 샘플 StaticMeta
-    ├── tests/                            # 간단한 파이프라인 테스트
-    └── putty.exe                         # 테스트용 EXE 파일
+│       ├── android_pipeline.py
+│       ├── apk_decoder.py
+│       ├── apk_extractor.py
+│       ├── binary_meta.py
+│       ├── cli.py
+│       ├── dynamic_pipeline.py
+│       ├── ghidra_runner.py
+│       ├── hookspec_builder.py
+│       ├── jadx_runner.py
+│       ├── jni_bridge.py
+│       ├── manifest_audit.py
+│       ├── models.py
+│       ├── orchestrator.py
+│       ├── report.py
+│       ├── runtime_report.py
+│       ├── scoring.py
+│       ├── static_pipeline.py
+│       └── store.py
+├── architecture.md
+├── pyproject.toml
+└── README.md
 ```
+
+Generated output directories such as `static/META`, `static/project`, `reports`, `frida_scripts`, and `.log` are ignored by git.
 
 ## 개발/테스트
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s ./sample/tests
+python3 -m unittest discover -s ./sample/tests
 ```
 
 ## Architect

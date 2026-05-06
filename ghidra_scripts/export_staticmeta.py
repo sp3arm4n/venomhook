@@ -46,6 +46,95 @@ def is_executable_addr(prog, addr):
     block = prog.getMemory().getBlock(addr)
     return block is not None and block.isExecute()
 
+def is_external_addr(prog, addr):
+    block = prog.getMemory().getBlock(addr)
+    if block is None:
+        return False
+    try:
+        return block.isExternalBlock()
+    except:
+        return block.getName() == "EXTERNAL"
+
+def is_call_ref(ref):
+    try:
+        return ref.getReferenceType().isCall()
+    except:
+        return "call" in str(ref.getReferenceType()).lower()
+
+def iter_body_refs(prog, body):
+    refman = prog.getReferenceManager()
+    addr_it = body.getAddresses(True)
+    while addr_it.hasNext():
+        addr = addr_it.next()
+        refs = refman.getReferencesFrom(addr)
+        for ref in refs:
+            yield ref
+
+def get_symbol_name(sym):
+    if sym is None:
+        return None
+    try:
+        return sym.getName()
+    except:
+        try:
+            return sym.getName(True)
+        except:
+            return None
+
+def get_import_name(prog, addr):
+    sym = prog.getSymbolTable().getPrimarySymbol(addr)
+    if sym is not None:
+        try:
+            if sym.isExternal():
+                return get_symbol_name(sym)
+        except:
+            pass
+        if is_external_addr(prog, addr):
+            return get_symbol_name(sym)
+
+    func = prog.getFunctionManager().getFunctionAt(addr)
+    if func is None:
+        return None
+    try:
+        if func.isExternal():
+            return func.getName()
+    except:
+        pass
+    try:
+        thunked = func.getThunkedFunction(True)
+        if thunked is not None:
+            return thunked.getName()
+    except:
+        pass
+    try:
+        if func.isThunk():
+            return func.getName()
+    except:
+        pass
+    return None
+
+def get_string_at(prog, addr):
+    listing = prog.getListing()
+    data = None
+    try:
+        data = listing.getDataAt(addr)
+    except:
+        data = None
+    if data is None:
+        try:
+            data = listing.getDefinedDataContaining(addr)
+        except:
+            data = None
+    if data is not None:
+        try:
+            if data.hasStringValue():
+                s = str(data.getValue()).strip()
+                if len(s) > 2:
+                    return s
+        except:
+            pass
+    return None
+
 def safe_hex(x):
     try:
         return hex(int(x)).replace("L", "")
@@ -108,29 +197,52 @@ def main():
         for ref in refs_to:
             callers.append(ref.getFromAddress().getOffset())
 
-        # Callees/imports
+        # Callees/imports and referenced strings. Inspect references from the
+        # whole function body, not only the entry instruction; most interesting
+        # API calls and string xrefs appear after the prologue.
         callees = []
-        for ref in prog.getReferenceManager().getReferencesFrom(entry):
-            to_addr = ref.getToAddress()
-            sym = prog.getSymbolTable().getPrimarySymbol(to_addr)
-            if sym and sym.getSymbolType().toString() == "LIBRARY":
-                callees.append({"type": "import", "name": sym.getName()})
-            else:
-                callees.append({"type": "local", "rva": to_addr.getOffset() - image_base})
-
-        # Strings near function (limit)
+        seen_callees = set()
         fn_strings = []
+        seen_strings = set()
         body = func.getBody()
         if body is None:
             continue
 
+        for ref in iter_body_refs(prog, body):
+            to_addr = ref.getToAddress()
+            s = get_string_at(prog, to_addr)
+            if s and s not in seen_strings and len(fn_strings) < 10:
+                fn_strings.append(s)
+                seen_strings.add(s)
+
+            if not is_call_ref(ref):
+                continue
+
+            import_name = get_import_name(prog, to_addr)
+            if import_name:
+                key = ("import", import_name)
+                if key not in seen_callees:
+                    callees.append({"type": "import", "name": import_name})
+                    seen_callees.add(key)
+                continue
+
+            if is_executable_addr(prog, to_addr):
+                local_rva = to_addr.getOffset() - image_base
+                key = ("local", local_rva)
+                if key not in seen_callees:
+                    callees.append({"type": "local", "rva": local_rva})
+                    seen_callees.add(key)
+
+        # Inline strings defined inside the function body are uncommon but cheap
+        # to retain as a fallback alongside xref-derived strings.
         it = listing.getDefinedData(body, True)
         while it.hasNext() and len(fn_strings) < 10:
             data = it.next()
             if data.hasStringValue():
                 s = str(data.getValue()).strip()
-                if len(s) > 2:
+                if len(s) > 2 and s not in seen_strings:
                     fn_strings.append(s)
+                    seen_strings.add(s)
 
         # Imports called (symbol names)
         imports = [c["name"] for c in callees if c.get("type") == "import"]

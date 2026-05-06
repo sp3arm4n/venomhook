@@ -367,14 +367,14 @@ class AndroidComponent:
     Class names are resolved relative to the application package per Android
     convention: leading '.' is replaced with the package, and bare names get
     the package prepended. Already-qualified names pass through unchanged.
-    `exported` reflects only the literal `android:exported="true"` attribute;
-    Android's full inference rule (which depends on intent-filter presence
-    and target SDK) is intentionally NOT applied here — callers can layer it
-    on top using `intent_actions` if needed.
+    `exported` reflects the literal `android:exported` value when present.
+    `exported_declared=False` means the attribute was absent in the manifest;
+    audit code can then apply Android's target-SDK-dependent default rules.
     """
     type: str  # "activity" | "service" | "receiver" | "provider"
     name: str  # FQN class name (resolved against package)
     exported: bool = False
+    exported_declared: bool = True
     permission: Optional[str] = None
     intent_actions: list[str] = field(default_factory=list)
     # Provider-only attribute audited by manifest_audit (PR #11). Defaults to
@@ -386,6 +386,7 @@ class AndroidComponent:
             type=data["type"],
             name=data["name"],
             exported=bool(data.get("exported", False)),
+            exported_declared=bool(data.get("exported_declared", "exported" in data)),
             permission=data.get("permission"),
             intent_actions=list(data.get("intent_actions", [])),
             grant_uri_permissions=bool(data.get("grant_uri_permissions", False)),
@@ -396,6 +397,8 @@ class AndroidComponent:
             "name": self.name,
             "exported": self.exported,
         }
+        if not self.exported_declared:
+            result["exported_declared"] = False
         if self.permission is not None:
             result["permission"] = self.permission
         if self.intent_actions:

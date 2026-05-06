@@ -268,6 +268,7 @@ def _resolve_class_name(name: Optional[str], package: str) -> Optional[str]:
 def _parse_component(elem: ET.Element, comp_type: str, package: str) -> AndroidComponent:
     name = _resolve_class_name(elem.attrib.get(f"{ANDROID_NS}name"), package) or ""
     exported_attr = elem.attrib.get(f"{ANDROID_NS}exported")
+    exported_declared = exported_attr in ("true", "false")
     exported = exported_attr == "true"
     permission = elem.attrib.get(f"{ANDROID_NS}permission")
     # grantUriPermissions is meaningful for providers; harmless on others
@@ -285,6 +286,7 @@ def _parse_component(elem: ET.Element, comp_type: str, package: str) -> AndroidC
         type=comp_type,
         name=name,
         exported=exported,
+        exported_declared=exported_declared,
         permission=permission,
         intent_actions=intent_actions,
         grant_uri_permissions=grant_uri,

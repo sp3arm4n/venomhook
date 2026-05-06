@@ -174,9 +174,11 @@ class DynamicPipeline:
                     f"        logEvent(\"sigmatch\", moduleName, {{hook: {name_lit}, addr: ptrToHex(target)}});",
                     "      } else {",
                     f"        logEvent(\"error\", moduleName, {{hook: {name_lit}, msg: \"signature not found in module\"}});",
+                    "        return;",
                     "      }",
                     "    } catch (e) {",
                     f"      logEvent(\"error\", moduleName, {{hook: {name_lit}, msg: \"signature scan error: \" + e}});",
+                    "      return;",
                     "    }",
                     "  }",
                 ]

@@ -1,9 +1,9 @@
 venv/
 build/
-src/venomhook/__pycache__/
+__pycache__/
+*.py[cod]
+.pytest_cache/
 src/venomhook.egg-info/
-sample/tests/
-sample/examples/
 static/project
 static/META
 reports/

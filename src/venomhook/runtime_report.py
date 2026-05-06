@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter, defaultdict
+from html import escape
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -117,22 +118,31 @@ def write_html_summary(summary: dict[str, Any], path: Path) -> None:
 
     rows = []
     for hook, evs in hooks.items():
+        hook_html = escape(str(hook), quote=True)
         enter = evs.get("enter", 0)
         leave = evs.get("leave", 0)
         hd = evs.get("hexdump", 0)
         err = errors.get(hook, 0)
-        rows.append(f"<tr><td>{hook}</td><td>{enter}</td><td>{leave}</td><td>{hd}</td><td>{err}</td></tr>")
+        rows.append(
+            f"<tr><td>{hook_html}</td><td>{enter}</td><td>{leave}</td><td>{hd}</td><td>{err}</td></tr>"
+        )
 
     string_blocks = []
     for hook, samples in strings.items():
+        hook_html = escape(str(hook), quote=True)
+        samples_html = "; ".join(escape(str(sample), quote=True) for sample in samples)
         string_blocks.append(
-            "<div><strong>{}</strong>: {}</div>".format(hook, "; ".join(samples))
+            "<div><strong>{}</strong>: {}</div>".format(hook_html, samples_html)
         )
     args_blocks = []
     for hook, samples in enter_samples.items():
-        args_blocks.append("<div><strong>{}</strong> args: {}</div>".format(hook, "; ".join(samples)))
+        hook_html = escape(str(hook), quote=True)
+        samples_html = "; ".join(escape(str(sample), quote=True) for sample in samples)
+        args_blocks.append("<div><strong>{}</strong> args: {}</div>".format(hook_html, samples_html))
     for hook, samples in ret_samples.items():
-        args_blocks.append("<div><strong>{}</strong> ret: {}</div>".format(hook, "; ".join(samples)))
+        hook_html = escape(str(hook), quote=True)
+        samples_html = "; ".join(escape(str(sample), quote=True) for sample in samples)
+        args_blocks.append("<div><strong>{}</strong> ret: {}</div>".format(hook_html, samples_html))
 
     html = "\n".join(
         [

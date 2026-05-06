@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Callable
 
 from venomhook.models import (
+    AndroidComponent,
     AndroidAppMeta,
     AndroidAuditReport,
     ManifestFinding,
@@ -60,6 +61,7 @@ MIN_RECOMMENDED_TARGET_SDK = 30  # Android 11 — modern security defaults
 # Android version inflection points that flip default attribute values.
 TARGET_SDK_CLEARTEXT_DEFAULT_FALSE = 28  # API 28+ defaults usesCleartextTraffic to false
 TARGET_SDK_ALLOW_BACKUP_DEFAULT_FALSE = 31  # API 31+ defaults allowBackup to false
+TARGET_SDK_PROVIDER_EXPORTED_DEFAULT_FALSE = 17  # API 17+ providers default exported=false
 
 
 # Android-defined dangerous permission groups (subset of those most often
@@ -107,6 +109,17 @@ DANGEROUS_PERMISSIONS: frozenset[str] = frozenset({
 
 
 # ---------- individual rules ----------
+
+
+def _is_effectively_exported(component: AndroidComponent, target_sdk: int | None) -> bool:
+    """Apply Android's exported defaults when android:exported is absent."""
+    if component.exported:
+        return True
+    if component.exported_declared:
+        return False
+    if component.type == "provider":
+        return target_sdk is None or target_sdk < TARGET_SDK_PROVIDER_EXPORTED_DEFAULT_FALSE
+    return bool(component.intent_actions)
 
 
 def _check_debuggable(meta: AndroidAppMeta) -> list[ManifestFinding]:
@@ -211,14 +224,19 @@ def _check_exported_no_permission(meta: AndroidAppMeta) -> list[ManifestFinding]
         # finding below.
         if c.type == "provider":
             continue
-        if c.exported and c.intent_actions and not c.permission:
+        if _is_effectively_exported(c, meta.target_sdk) and c.intent_actions and not c.permission:
+            export_state = (
+                "android:exported=true"
+                if c.exported_declared
+                else "implicitly exported because android:exported is absent"
+            )
             findings.append(ManifestFinding(
                 rule_id="MANIFEST-004",
                 title=f"Exported {c.type} without permission",
                 severity=SEV_HIGH,
                 component=c.name,
                 detail=(
-                    f"{c.type} '{c.name}' is android:exported=true with intent-filter "
+                    f"{c.type} '{c.name}' is {export_state} with intent-filter "
                     f"actions {c.intent_actions} and no android:permission. Any installed "
                     "app can invoke it directly."
                 ),
@@ -236,8 +254,13 @@ def _check_exported_no_permission(meta: AndroidAppMeta) -> list[ManifestFinding]
 def _check_exported_provider(meta: AndroidAppMeta) -> list[ManifestFinding]:
     findings: list[ManifestFinding] = []
     for c in meta.components:
-        if c.type != "provider" or not c.exported:
+        if c.type != "provider" or not _is_effectively_exported(c, meta.target_sdk):
             continue
+        export_state = (
+            "explicitly exported"
+            if c.exported_declared
+            else "implicitly exported because targetSdk is below 17 or unspecified"
+        )
         # An exported provider WITHOUT permission is critical; with permission,
         # still high (third-party signing keys can be obtained).
         severity = SEV_HIGH if c.permission else SEV_HIGH
@@ -247,7 +270,7 @@ def _check_exported_provider(meta: AndroidAppMeta) -> list[ManifestFinding]:
             severity=severity,
             component=c.name,
             detail=(
-                f"Content provider '{c.name}' is exported. Other apps can issue "
+                f"Content provider '{c.name}' is {export_state}. Other apps can issue "
                 f"queries / inserts / updates / deletes against it"
                 + (
                     f" (currently guarded by permission '{c.permission}')."
