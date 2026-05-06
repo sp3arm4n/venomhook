@@ -476,13 +476,17 @@ class AndroidAppMeta:
         if self.network_security_config is not None:
             result["network_security_config"] = self.network_security_config
         return result
+
+
 @dataclass
 class ManifestFinding:
     """A single rule violation surfaced by manifest_audit.
+
     Self-contained record so callers can render reports without re-running
     rules. `severity` ∈ {critical, high, medium, low, info}; `references`
     are usually OWASP MASVS / CWE / Android docs identifiers.
     """
+
     rule_id: str           # e.g. "MANIFEST-001"
     title: str             # short human-readable label
     severity: str          # critical | high | medium | low | info
@@ -490,6 +494,7 @@ class ManifestFinding:
     remediation: str = ""
     component: Optional[str] = None  # FQN of the offending component, or None for app-level
     references: list[str] = field(default_factory=list)
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ManifestFinding":
         return cls(
@@ -501,6 +506,7 @@ class ManifestFinding:
             component=data.get("component"),
             references=list(data.get("references", [])),
         )
+
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
             "rule_id": self.rule_id,
@@ -516,31 +522,39 @@ class ManifestFinding:
         if self.references:
             result["references"] = list(self.references)
         return result
+
+
 @dataclass
 class AndroidAuditReport:
     """Aggregated manifest_audit findings for an APK.
+
     `findings` order matches rule registration order in manifest_audit.RULES;
     callers wanting severity-grouped output use `by_severity`.
     """
+
     package_name: str
     findings: list[ManifestFinding] = field(default_factory=list)
+
     _SEVERITY_ORDER: tuple[str, ...] = field(
         default=("critical", "high", "medium", "low", "info"),
         init=False,
         repr=False,
     )
+
     @property
     def by_severity(self) -> dict[str, list[ManifestFinding]]:
         result: dict[str, list[ManifestFinding]] = {}
         for f in self.findings:
-        for f in self.findings:
             result.setdefault(f.severity, []).append(f)
         return result
+
     @property
     def severity_counts(self) -> dict[str, int]:
         return {sev: len(items) for sev, items in self.by_severity.items()}
+
     def has_severity_at_least(self, threshold: str) -> bool:
         """True if any finding's severity is >= threshold (critical highest).
+
         Useful for CI/CD gates: ``report.has_severity_at_least("high")``.
         """
         order = self._SEVERITY_ORDER
@@ -551,12 +565,14 @@ class AndroidAuditReport:
             if f.severity in order and order.index(f.severity) <= cutoff:
                 return True
         return False
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AndroidAuditReport":
         return cls(
             package_name=data.get("package_name", ""),
             findings=[ManifestFinding.from_dict(f) for f in data.get("findings", [])],
         )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "package_name": self.package_name,
