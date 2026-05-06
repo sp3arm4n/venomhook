@@ -68,7 +68,8 @@ class BinaryMeta:
     image_base: int
     aslr: bool  # PE: DYNAMIC_BASE; ELF/Mach-O: PIE
     sections: list[SectionMeta] = field(default_factory=list)
-    imports: list[str] = field(default_factory=list)  # flat function symbol names
+    imports: list[str] = field(default_factory=list)  # flat function symbol names (imported)
+    exports: list[str] = field(default_factory=list)  # flat function symbol names (exported)
     libraries: list[str] = field(default_factory=list)  # imported DLL/.so names
 
     def to_dict(self) -> dict[str, Any]:
@@ -83,6 +84,7 @@ class BinaryMeta:
             "aslr": self.aslr,
             "sections": [s.to_dict() for s in self.sections],
             "imports": list(self.imports),
+            "exports": list(self.exports),
             "libraries": list(self.libraries),
         }
 
@@ -301,6 +303,21 @@ def extract_binary_meta(path: str | Path) -> BinaryMeta:
     seen: set[str] = set()
     imports = [s for s in imports if not (s in seen or seen.add(s))]
 
+    # Exported function symbols (flat). Critical for Android JNI correlation
+    # — the JVM looks up `Java_<class>_<method>` in the .so's export table.
+    exports: list[str] = []
+    try:
+        for sym in binary.exported_functions:
+            name = getattr(sym, "name", None)
+            if name:
+                exports.append(str(name))
+            else:
+                exports.append(str(sym))
+    except Exception:
+        exports = []
+    seen_e: set[str] = set()
+    exports = [s for s in exports if not (s in seen_e or seen_e.add(s))]
+
     # Libraries (DLL / .so / .dylib names). PE returns strings; Mach-O returns
     # DylibCommand objects with a .name attribute; ELF returns strings.
     libraries: list[str] = []
@@ -324,5 +341,6 @@ def extract_binary_meta(path: str | Path) -> BinaryMeta:
         aslr=aslr,
         sections=sections,
         imports=imports,
+        exports=exports,
         libraries=libraries,
     )
