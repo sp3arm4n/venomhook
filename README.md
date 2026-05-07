@@ -25,6 +25,8 @@ Windows PE, Linux/Android ELF, macOS Mach-O를 같은 데이터 모델로 다루
 - signature fallback, module alias, 문자열/버퍼/return logging 옵션 지원
 - APK에서 `lib/<abi>/*.so`를 추출해 기존 native 분석 파이프라인으로 연결
 - apktool/jadx가 있으면 AndroidManifest, Java native method, JNI bridge까지 분석
+- AndroidManifest 취약점 룰 9종(MANIFEST-001~009)을 자동 감사하고, 결과 finding마다 ADB / Frida / shell PoC 레시피를 자동 생성 (`venomhook android-audit`)
+- 생성된 PoC를 실행 가능한 `.sh` / `.frida.js` 번들로 디렉터리 단위 export
 - Frida JSON 로그를 Markdown/HTML runtime summary로 변환
 
 ## Quick Start
@@ -361,17 +363,108 @@ sys.exit(1 if report.has_severity_at_least('high') else 0)
 
 현재 manifest audit rule:
 
-| Rule ID | Title | Severity |
-| --- | --- | --- |
-| `MANIFEST-001` | Debuggable Application | high |
-| `MANIFEST-002` | Cleartext Traffic Permitted | high |
-| `MANIFEST-003` | Allow Backup Enabled | medium |
-| `MANIFEST-004` | Exported Component without Permission | high |
-| `MANIFEST-005` | Exported Content Provider | high |
-| `MANIFEST-006` | Provider with grantUriPermissions | medium |
-| `MANIFEST-007` | Dangerous Permission Surface | info |
-| `MANIFEST-008` | Outdated minSdkVersion | medium |
-| `MANIFEST-009` | Outdated targetSdkVersion | medium |
+| Rule ID | Title | Severity | PoC |
+| --- | --- | --- | --- |
+| `MANIFEST-001` | Debuggable Application | high | adb (jdb + run-as) |
+| `MANIFEST-002` | Cleartext Traffic Permitted | high | shell (mitmproxy) |
+| `MANIFEST-003` | Allow Backup Enabled | medium | adb backup |
+| `MANIFEST-004` | Exported Component without Permission | high | adb am + frida observer |
+| `MANIFEST-005` | Exported Content Provider | high | adb content query |
+| `MANIFEST-006` | Provider with grantUriPermissions | medium | adb traversal probes |
+| `MANIFEST-007` | Dangerous Permission Surface | info | — |
+| `MANIFEST-008` | Outdated minSdkVersion | medium | — |
+| `MANIFEST-009` | Outdated targetSdkVersion | medium | — |
+
+### `android-audit` CLI — manifest 감사 + PoC 자동 생성 (Phase 3)
+
+Phase 3에서 추가된 `android-audit` 서브커맨드는 APK 한 개에 대해
+`apktool decode → manifest_audit → poc_generator`까지를 한 번에 실행하고
+운영자가 그대로 실행 가능한 PoC 레시피를 출력합니다.
+
+```bash
+venomhook android-audit \
+    --apk ./sample/myapp.apk \
+    --out-dir ./out_audit \
+    --report-json ./out_audit/analysis.json \
+    --audit-json  ./out_audit/audit.json \
+    --poc-json    ./out_audit/pocs.json \
+    --poc-bundle-dir ./out_audit/pocs/ \
+    --severity-threshold high
+```
+
+출력 채널:
+
+| 옵션 | 내용 |
+| --- | --- |
+| stdout (`--quiet`로 끔) | `format_audit_summary` + `format_pocs_text` (사람용 요약) |
+| `--report-json` | `AndroidAnalysis.to_dict()` — apk_meta·app_meta·bridges·audit_report·pocs 전체 |
+| `--audit-json`  | `AndroidAuditReport.to_dict()`만 추출 |
+| `--poc-json`    | `PoCArtifact[]` JSON — CI 아카이브·재실행용 |
+| `--poc-bundle-dir` | 디렉터리에 `.sh` / `.frida.js` / `.md` + `README.md` 인덱스 (실행 가능한 형태) |
+
+종료 코드:
+
+| 코드 | 의미 |
+| --- | --- |
+| 0 | 성공, severity gate 통과 |
+| 1 | 파이프라인 오류 (no native libs / `--strict-tools`로 apktool 누락 등) |
+| 2 | severity gate 발동 — `--severity-threshold` 이상의 finding 존재 |
+
+`--poc-bundle-dir` 출력 예시:
+
+```
+out_audit/pocs/
+├── README.md
+├── MANIFEST-001-1_attach-jdb-to-debuggable-process.sh        (chmod +x)
+├── MANIFEST-001-2_read-app-private-files-via-run-as.sh       (chmod +x)
+├── MANIFEST-004-3_invoke-exported-activity-com-x-publicact.sh (chmod +x)
+├── MANIFEST-004-4_observe-intents-to-com-x-publicact.frida.js
+└── ...
+```
+
+각 `.sh` 파일은 shebang + 헤더 코멘트(rule, severity, package, description,
+expected evidence, references) + 실제 명령어로 구성되어 있어 별도 가공 없이
+`bash pocs/MANIFEST-004-3_*.sh`로 바로 실행 가능합니다. Frida 스크립트는
+`frida -U -f <pkg> -l <file>.frida.js --no-pause` 패턴으로 사용합니다.
+
+CI gate 예시 (직접 Python 호출 대신 CLI):
+
+```bash
+venomhook android-audit \
+    --apk ./sample/myapp.apk \
+    --out-dir /tmp/audit_$$ \
+    --quiet \
+    --severity-threshold high
+echo "exit=$?"   # 2 if gate fired, 0 otherwise
+```
+
+`--no-jadx`로 jadx를 건너뛰면 audit-only 모드로 동작 (Java decompile + JNI
+bridge 생략). `--strict-tools`는 apktool/jadx 누락 시 즉시 비0 종료를 강제합니다.
+
+### Phase 3 — PoC artifact 형태
+
+`PoCArtifact`는 다음 형태입니다 (`venomhook.models`):
+
+```python
+@dataclass
+class PoCArtifact:
+    rule_id: str             # 예: "MANIFEST-004"
+    title: str
+    severity: str            # critical | high | medium | low | info
+    kind: str                # "adb" | "frida" | "shell" | "info"
+    package_name: str
+    component: Optional[str] = None
+    description: str = ""
+    commands: list[str] = []
+    expected_evidence: str = ""
+    notes: str = ""
+    references: list[str] = []
+```
+
+`AndroidComponent.authorities` 필드(Phase 3에서 신규 추가됨)는 provider의
+`android:authorities` 속성을 추출해 MANIFEST-005/006 PoC의 `content://`
+URI에 실제 authority를 박아넣는 데 사용됩니다. 다중 authority가 선언된
+경우 첫 번째를 URI에 사용하고 나머지는 PoC notes에 노출됩니다.
 
 ## Binary Metadata Helper
 
@@ -465,6 +558,8 @@ venomhook/
 │       ├── manifest_audit.py
 │       ├── models.py
 │       ├── orchestrator.py
+│       ├── poc_export.py
+│       ├── poc_generator.py
 │       ├── report.py
 │       ├── runtime_report.py
 │       ├── scoring.py
