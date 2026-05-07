@@ -184,11 +184,30 @@ class ExportedNoPermissionBuilderTests(unittest.TestCase):
         )
         meta = _meta(components=[comp])
         arts = generate_pocs(meta, audit_manifest(meta))
-        # one artifact per action
-        self.assertEqual(len(arts), 2)
-        for a in arts:
+        # one ADB artifact per action + one Frida observer for the component
+        self.assertEqual(len(arts), 3)
+        adb_arts = [a for a in arts if a.kind == "adb"]
+        frida_arts = [a for a in arts if a.kind == "frida"]
+        self.assertEqual(len(adb_arts), 2)
+        self.assertEqual(len(frida_arts), 1)
+        for a in adb_arts:
             self.assertEqual(a.component, "com.x.PublicAct")
             self.assertTrue(any("am start" in c for c in a.commands))
+
+    def test_frida_observer_for_activity_hooks_oncreate(self) -> None:
+        comp = _comp(
+            type="activity", name="com.x.A",
+            exported=True, exported_declared=True,
+            intent_actions=["android.intent.action.VIEW"],
+        )
+        meta = _meta(components=[comp])
+        arts = generate_pocs(meta, audit_manifest(meta))
+        frida = next(a for a in arts if a.kind == "frida")
+        body = "\n".join(frida.commands)
+        self.assertIn('Java.use("com.x.A")', body)
+        self.assertIn("onCreate.overload", body)
+        self.assertIn("getIntent()", body)
+        self.assertIn("frida -U", frida.notes)
 
     def test_service_uses_startservice(self) -> None:
         comp = _comp(
@@ -198,8 +217,10 @@ class ExportedNoPermissionBuilderTests(unittest.TestCase):
         )
         meta = _meta(components=[comp])
         arts = generate_pocs(meta, audit_manifest(meta))
-        a = arts[0]
-        self.assertTrue(any("am startservice" in c for c in a.commands))
+        adb = next(a for a in arts if a.kind == "adb")
+        self.assertTrue(any("am startservice" in c for c in adb.commands))
+        frida = next(a for a in arts if a.kind == "frida")
+        self.assertIn("onStartCommand", "\n".join(frida.commands))
 
     def test_receiver_uses_broadcast(self) -> None:
         comp = _comp(
@@ -209,8 +230,10 @@ class ExportedNoPermissionBuilderTests(unittest.TestCase):
         )
         meta = _meta(components=[comp])
         arts = generate_pocs(meta, audit_manifest(meta))
-        a = arts[0]
-        self.assertTrue(any("am broadcast" in c for c in a.commands))
+        adb = next(a for a in arts if a.kind == "adb")
+        self.assertTrue(any("am broadcast" in c for c in adb.commands))
+        frida = next(a for a in arts if a.kind == "frida")
+        self.assertIn("onReceive", "\n".join(frida.commands))
 
     def test_degraded_when_component_missing_from_meta(self) -> None:
         # Hand-build a finding whose component isn't present in meta —

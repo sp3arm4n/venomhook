@@ -12,14 +12,21 @@ manifest data permits; remaining placeholders are documented in each
 artifact's ``notes``.
 
 Coverage:
-    MANIFEST-001  Debuggable       — jdwp + run-as
-    MANIFEST-002  Cleartext        — mitmproxy interception recipe
-    MANIFEST-003  Allow Backup     — adb backup data extraction
-    MANIFEST-004  Exported comp    — am start/startservice/broadcast per type
-    MANIFEST-005  Exported provider— content query (real authority when
-                                     AndroidComponent.authorities is set)
+    MANIFEST-001  Debuggable       — jdwp + run-as (kind=adb)
+    MANIFEST-002  Cleartext        — mitmproxy interception recipe (shell)
+    MANIFEST-003  Allow Backup     — adb backup data extraction (adb)
+    MANIFEST-004  Exported comp    — am start/startservice/broadcast per
+                                     intent_action (adb) + a Frida hook
+                                     observer on the entry method
+                                     (onCreate / onStartCommand /
+                                     onReceive) so the operator can pair
+                                     invocation with payload capture
+    MANIFEST-005  Exported provider— content query (adb; real authority
+                                     when AndroidComponent.authorities
+                                     is set)
     MANIFEST-006  grantUri        — path-traversal probes via content://
-                                     (authority resolved from manifest)
+                                     (adb; authority resolved from
+                                     manifest)
 
 MANIFEST-007/008/009 are policy/posture findings without a direct PoC and
 are intentionally skipped.
@@ -267,7 +274,115 @@ def _build_exported_no_permission(
             ),
             references=list(finding.references),
         ))
+    artifacts.append(_frida_intent_observer(component, pkg, finding))
     return artifacts
+
+
+def _frida_intent_observer(
+    component: AndroidComponent, pkg: str, finding: ManifestFinding
+) -> PoCArtifact:
+    """Frida script that hooks the component's entry point and logs the
+    incoming Intent + extras. Lets the operator confirm the ADB recipe
+    actually reached the component and observe what payload arrived.
+    """
+    if component.type == "activity":
+        body = _FRIDA_ACTIVITY_TEMPLATE.format(klass=component.name)
+        entry = "onCreate"
+    elif component.type == "service":
+        body = _FRIDA_SERVICE_TEMPLATE.format(klass=component.name)
+        entry = "onStartCommand"
+    elif component.type == "receiver":
+        body = _FRIDA_RECEIVER_TEMPLATE.format(klass=component.name)
+        entry = "onReceive"
+    else:  # pragma: no cover — providers go through MANIFEST-005
+        body = f"// unsupported component type: {component.type}"
+        entry = "?"
+    return PoCArtifact(
+        rule_id=finding.rule_id,
+        title=f"Observe intents to '{component.name}' via Frida ({entry})",
+        severity=finding.severity,
+        kind="frida",
+        package_name=pkg,
+        component=component.name,
+        description=(
+            f"Hooks {component.type}.{entry} on '{component.name}' and "
+            "prints the incoming Intent action + extras. Pair with the "
+            "ADB recipe to confirm reachability and capture the payload "
+            "the attacker would send."
+        ),
+        commands=body.splitlines(),
+        expected_evidence=(
+            f"frida console prints '[+] {component.name}.{entry} ...' on "
+            "every external invocation; extras dump shows the parameters "
+            "the calling shell supplied."
+        ),
+        notes=(
+            f"Run with: frida -U -f {pkg} -l <this-file>.frida.js --no-pause"
+        ),
+        references=list(finding.references),
+    )
+
+
+_FRIDA_ACTIVITY_TEMPLATE = """\
+Java.perform(() => {{
+  const Klass = Java.use("{klass}");
+  Klass.onCreate.overload('android.os.Bundle').implementation = function (b) {{
+    console.log("[+] {klass}.onCreate called");
+    const intent = this.getIntent();
+    if (intent) {{
+      console.log("[+]   action:", intent.getAction());
+      const extras = intent.getExtras();
+      if (extras) {{
+        const keys = extras.keySet().toArray();
+        for (let i = 0; i < keys.length; i++) {{
+          const k = keys[i];
+          console.log("[+]   extra[" + k + "] =", extras.get(k));
+        }}
+      }}
+    }}
+    return this.onCreate(b);
+  }};
+}});"""
+
+_FRIDA_SERVICE_TEMPLATE = """\
+Java.perform(() => {{
+  const Klass = Java.use("{klass}");
+  Klass.onStartCommand.implementation = function (intent, flags, startId) {{
+    const action = intent ? intent.getAction() : null;
+    console.log("[+] {klass}.onStartCommand action =", action);
+    if (intent) {{
+      const extras = intent.getExtras();
+      if (extras) {{
+        const keys = extras.keySet().toArray();
+        for (let i = 0; i < keys.length; i++) {{
+          const k = keys[i];
+          console.log("[+]   extra[" + k + "] =", extras.get(k));
+        }}
+      }}
+    }}
+    return this.onStartCommand(intent, flags, startId);
+  }};
+}});"""
+
+_FRIDA_RECEIVER_TEMPLATE = """\
+Java.perform(() => {{
+  const Klass = Java.use("{klass}");
+  Klass.onReceive.implementation = function (ctx, intent) {{
+    const action = intent ? intent.getAction() : null;
+    console.log("[+] {klass}.onReceive action =", action);
+    if (intent) {{
+      const extras = intent.getExtras();
+      if (extras) {{
+        const keys = extras.keySet().toArray();
+        for (let i = 0; i < keys.length; i++) {{
+          const k = keys[i];
+          console.log("[+]   extra[" + k + "] =", extras.get(k));
+        }}
+      }}
+    }}
+    return this.onReceive(ctx, intent);
+  }};
+}});"""
 
 
 def _provider_authority(meta: AndroidAppMeta, finding: ManifestFinding) -> tuple[str, str]:
