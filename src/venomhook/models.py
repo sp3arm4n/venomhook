@@ -582,3 +582,64 @@ class AndroidAuditReport:
             "findings": [f.to_dict() for f in self.findings],
             "severity_counts": self.severity_counts,
         }
+
+
+@dataclass
+class PoCArtifact:
+    """A single proof-of-concept recipe derived from a ManifestFinding.
+
+    Self-contained: each artifact carries enough context (package_name,
+    component, commands, expected evidence) to be rendered or executed
+    without re-running the audit. `kind` distinguishes recipe transports
+    so renderers can group artifacts under per-channel sections.
+    """
+
+    rule_id: str             # source ManifestFinding.rule_id
+    title: str               # short human-readable label
+    severity: str            # mirror of source finding's severity
+    kind: str                # "adb" | "frida" | "shell" | "info"
+    package_name: str
+    component: Optional[str] = None
+    description: str = ""
+    commands: list[str] = field(default_factory=list)
+    expected_evidence: str = ""
+    notes: str = ""
+    references: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PoCArtifact":
+        return cls(
+            rule_id=data["rule_id"],
+            title=data["title"],
+            severity=data.get("severity", "info"),
+            kind=data.get("kind", "info"),
+            package_name=data.get("package_name", ""),
+            component=data.get("component"),
+            description=data.get("description", ""),
+            commands=list(data.get("commands", [])),
+            expected_evidence=data.get("expected_evidence", ""),
+            notes=data.get("notes", ""),
+            references=list(data.get("references", [])),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "rule_id": self.rule_id,
+            "title": self.title,
+            "severity": self.severity,
+            "kind": self.kind,
+            "package_name": self.package_name,
+        }
+        if self.component is not None:
+            result["component"] = self.component
+        if self.description:
+            result["description"] = self.description
+        if self.commands:
+            result["commands"] = list(self.commands)
+        if self.expected_evidence:
+            result["expected_evidence"] = self.expected_evidence
+        if self.notes:
+            result["notes"] = self.notes
+        if self.references:
+            result["references"] = list(self.references)
+        return result
