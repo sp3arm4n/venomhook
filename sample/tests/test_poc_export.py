@@ -1,0 +1,201 @@
+"""Tests for poc_export — write PoCArtifacts to runnable on-disk scripts.
+
+Covers filename construction, kind→extension dispatch, header comment
+content, executable bit on shell scripts, README index shape, and the
+full round-trip of a multi-artifact bundle.
+"""
+
+from __future__ import annotations
+
+import stat
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "src"))
+
+from venomhook.models import PoCArtifact
+from venomhook.poc_export import (
+    export_pocs,
+    render_index,
+    render_sh,
+    slugify,
+)
+
+
+def _adb_artifact(**overrides) -> PoCArtifact:
+    base = dict(
+        rule_id="MANIFEST-001",
+        title="Attach jdb to debuggable process",
+        severity="high",
+        kind="adb",
+        package_name="com.demo",
+        component="com.demo.MainActivity",
+        description="Attach jdb via adb forward.",
+        commands=["adb shell am start -D -n com.demo/.MainActivity",
+                  "adb forward tcp:8700 jdwp:1234"],
+        expected_evidence="jdb prompt appears.",
+        notes="",
+        references=["CWE-489"],
+    )
+    base.update(overrides)
+    return PoCArtifact(**base)
+
+
+class SlugifyTests(unittest.TestCase):
+    def test_lowercase_hyphenated(self):
+        self.assertEqual(slugify("Attach jdb to Debuggable PROCESS"),
+                         "attach-jdb-to-debuggable-process")
+
+    def test_strips_special_chars(self):
+        self.assertEqual(slugify("foo.bar/baz_qux!"), "foo-bar-baz-qux")
+
+    def test_collapses_runs(self):
+        self.assertEqual(slugify("a   b  c"), "a-b-c")
+
+    def test_strips_outer_hyphens(self):
+        self.assertEqual(slugify("---hi---"), "hi")
+
+    def test_max_len(self):
+        self.assertLessEqual(len(slugify("a" * 200)), 60)
+
+    def test_empty_falls_back(self):
+        self.assertEqual(slugify(""), "artifact")
+        self.assertEqual(slugify("---"), "artifact")
+
+
+class RenderShTests(unittest.TestCase):
+    def test_shebang_first(self):
+        out = render_sh(_adb_artifact())
+        self.assertTrue(out.startswith("#!/bin/sh\n"))
+
+    def test_header_includes_metadata(self):
+        out = render_sh(_adb_artifact())
+        self.assertIn("MANIFEST-001", out)
+        self.assertIn("severity:    high", out)
+        self.assertIn("package:     com.demo", out)
+        self.assertIn("component:   com.demo.MainActivity", out)
+        self.assertIn("CWE-489", out)
+        self.assertIn("expected evidence:", out)
+
+    def test_commands_appear_after_header(self):
+        out = render_sh(_adb_artifact())
+        # Both commands present and outside of comment lines (no leading '# ')
+        for cmd in ("adb shell am start", "adb forward tcp:8700"):
+            self.assertIn(cmd, out)
+            for line in out.splitlines():
+                if cmd in line:
+                    self.assertFalse(line.lstrip().startswith("#"),
+                                     f"{cmd} should not be commented out")
+
+    def test_no_commands_falls_back_to_echo(self):
+        out = render_sh(_adb_artifact(commands=[]))
+        self.assertIn("no commands recorded", out)
+
+
+class RenderIndexTests(unittest.TestCase):
+    def test_table_header_and_rows(self):
+        arts = [_adb_artifact(), _adb_artifact(rule_id="MANIFEST-003",
+                                                title="adb backup",
+                                                severity="medium")]
+        names = ["MANIFEST-001-1_a.sh", "MANIFEST-003-2_b.sh"]
+        out = render_index(arts, names)
+        self.assertIn("# venomhook PoC bundle", out)
+        self.assertIn("| # | rule | severity | kind | file |", out)
+        self.assertIn("MANIFEST-001-1_a.sh", out)
+        self.assertIn("MANIFEST-003-2_b.sh", out)
+        self.assertIn("medium", out)
+
+    def test_empty_bundle_still_renders(self):
+        out = render_index([], [])
+        self.assertIn("0 artifacts", out)
+
+
+class ExportPocsTests(unittest.TestCase):
+    def test_writes_sh_for_adb_artifact_with_executable_bit(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td) / "pocs"
+            paths = export_pocs([_adb_artifact()], tdp)
+            self.assertTrue(tdp.exists())
+            sh_files = [p for p in paths if p.suffix == ".sh"]
+            self.assertEqual(len(sh_files), 1)
+            sh = sh_files[0]
+            self.assertEqual(sh.name,
+                             "MANIFEST-001-1_attach-jdb-to-debuggable-process.sh")
+            mode = sh.stat().st_mode
+            self.assertTrue(mode & stat.S_IXUSR)
+            self.assertTrue(mode & stat.S_IXGRP)
+
+    def test_creates_readme_index(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td) / "pocs"
+            export_pocs([_adb_artifact()], tdp)
+            readme = tdp / "README.md"
+            self.assertTrue(readme.exists())
+            content = readme.read_text()
+            self.assertIn("MANIFEST-001", content)
+            self.assertIn("attach-jdb-to-debuggable-process", content)
+
+    def test_creates_directory_when_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "nested" / "pocs"
+            self.assertFalse(target.exists())
+            export_pocs([_adb_artifact()], target)
+            self.assertTrue(target.is_dir())
+
+    def test_kind_dispatch(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td) / "pocs"
+            arts = [
+                _adb_artifact(rule_id="R-1", kind="adb",  title="adb-thing"),
+                _adb_artifact(rule_id="R-2", kind="shell", title="shell-thing"),
+                _adb_artifact(rule_id="R-3", kind="frida", title="frida-thing",
+                              commands=["console.log('hi');"]),
+                _adb_artifact(rule_id="R-4", kind="info", title="info-thing"),
+            ]
+            paths = export_pocs(arts, tdp)
+            ext_for_rule = {p.stem.split("_", 1)[0].split("-", 2)[0:2][0]:
+                            p.suffix for p in paths if p.name != "README.md"}
+            # Map by rule id
+            by_rule = {p.name.split("-", 1)[0] + "-"
+                       + p.name.split("-", 2)[1]: p
+                       for p in paths if p.name != "README.md"}
+            self.assertTrue(by_rule["R-1"].name.endswith(".sh"))
+            self.assertTrue(by_rule["R-2"].name.endswith(".sh"))
+            self.assertTrue(by_rule["R-3"].name.endswith(".frida.js"))
+            self.assertTrue(by_rule["R-4"].name.endswith(".md"))
+
+    def test_idempotent_overwrite(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td) / "pocs"
+            export_pocs([_adb_artifact()], tdp)
+            files_first = sorted(p.name for p in tdp.iterdir())
+            export_pocs([_adb_artifact()], tdp)
+            files_second = sorted(p.name for p in tdp.iterdir())
+            self.assertEqual(files_first, files_second)
+
+    def test_filename_indexed_to_avoid_collisions(self):
+        # Two artifacts with the same rule_id and title get unique names
+        # because the index suffix is part of the filename.
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td) / "pocs"
+            arts = [_adb_artifact(), _adb_artifact()]
+            paths = export_pocs(arts, tdp)
+            sh_names = sorted(p.name for p in paths if p.suffix == ".sh")
+            self.assertEqual(len(sh_names), 2)
+            self.assertNotEqual(sh_names[0], sh_names[1])
+            self.assertTrue(sh_names[0].startswith("MANIFEST-001-1_"))
+            self.assertTrue(sh_names[1].startswith("MANIFEST-001-2_"))
+
+    def test_empty_artifacts_writes_only_index(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td) / "pocs"
+            paths = export_pocs([], tdp)
+            self.assertEqual(len(paths), 1)
+            self.assertEqual(paths[0].name, "README.md")
+
+
+if __name__ == "__main__":
+    unittest.main()

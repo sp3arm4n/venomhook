@@ -26,6 +26,7 @@ from venomhook.manifest_audit import (
     format_audit_summary,
 )
 from venomhook.orchestrator import run_frida
+from venomhook.poc_export import export_pocs
 from venomhook.poc_generator import format_pocs_text
 from venomhook.scoring import ScoreConfig
 from venomhook.static_pipeline import StaticPipeline
@@ -329,6 +330,11 @@ def main(argv: list[str] | None = None) -> None:
     audit_parser.add_argument(
         "--poc-json", type=Path,
         help="Write the PoC artifact list as JSON to this path",
+    )
+    audit_parser.add_argument(
+        "--poc-bundle-dir", type=Path,
+        help="Export each PoC as a runnable .sh / .frida.js / .md under this "
+        "directory along with a README.md index",
     )
     audit_parser.add_argument(
         "--apktool-path", type=str, help="Override apktool binary path (default: $PATH lookup)",
@@ -710,6 +716,10 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
     if args.poc_json:
         args.poc_json.write_text(json.dumps([p.to_dict() for p in pocs], indent=2))
         logging.info("PoC artifacts written to %s", args.poc_json)
+    if args.poc_bundle_dir:
+        written = export_pocs(pocs, args.poc_bundle_dir)
+        logging.info("PoC bundle (%d files) written under %s",
+                     len(written), args.poc_bundle_dir)
 
     if args.severity_threshold and audit_report.has_severity_at_least(args.severity_threshold):
         logging.error(

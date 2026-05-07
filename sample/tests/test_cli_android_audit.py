@@ -178,6 +178,39 @@ class AndroidAuditCliTests(unittest.TestCase):
         self.assertGreaterEqual(len(pocs), 1)
         self.assertEqual(pocs[0]["rule_id"], "MANIFEST-001")
 
+    def test_poc_bundle_dir_writes_runnable_scripts(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            apktool = _apktool_stub(tdp, _MANIFEST_DEBUGGABLE)
+            bundle_dir = tdp / "pocs"
+
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                return_value=_stub_binary_meta("/tmp/libfoo.so"),
+            ):
+                self._run([
+                    "android-audit",
+                    "--apk", str(apk),
+                    "--out-dir", str(tdp / "work"),
+                    "--apktool-path", str(apktool),
+                    "--no-jadx",
+                    "--quiet",
+                    "--poc-bundle-dir", str(bundle_dir),
+                ])
+
+            self.assertTrue(bundle_dir.is_dir())
+            self.assertTrue((bundle_dir / "README.md").exists())
+            sh_files = sorted(bundle_dir.glob("MANIFEST-001-*.sh"))
+            self.assertEqual(len(sh_files), 2)  # jdb + run-as
+            # Scripts must be executable.
+            mode = sh_files[0].stat().st_mode
+            self.assertTrue(mode & stat.S_IXUSR)
+            # Body must include both shebang and at least one adb command.
+            body = sh_files[0].read_text()
+            self.assertTrue(body.startswith("#!/bin/sh\n"))
+            self.assertIn("adb ", body)
+
     def test_severity_gate_triggers_exit_2(self):
         with tempfile.TemporaryDirectory() as td:
             tdp = Path(td)
