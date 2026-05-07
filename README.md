@@ -592,14 +592,13 @@ python3 -m unittest discover -s ./sample/tests
 
 ### 👨‍💻 AI Pair Programming
 
-<img src="https://img.shields.io/badge/OpenAI-Codex-0f172a?logo=openai&logoColor=white&style=for-the-badge" alt="OpenAI Codex">
-<img src="https://img.shields.io/badge/Anthropic-Claude%20Code-d97757?logo=anthropic&logoColor=white&style=for-the-badge" alt="Anthropic Claude Code badge">
+<img src="https://img.shields.io/badge/OpenAI-Codex-0f172a?logo=openai&logoColor=white&style=for-the-badge" alt="OpenAI Codex"> <img src="https://img.shields.io/badge/Anthropic-Claude%20Code-d97757?logo=anthropic&logoColor=white&style=for-the-badge" alt="Anthropic Claude Code badge">
 
 ## Support
 
 ### 🤖 AI Research Assistance
 
-<img src="https://img.shields.io/badge/OpenAI-ChatGPT-0f172a?logo=openai&logoColor=white&style=for-the-badge" alt="OpenAI ChatGPT"><img src="https://img.shields.io/badge/Anthropic-Claude-d97757?logo=anthropic&logoColor=white&style=for-the-badge" alt="Anthropic Claude">
+<img src="https://img.shields.io/badge/OpenAI-ChatGPT-0f172a?logo=openai&logoColor=white&style=for-the-badge" alt="OpenAI ChatGPT"> <img src="https://img.shields.io/badge/Anthropic-Claude-d97757?logo=anthropic&logoColor=white&style=for-the-badge" alt="Anthropic Claude">
 
 ## License
 
