@@ -7,6 +7,7 @@ from pathlib import Path
 
 from venomhook import __version__
 from venomhook.analysis_cache import AnalysisCache
+from venomhook.analysis_diff import diff_analyses, format_diff_text
 from venomhook.android_pipeline import AndroidPipelineError, analyze_apk
 from venomhook.apk_decoder import ApktoolConfig
 from venomhook.apk_extractor import (
@@ -377,6 +378,47 @@ def main(argv: list[str] | None = None) -> None:
         "run's analysis.",
     )
     audit_parser.set_defaults(func=cmd_android_audit)
+
+    cache_list_parser = subparsers.add_parser(
+        "android-cache-list",
+        help="List entries in an analysis cache (one row per APK hash + schema)",
+    )
+    cache_list_parser.add_argument(
+        "--cache-dir", type=Path, required=True,
+        help="Directory containing cache.db (created by `android-audit --cache-dir`)",
+    )
+    cache_list_parser.add_argument(
+        "--json", action="store_true",
+        help="Emit machine-readable JSON instead of the default text table",
+    )
+    cache_list_parser.set_defaults(func=cmd_android_cache_list)
+
+    cache_diff_parser = subparsers.add_parser(
+        "android-cache-diff",
+        help="Diff two cached AndroidAnalysis records (by APK hash)",
+    )
+    cache_diff_parser.add_argument(
+        "--cache-dir", type=Path, required=True,
+        help="Directory containing cache.db",
+    )
+    cache_diff_parser.add_argument(
+        "--old", type=str, required=True,
+        help="APK hash (sha256:<hex>) of the baseline analysis",
+    )
+    cache_diff_parser.add_argument(
+        "--new", type=str, required=True,
+        help="APK hash (sha256:<hex>) of the comparison analysis",
+    )
+    cache_diff_parser.add_argument(
+        "--json", type=Path,
+        help="Write the diff as JSON to this path (in addition to stdout)",
+    )
+    cache_diff_parser.add_argument(
+        "--exit-on-changes", action="store_true",
+        help="Exit non-zero (code 2) if the diff contains any changes — "
+        "useful for CI gates that should fail on regression in findings",
+    )
+    cache_diff_parser.set_defaults(func=cmd_android_cache_diff)
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format=LOG_FORMAT)
@@ -778,6 +820,85 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
             "severity gate triggered: at least one finding at or above '%s'",
             args.severity_threshold,
         )
+        raise SystemExit(2)
+
+
+def cmd_android_cache_list(args: argparse.Namespace) -> None:
+    """Print every cache entry. Default output is a fixed-width table;
+    ``--json`` emits a JSON list suitable for piping into jq.
+    """
+    import json
+
+    db_path = args.cache_dir / "cache.db"
+    if not db_path.exists():
+        logging.error("no cache database at %s", db_path)
+        raise SystemExit(1)
+
+    with AnalysisCache(db_path) as cache:
+        entries = cache.list_entries()
+
+    if args.json:
+        print(json.dumps([
+            {
+                "apk_hash": e.apk_hash,
+                "schema_version": e.schema_version,
+                "created_at": e.created_at,
+                "package_name": e.package_name,
+                "apk_name": e.apk_name,
+                "finding_count": e.finding_count,
+            }
+            for e in entries
+        ], indent=2))
+        return
+
+    if not entries:
+        print("(cache is empty)")
+        return
+
+    print(f"{'apk_hash':30}  {'sv':>3}  {'created_at':25}  "
+          f"{'findings':>8}  {'package':30}  apk")
+    for e in entries:
+        short_hash = (e.apk_hash[:26] + "...") if len(e.apk_hash) > 26 else e.apk_hash
+        print(
+            f"{short_hash:30}  {e.schema_version:>3}  "
+            f"{e.created_at[:19]:25}  {e.finding_count:>8}  "
+            f"{(e.package_name or '-'):30}  {e.apk_name or '-'}"
+        )
+
+
+def cmd_android_cache_diff(args: argparse.Namespace) -> None:
+    """Diff two cached analyses by APK hash. Stdout always shows the
+    text rendering; ``--json`` additionally writes the structured form.
+    With ``--exit-on-changes``, returns exit code 2 when the diff is
+    non-empty (CI regression gate).
+    """
+    import json
+
+    db_path = args.cache_dir / "cache.db"
+    if not db_path.exists():
+        logging.error("no cache database at %s", db_path)
+        raise SystemExit(1)
+
+    with AnalysisCache(db_path) as cache:
+        old = cache.get(args.old)
+        new = cache.get(args.new)
+
+    if old is None:
+        logging.error("apk_hash not found in cache: %s", args.old)
+        raise SystemExit(1)
+    if new is None:
+        logging.error("apk_hash not found in cache: %s", args.new)
+        raise SystemExit(1)
+
+    diff = diff_analyses(old, new)
+    print(format_diff_text(diff))
+
+    if args.json:
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(json.dumps(diff.to_dict(), indent=2))
+        logging.info("diff written to %s", args.json)
+
+    if args.exit_on_changes and diff.has_changes:
         raise SystemExit(2)
 
 

@@ -71,12 +71,19 @@ class AnalysisDiff:
 
     @property
     def has_changes(self) -> bool:
+        """True iff the *content* of the analyses differs.
+
+        Deliberately ignores the apk_hash header: two builds of the same
+        source yielding distinct hashes but identical findings should
+        report "no changes" so CI gates don't treat repackaging as a
+        regression. Package rename *is* a content change because it
+        affects which Java classes the PoC scripts target.
+        """
         return any((
             self.added_findings, self.removed_findings,
             self.added_pocs, self.removed_pocs,
             self.added_exports, self.removed_exports,
             self.added_bridges, self.removed_bridges,
-            self.old_apk_hash != self.new_apk_hash,
             self.old_package != self.new_package,
         ))
 

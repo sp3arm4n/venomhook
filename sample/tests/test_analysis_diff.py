@@ -183,11 +183,15 @@ class PackageDiffTests(unittest.TestCase):
         self.assertEqual(diff.new_package, "com.y")
         self.assertTrue(diff.has_changes)
 
-    def test_apk_hash_difference_marks_has_changes(self):
+    def test_apk_hash_difference_alone_is_not_a_content_change(self):
+        # Two builds of the same source with different zip-metadata
+        # timestamps yield distinct hashes but identical content. The
+        # diff layer reports "no changes" so CI gates don't false-fire
+        # on repackaging.
         a = _analysis(apk_hash="sha256:old")
         b = _analysis(apk_hash="sha256:new")
         diff = diff_analyses(a, b)
-        self.assertTrue(diff.has_changes)
+        self.assertFalse(diff.has_changes)
 
 
 class FormatDiffTextTests(unittest.TestCase):
