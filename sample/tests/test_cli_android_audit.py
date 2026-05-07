@@ -306,6 +306,129 @@ class AndroidAuditCliTests(unittest.TestCase):
                 ])
         self.assertEqual(ctx.exception.code, 1)
 
+    def test_cache_dir_writes_after_first_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            apktool = _apktool_stub(tdp, _MANIFEST_DEBUGGABLE)
+            cache_dir = tdp / "cache"
+
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                return_value=_stub_binary_meta("/tmp/libfoo.so"),
+            ):
+                self._run([
+                    "android-audit",
+                    "--apk", str(apk),
+                    "--out-dir", str(tdp / "work"),
+                    "--apktool-path", str(apktool),
+                    "--no-jadx", "--quiet",
+                    "--cache-dir", str(cache_dir),
+                ])
+
+            self.assertTrue((cache_dir / "cache.db").exists())
+
+            from venomhook.analysis_cache import AnalysisCache
+            with AnalysisCache(cache_dir / "cache.db") as cache:
+                entries = cache.list_entries()
+                self.assertEqual(len(entries), 1)
+                self.assertEqual(entries[0].package_name, "com.demo")
+
+    def test_cache_replay_skips_pipeline_on_hit(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            apktool = _apktool_stub(tdp, _MANIFEST_DEBUGGABLE)
+            cache_dir = tdp / "cache"
+
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                return_value=_stub_binary_meta("/tmp/libfoo.so"),
+            ):
+                # First run populates the cache.
+                self._run([
+                    "android-audit",
+                    "--apk", str(apk),
+                    "--out-dir", str(tdp / "work"),
+                    "--apktool-path", str(apktool),
+                    "--no-jadx", "--quiet",
+                    "--cache-dir", str(cache_dir),
+                ])
+
+            # Second run: analyze_apk should NOT be invoked (cache hit).
+            with mock.patch("venomhook.cli.analyze_apk") as analyze_mock:
+                self._run([
+                    "android-audit",
+                    "--apk", str(apk),
+                    "--out-dir", str(tdp / "work2"),
+                    "--no-jadx", "--quiet",
+                    "--cache-dir", str(cache_dir),
+                ])
+                analyze_mock.assert_not_called()
+
+    def test_no_cache_replay_forces_fresh_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            apktool = _apktool_stub(tdp, _MANIFEST_DEBUGGABLE)
+            cache_dir = tdp / "cache"
+
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                return_value=_stub_binary_meta("/tmp/libfoo.so"),
+            ):
+                self._run([
+                    "android-audit",
+                    "--apk", str(apk),
+                    "--out-dir", str(tdp / "work"),
+                    "--apktool-path", str(apktool),
+                    "--no-jadx", "--quiet",
+                    "--cache-dir", str(cache_dir),
+                ])
+
+                # Even with cache populated, --no-cache-replay forces analyze_apk
+                # to run again.
+                with mock.patch(
+                    "venomhook.cli.analyze_apk",
+                    wraps=__import__("venomhook.android_pipeline",
+                                     fromlist=["analyze_apk"]).analyze_apk,
+                ) as analyze_mock:
+                    self._run([
+                        "android-audit",
+                        "--apk", str(apk),
+                        "--out-dir", str(tdp / "work2"),
+                        "--apktool-path", str(apktool),
+                        "--no-jadx", "--quiet",
+                        "--cache-dir", str(cache_dir),
+                        "--no-cache-replay",
+                    ])
+                    analyze_mock.assert_called_once()
+
+    def test_no_cache_write_keeps_cache_empty(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            apktool = _apktool_stub(tdp, _MANIFEST_DEBUGGABLE)
+            cache_dir = tdp / "cache"
+
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                return_value=_stub_binary_meta("/tmp/libfoo.so"),
+            ):
+                self._run([
+                    "android-audit",
+                    "--apk", str(apk),
+                    "--out-dir", str(tdp / "work"),
+                    "--apktool-path", str(apktool),
+                    "--no-jadx", "--quiet",
+                    "--cache-dir", str(cache_dir),
+                    "--no-cache-write",
+                ])
+
+            from venomhook.analysis_cache import AnalysisCache
+            with AnalysisCache(cache_dir / "cache.db") as cache:
+                self.assertEqual(cache.list_entries(), [])
+
     def test_pipeline_error_exits_1(self):
         # Invalid APK archive -> AndroidPipelineError -> exit 1
         with tempfile.TemporaryDirectory() as td:

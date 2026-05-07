@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from venomhook import __version__
+from venomhook.analysis_cache import AnalysisCache
 from venomhook.android_pipeline import AndroidPipelineError, analyze_apk
 from venomhook.apk_decoder import ApktoolConfig
 from venomhook.apk_extractor import (
@@ -359,6 +360,22 @@ def main(argv: list[str] | None = None) -> None:
         "--quiet", action="store_true",
         help="Suppress per-finding stdout output (still writes JSON if requested)",
     )
+    audit_parser.add_argument(
+        "--cache-dir", type=Path,
+        help="Persist analyses under DIR/cache.db keyed by APK hash. On a "
+        "hit the cached AndroidAnalysis is replayed instead of rerunning "
+        "apktool / jadx / lief.",
+    )
+    audit_parser.add_argument(
+        "--no-cache-replay", action="store_true",
+        help="With --cache-dir, write to the cache but never read from it "
+        "(forces a fresh analysis every run).",
+    )
+    audit_parser.add_argument(
+        "--no-cache-write", action="store_true",
+        help="With --cache-dir, only read from the cache; do not store this "
+        "run's analysis.",
+    )
     audit_parser.set_defaults(func=cmd_android_audit)
 
     args = parser.parse_args(argv)
@@ -677,22 +694,49 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
     apktool_config = ApktoolConfig(apktool_path=args.apktool_path) if args.apktool_path else None
     jadx_config = JadxConfig(jadx_path=args.jadx_path) if args.jadx_path else None
 
-    try:
-        result = analyze_apk(
-            args.apk,
-            work_dir,
-            abi=args.abi,
-            lib_name=args.apk_lib,
-            use_apktool=True,
-            use_jadx=not args.no_jadx,
-            apktool_config=apktool_config,
-            jadx_config=jadx_config,
-            fail_on_missing_tools=args.strict_tools,
-            require_native=False,
-        )
-    except AndroidPipelineError as e:
-        logging.error("android-audit failed: %s", e)
-        raise SystemExit(1) from e
+    cache: AnalysisCache | None = None
+    if args.cache_dir:
+        cache = AnalysisCache(args.cache_dir / "cache.db")
+
+    result = None
+    if cache and not args.no_cache_replay:
+        # Cheap hash probe: extract_apk_meta only opens the zip + sha256s,
+        # which is much cheaper than running apktool/jadx/lief.
+        try:
+            apk_meta_probe = extract_apk_meta(args.apk)
+        except ApkExtractError as e:
+            cache.close()
+            logging.error("android-audit failed: %s", e)
+            raise SystemExit(1) from e
+        cached = cache.get(apk_meta_probe.hash)
+        if cached is not None:
+            logging.info("cache hit for %s — replaying stored analysis",
+                         apk_meta_probe.hash)
+            result = cached
+
+    if result is None:
+        try:
+            result = analyze_apk(
+                args.apk,
+                work_dir,
+                abi=args.abi,
+                lib_name=args.apk_lib,
+                use_apktool=True,
+                use_jadx=not args.no_jadx,
+                apktool_config=apktool_config,
+                jadx_config=jadx_config,
+                fail_on_missing_tools=args.strict_tools,
+                require_native=False,
+            )
+        except AndroidPipelineError as e:
+            if cache:
+                cache.close()
+            logging.error("android-audit failed: %s", e)
+            raise SystemExit(1) from e
+        if cache and not args.no_cache_write:
+            cache.put(result)
+            logging.info("analysis cached under %s (apk_hash=%s)",
+                         args.cache_dir, result.apk_meta.hash)
 
     for w in result.warnings:
         logging.warning("%s", w)
@@ -725,6 +769,9 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
         written = export_pocs(pocs, args.poc_bundle_dir)
         logging.info("PoC bundle (%d files) written under %s",
                      len(written), args.poc_bundle_dir)
+
+    if cache:
+        cache.close()
 
     if args.severity_threshold and audit_report.has_severity_at_least(args.severity_threshold):
         logging.error(
