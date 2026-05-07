@@ -295,11 +295,16 @@ class TestAndroidAnalysisModel(unittest.TestCase):
             d = result.to_dict()
             for key in (
                 "apk_meta", "selected_abi", "extracted_so_path",
-                "so_meta", "app_meta", "java_natives", "bridges", "warnings",
+                "so_meta", "app_meta", "java_natives", "bridges",
+                "audit_report", "pocs", "warnings",
             ):
                 self.assertIn(key, d)
             self.assertEqual(d["selected_abi"], "arm64-v8a")
             self.assertIsNone(d["app_meta"])  # apktool was disabled
+            # Audit and PoCs are derived from app_meta; both should be empty
+            # when manifest decode was skipped.
+            self.assertIsNone(d["audit_report"])
+            self.assertEqual(d["pocs"], [])
 
 
 # ---------- Real subprocess stubs (jadx + apktool both available) ----------
@@ -384,6 +389,162 @@ class TestAnalyzeApkWithStubbedTools(unittest.TestCase):
                 "Java_com_demo_Main_getVersion",
             )
             self.assertEqual(result.warnings, [])
+
+
+class TestAnalyzeApkAuditAndPocsIntegration(unittest.TestCase):
+    """Phase 3 wiring: analyze_apk should populate audit_report + pocs
+    automatically whenever app_meta is available. When apktool is absent
+    (app_meta is None) both must remain unpopulated.
+    """
+
+    def test_audit_and_pocs_skipped_when_app_meta_absent(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp, {"arm64-v8a": ["libfoo.so"]})
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                return_value=_stub_binary_meta("/tmp/libfoo.so", []),
+            ), mock.patch(
+                "venomhook.android_pipeline.decode_apk",
+                side_effect=ApktoolNotFoundError("not on PATH"),
+            ):
+                result = analyze_apk(
+                    apk, tdp / "work", use_jadx=False
+                )
+            self.assertIsNone(result.app_meta)
+            self.assertIsNone(result.audit_report)
+            self.assertEqual(result.pocs, [])
+
+    def test_audit_findings_and_pocs_populated_when_manifest_decoded(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp, {"arm64-v8a": ["libcore.so"]})
+
+            # Stub apktool produces a manifest with debuggable=true →
+            # MANIFEST-001 fires → poc_generator emits jdb + run-as recipes.
+            apktool_stub = _executable(
+                tdp / "stub-apktool.sh",
+                textwrap.dedent("""\
+                    #!/bin/sh
+                    while [ $# -gt 0 ]; do
+                        case "$1" in
+                            -o) shift; OUT="$1"; shift; ;;
+                            *) shift; ;;
+                        esac
+                    done
+                    mkdir -p "$OUT"
+                    cat > "$OUT/AndroidManifest.xml" <<'EOF'
+                    <?xml version="1.0"?>
+                    <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.demo">
+                        <application android:debuggable="true"/>
+                    </manifest>
+                    EOF
+                    exit 0
+                """),
+            )
+
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                return_value=_stub_binary_meta("/tmp/libcore.so", []),
+            ):
+                result = analyze_apk(
+                    apk,
+                    tdp / "work",
+                    apktool_config=ApktoolConfig(apktool_path=str(apktool_stub)),
+                    use_jadx=False,
+                )
+
+            self.assertIsNotNone(result.app_meta)
+            self.assertTrue(result.app_meta.debuggable)
+            self.assertIsNotNone(result.audit_report)
+            rule_ids = [f.rule_id for f in result.audit_report.findings]
+            self.assertIn("MANIFEST-001", rule_ids)
+            # PoCs should include both debuggable artifacts (jdb + run-as).
+            poc_rule_ids = [p.rule_id for p in result.pocs]
+            self.assertEqual(poc_rule_ids.count("MANIFEST-001"), 2)
+            self.assertTrue(any("jdb" in p.title.lower() for p in result.pocs))
+
+    def test_clean_manifest_yields_empty_pocs_but_non_null_report(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp, {"arm64-v8a": ["libcore.so"]})
+
+            # Manifest with no findings: target_sdk=33, debuggable absent,
+            # no exported components, no cleartext, no allowBackup.
+            apktool_stub = _executable(
+                tdp / "stub-apktool.sh",
+                textwrap.dedent("""\
+                    #!/bin/sh
+                    while [ $# -gt 0 ]; do
+                        case "$1" in
+                            -o) shift; OUT="$1"; shift; ;;
+                            *) shift; ;;
+                        esac
+                    done
+                    mkdir -p "$OUT"
+                    cat > "$OUT/AndroidManifest.xml" <<'EOF'
+                    <?xml version="1.0"?>
+                    <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.clean">
+                        <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="33"/>
+                        <application android:allowBackup="false" android:usesCleartextTraffic="false"/>
+                    </manifest>
+                    EOF
+                    exit 0
+                """),
+            )
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                return_value=_stub_binary_meta("/tmp/libcore.so", []),
+            ):
+                result = analyze_apk(
+                    apk,
+                    tdp / "work",
+                    apktool_config=ApktoolConfig(apktool_path=str(apktool_stub)),
+                    use_jadx=False,
+                )
+            self.assertIsNotNone(result.audit_report)
+            self.assertEqual(result.audit_report.findings, [])
+            self.assertEqual(result.pocs, [])
+
+    def test_to_dict_serializes_audit_and_pocs(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp, {"arm64-v8a": ["libcore.so"]})
+            apktool_stub = _executable(
+                tdp / "stub-apktool.sh",
+                textwrap.dedent("""\
+                    #!/bin/sh
+                    while [ $# -gt 0 ]; do
+                        case "$1" in
+                            -o) shift; OUT="$1"; shift; ;;
+                            *) shift; ;;
+                        esac
+                    done
+                    mkdir -p "$OUT"
+                    cat > "$OUT/AndroidManifest.xml" <<'EOF'
+                    <?xml version="1.0"?>
+                    <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.demo">
+                        <application android:debuggable="true"/>
+                    </manifest>
+                    EOF
+                    exit 0
+                """),
+            )
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                return_value=_stub_binary_meta("/tmp/libcore.so", []),
+            ):
+                result = analyze_apk(
+                    apk,
+                    tdp / "work",
+                    apktool_config=ApktoolConfig(apktool_path=str(apktool_stub)),
+                    use_jadx=False,
+                )
+            d = result.to_dict()
+            self.assertIsNotNone(d["audit_report"])
+            self.assertEqual(d["audit_report"]["package_name"], "com.demo")
+            self.assertGreater(len(d["pocs"]), 0)
+            self.assertEqual(d["pocs"][0]["rule_id"], "MANIFEST-001")
 
 
 if __name__ == "__main__":

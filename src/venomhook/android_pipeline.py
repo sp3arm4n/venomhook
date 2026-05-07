@@ -1,15 +1,18 @@
 """Android pipeline — orchestrates APK → manifest + java natives + .so + JNI bridges.
 
-Phase 2's keystone: takes a single APK path and produces an `AndroidAnalysis`
-record with everything the hookspec layer needs to emit a Frida script for an
-Android target. Wires together the four Phase 2 building blocks plus the
-Phase 1 binary-metadata extractor:
+Phase 2's keystone, extended in Phase 3 with manifest_audit + poc_generator
+so a single `analyze_apk` call yields the full Android-side picture:
+metadata, native correlation, vulnerability findings, and runnable PoC
+recipes. Wires together the Phase 2 building blocks plus the Phase 1
+binary-metadata extractor and the Phase 3 audit/PoC layer:
 
   apk_extractor   ->  ApkMeta + extracted .so file
   apk_decoder     ->  AndroidAppMeta            (optional; skipped if apktool absent)
   jadx_runner     ->  list[JavaNativeMethod]    (optional; skipped if jadx absent)
   binary_meta     ->  BinaryMeta of the .so     (lief; required)
   jni_bridge      ->  list[JniBridge]           (correlated against .so exports)
+  manifest_audit  ->  AndroidAuditReport        (Phase 3; runs when app_meta present)
+  poc_generator   ->  list[PoCArtifact]         (Phase 3; derived from audit report)
 
 `apktool` and `jadx` are *optional*. When unavailable the pipeline records a
 warning on the result and continues with reduced fidelity (the .so analysis
@@ -53,11 +56,15 @@ from venomhook.jadx_runner import (
     decompile_apk,
 )
 from venomhook.jni_bridge import build_bridges, correlate_symbols
+from venomhook.manifest_audit import audit_manifest
 from venomhook.models import (
     AndroidAppMeta,
+    AndroidAuditReport,
     JavaNativeMethod,
     JniBridge,
+    PoCArtifact,
 )
+from venomhook.poc_generator import generate_pocs
 
 
 __all__ = [
@@ -91,6 +98,10 @@ class AndroidAnalysis:
     app_meta: Optional[AndroidAppMeta] = None  # None if apktool unavailable / failed
     java_natives: list[JavaNativeMethod] = field(default_factory=list)  # empty if jadx skipped
     bridges: list[JniBridge] = field(default_factory=list)
+    # Phase 3 additions: vulnerability surface + runnable PoC recipes.
+    # Both are derived from app_meta — None / empty when apktool was absent.
+    audit_report: Optional[AndroidAuditReport] = None
+    pocs: list[PoCArtifact] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -110,6 +121,8 @@ class AndroidAnalysis:
             "app_meta": self.app_meta.to_dict() if self.app_meta else None,
             "java_natives": [m.to_dict() for m in self.java_natives],
             "bridges": [b.to_dict() for b in self.bridges],
+            "audit_report": self.audit_report.to_dict() if self.audit_report else None,
+            "pocs": [p.to_dict() for p in self.pocs],
             "warnings": list(self.warnings),
         }
 
@@ -136,6 +149,8 @@ def analyze_apk(
       5. (if use_jadx) Decompile DEX & extract native methods; missing jadx → warning
       6. (if any java_natives) Build JniBridges and correlate against
          ``so_meta.exports``
+      7. (if app_meta is set) Run manifest_audit + poc_generator to populate
+         ``audit_report`` and ``pocs``. Pure-Python; never raises.
 
     `fail_on_missing_tools=True` upgrades apktool/jadx unavailability from
     warnings to AndroidPipelineError. Useful when the caller wants strict
@@ -217,6 +232,13 @@ def analyze_apk(
         bridges = build_bridges(java_natives)
         correlate_symbols(bridges, so_meta.exports)
 
+    # ----- Step 7: manifest audit + PoC generation (Phase 3) -----
+    audit_report: Optional[AndroidAuditReport] = None
+    pocs: list[PoCArtifact] = []
+    if app_meta is not None:
+        audit_report = audit_manifest(app_meta)
+        pocs = generate_pocs(app_meta, audit_report)
+
     return AndroidAnalysis(
         apk_meta=apk_meta,
         selected_abi=selected_abi,
@@ -225,5 +247,7 @@ def analyze_apk(
         app_meta=app_meta,
         java_natives=java_natives,
         bridges=bridges,
+        audit_report=audit_report,
+        pocs=pocs,
         warnings=warnings,
     )
