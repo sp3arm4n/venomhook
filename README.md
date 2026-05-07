@@ -4,6 +4,10 @@
   <img src="assets/venomhook.png" alt="VenomHook logo" width="220">
 </p>
 
+<p align="center">
+  <a href="https://github.com/sp3arm4n/venomhook/actions/workflows/ci.yml"><img src="https://github.com/sp3arm4n/venomhook/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+</p>
+
 VenomHook은 네이티브 바이너리와 Android APK를 정적 분석해 후킹 후보 함수를 찾고, offset 기반 HookSpec과 Frida 스크립트를 생성하는 CLI 도구입니다.
 
 주요 흐름은 다음과 같습니다.
@@ -27,6 +31,7 @@ Windows PE, Linux/Android ELF, macOS Mach-O를 같은 데이터 모델로 다루
 - apktool/jadx가 있으면 AndroidManifest, Java native method, JNI bridge까지 분석
 - AndroidManifest 취약점 룰 9종(MANIFEST-001~009)을 자동 감사하고, 결과 finding마다 ADB / Frida / shell PoC 레시피를 자동 생성 (`venomhook android-audit`)
 - 생성된 PoC를 실행 가능한 `.sh` / `.frida.js` 번들로 디렉터리 단위 export
+- 분석 결과를 SQLite 캐시(APK hash 키)에 저장하고 다음 실행에서 자동 replay; 두 분석을 diff해 추가/삭제된 finding/PoC/JNI bridge/export 추적 (`--cache-dir`, `android-cache-list`, `android-cache-diff`)
 - Frida JSON 로그를 Markdown/HTML runtime summary로 변환
 
 ## Quick Start
@@ -466,6 +471,65 @@ class PoCArtifact:
 URI에 실제 authority를 박아넣는 데 사용됩니다. 다중 authority가 선언된
 경우 첫 번째를 URI에 사용하고 나머지는 PoC notes에 노출됩니다.
 
+### Analysis cache & diff (Phase 4)
+
+같은 APK를 반복 분석할 때 apktool / jadx / lief를 다시 실행하지 않도록
+SQLite 캐시를 제공합니다. APK SHA-256 해시(이미 `apk_extractor`가 계산)
++ 스키마 버전 키로 저장됩니다.
+
+```bash
+# 첫 실행 — 정상 파이프라인 + 캐시 기록
+venomhook android-audit --apk app.apk --cache-dir ./.venomhook-cache \
+    --report-json out/analysis.json
+
+# 같은 APK를 재실행 — apktool/jadx 생략, 캐시에서 즉시 replay
+venomhook android-audit --apk app.apk --cache-dir ./.venomhook-cache \
+    --report-json out/analysis.json
+# INFO  cache hit for sha256:... — replaying stored analysis
+```
+
+| 플래그 | 동작 |
+| --- | --- |
+| `--cache-dir DIR` | DIR/cache.db 사용. 기본 동작은 hit 시 replay + miss 시 fresh-run + 캐시 기록 |
+| `--no-cache-replay` | hit이 있어도 무시하고 항상 fresh-run (기록은 그대로) |
+| `--no-cache-write` | hit 활용은 하지만 새 분석을 캐시에 쓰지 않음 |
+
+캐시 인스펙션과 비교는 별도 서브커맨드:
+
+```bash
+# 모든 캐시 엔트리 나열 (텍스트 또는 JSON)
+venomhook android-cache-list --cache-dir ./.venomhook-cache
+venomhook android-cache-list --cache-dir ./.venomhook-cache --json | jq
+
+# 두 분석 diff — added/removed findings, PoCs, exports, JNI bridges
+venomhook android-cache-diff --cache-dir ./.venomhook-cache \
+    --old sha256:<v1.0_hash> --new sha256:<v1.1_hash> \
+    --json out/regression.json
+
+# 같은 APK hash의 서로 다른 schema row를 비교할 때
+venomhook android-cache-diff --cache-dir ./.venomhook-cache \
+    --old sha256:<apk_hash> --old-schema 0 \
+    --new sha256:<apk_hash> --new-schema 1
+```
+
+CI 회귀 게이트:
+
+```bash
+# v1.0 baseline을 캐시에 미리 저장해 둔 상태에서 v1.1 분석 후 diff
+venomhook android-cache-diff --cache-dir ./.venomhook-cache \
+    --old sha256:<v1.0_hash> --new sha256:<v1.1_hash> \
+    --exit-on-changes
+echo "exit=$?"   # 2 if findings/PoCs/exports/bridges/package changed
+```
+
+`has_changes` 정의는 *콘텐츠* 차이만 따집니다. APK 해시가 달라도 finding /
+PoC / export / JNI bridge / 패키지명이 동일하면 "no changes"로 보고합니다
+(빌드 재패키지로 인한 zip-metadata 차이가 false-positive를 만들지 않도록).
+
+Schema 버전(`SCHEMA_VERSION`)은 `AndroidAnalysis.to_dict()` 형식이 호환되지
+않게 변경될 때만 올라갑니다. 같은 APK 해시의 다른 스키마 버전 행은 공존
+가능 — 과거 분석을 보존한 채로 새 분석을 추가할 수 있습니다.
+
 ## Binary Metadata Helper
 
 Ghidra 함수 분석 없이 module-level metadata만 빠르게 확인할 수 있습니다. `lief`가 필요합니다.
@@ -555,6 +619,8 @@ venomhook/
 │       ├── hookspec_builder.py
 │       ├── jadx_runner.py
 │       ├── jni_bridge.py
+│       ├── analysis_cache.py
+│       ├── analysis_diff.py
 │       ├── manifest_audit.py
 │       ├── models.py
 │       ├── orchestrator.py

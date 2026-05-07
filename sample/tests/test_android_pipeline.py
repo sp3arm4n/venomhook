@@ -572,5 +572,106 @@ class TestAnalyzeApkAuditAndPocsIntegration(unittest.TestCase):
             self.assertEqual(d["pocs"][0]["rule_id"], "MANIFEST-001")
 
 
+class AndroidAnalysisRoundtripTests(unittest.TestCase):
+    """AndroidAnalysis.to_dict -> from_dict roundtrip — Phase 4 cache foundation.
+
+    Builds a real-ish AndroidAnalysis via the stubbed pipeline path used
+    elsewhere in this file, serializes, and reconstructs. The reconstructed
+    object must compare equal to the original on every nested field so the
+    cache layer can replace a live run with a stored payload.
+    """
+
+    def _full_analysis(self, tdp: Path) -> AndroidAnalysis:
+        apk = _make_apk_with_lib(tdp, {"arm64-v8a": ["libcore.so"]})
+        apktool_stub = _executable(
+            tdp / "stub-apktool.sh",
+            textwrap.dedent("""\
+                #!/bin/sh
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        -o) shift; OUT="$1"; shift; ;;
+                        *) shift; ;;
+                    esac
+                done
+                mkdir -p "$OUT"
+                cat > "$OUT/AndroidManifest.xml" <<'EOF'
+                <?xml version="1.0"?>
+                <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.demo">
+                    <application android:debuggable="true"/>
+                </manifest>
+                EOF
+                exit 0
+            """),
+        )
+        with mock.patch(
+            "venomhook.android_pipeline.extract_binary_meta",
+            return_value=_stub_binary_meta(
+                "/tmp/libcore.so", ["Java_com_demo_X_native"]
+            ),
+        ):
+            return analyze_apk(
+                apk, tdp / "work",
+                apktool_config=ApktoolConfig(apktool_path=str(apktool_stub)),
+                use_jadx=False,
+            )
+
+    def test_round_trip_equals_original(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            original = self._full_analysis(tdp)
+            restored = AndroidAnalysis.from_dict(original.to_dict())
+            self.assertEqual(restored, original)
+
+    def test_round_trip_preserves_pocs_and_audit(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            original = self._full_analysis(tdp)
+            self.assertGreater(len(original.pocs), 0)
+            restored = AndroidAnalysis.from_dict(original.to_dict())
+            self.assertEqual(
+                [p.rule_id for p in restored.pocs],
+                [p.rule_id for p in original.pocs],
+            )
+            self.assertEqual(
+                restored.audit_report.package_name,
+                original.audit_report.package_name,
+            )
+
+    def test_legacy_payload_without_audit_or_pocs_loads(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            original = self._full_analysis(tdp)
+            d = original.to_dict()
+            d.pop("audit_report")
+            d.pop("pocs")
+            restored = AndroidAnalysis.from_dict(d)
+            self.assertIsNone(restored.audit_report)
+            self.assertEqual(restored.pocs, [])
+
+    def test_round_trip_with_no_native_libs_branch(self):
+        # Post-9d0dbca safety mode: selected_abi/extracted_so_path/so_meta
+        # may all be None when require_native=False and the APK has no
+        # native libs. The cache must still round-trip such records.
+        d = {
+            "apk_meta": {
+                "path": "/x.apk", "name": "x.apk", "hash": "sha256:00",
+                "abis": [], "native_libs": {},
+            },
+            "selected_abi": None,
+            "extracted_so_path": None,
+            "so_meta": None,
+            "app_meta": None,
+            "java_natives": [],
+            "bridges": [],
+            "audit_report": None,
+            "pocs": [],
+            "warnings": ["no native libs"],
+        }
+        restored = AndroidAnalysis.from_dict(d)
+        self.assertIsNone(restored.so_meta)
+        self.assertIsNone(restored.app_meta)
+        self.assertEqual(restored.warnings, ["no native libs"])
+
+
 if __name__ == "__main__":
     unittest.main()

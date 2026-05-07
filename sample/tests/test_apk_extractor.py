@@ -103,6 +103,22 @@ class ExtractApkMetaTests(unittest.TestCase):
             self.assertEqual(d["abis"], ["arm64-v8a"])
             self.assertEqual(d["native_libs"]["arm64-v8a"], ["libfoo.so"])
 
+    def test_from_dict_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            apk = _make_apk(Path(tmp), {"arm64-v8a": ["libfoo.so"],
+                                          "x86_64": ["libfoo.so"]})
+            original = extract_apk_meta(apk)
+            restored = ApkMeta.from_dict(original.to_dict())
+            self.assertEqual(restored, original)
+
+    def test_from_dict_minimal(self) -> None:
+        # No native libs / abis fields default to empty.
+        m = ApkMeta.from_dict({
+            "path": "/x.apk", "name": "x.apk", "hash": "sha256:00",
+        })
+        self.assertEqual(m.abis, [])
+        self.assertEqual(m.native_libs, {})
+
 
 class SelectAbiTests(unittest.TestCase):
     def _meta(self, abis: list[str]) -> ApkMeta:

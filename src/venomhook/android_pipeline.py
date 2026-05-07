@@ -114,6 +114,38 @@ class AndroidAnalysis:
     def unmatched_bridges(self) -> list[JniBridge]:
         return [b for b in self.bridges if not b.is_matched]
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AndroidAnalysis":
+        """Reconstruct an AndroidAnalysis from a previously serialized dict.
+
+        Inverse of ``to_dict``; tolerates absent optional sections so older
+        stored payloads (pre-Phase 3, missing audit_report/pocs) and the
+        post-9d0dbca safety mode (selected_abi/extracted_so_path/so_meta
+        possibly None when no native libs) round-trip cleanly. Used by
+        the analysis cache to replay a prior run without rerunning
+        apktool / lief / jadx.
+        """
+        from venomhook.apk_extractor import ApkMeta as _ApkMeta
+        from venomhook.binary_meta import BinaryMeta as _BinaryMeta
+
+        so_meta_data = data.get("so_meta")
+        app_meta_data = data.get("app_meta")
+        audit_data = data.get("audit_report")
+        return cls(
+            apk_meta=_ApkMeta.from_dict(data["apk_meta"]),
+            selected_abi=data.get("selected_abi"),
+            extracted_so_path=data.get("extracted_so_path"),
+            so_meta=_BinaryMeta.from_dict(so_meta_data) if so_meta_data else None,
+            app_meta=AndroidAppMeta.from_dict(app_meta_data) if app_meta_data else None,
+            java_natives=[
+                JavaNativeMethod.from_dict(m) for m in data.get("java_natives", [])
+            ],
+            bridges=[JniBridge.from_dict(b) for b in data.get("bridges", [])],
+            warnings=list(data.get("warnings", [])),
+            audit_report=AndroidAuditReport.from_dict(audit_data) if audit_data else None,
+            pocs=[PoCArtifact.from_dict(p) for p in data.get("pocs", [])],
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "apk_meta": self.apk_meta.to_dict(),

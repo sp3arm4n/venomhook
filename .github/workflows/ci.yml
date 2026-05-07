@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main, claude-code, codex]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # Cancel superseded runs for the same branch / PR.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package + test deps
+        run: |
+          python -m pip install --upgrade pip
+          # The base package has zero deps. Tests skip lief / frida when
+          # absent, so we install pytest only — keeps the matrix fast and
+          # exercises the import-skip paths the README documents.
+          python -m pip install -e .
+          python -m pip install pytest
+
+      - name: Run pytest
+        run: |
+          python -m pytest sample/tests/ -q
