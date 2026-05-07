@@ -54,6 +54,18 @@ class ApkMeta:
     abis: list[str] = field(default_factory=list)  # ABIs found in lib/, sorted
     native_libs: dict[str, list[str]] = field(default_factory=dict)  # abi -> sorted .so basenames
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ApkMeta":
+        return cls(
+            path=data["path"],
+            name=data["name"],
+            hash=data["hash"],
+            abis=list(data.get("abis", [])),
+            native_libs={
+                abi: list(libs) for abi, libs in data.get("native_libs", {}).items()
+            },
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "path": self.path,

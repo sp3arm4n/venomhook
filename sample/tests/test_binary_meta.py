@@ -115,6 +115,69 @@ class BinaryMetaErrorTests(unittest.TestCase):
             extract_binary_meta("/nonexistent/path/foo.exe")
 
 
+class BinaryMetaRoundtripTests(unittest.TestCase):
+    """from_dict / to_dict roundtrip for BinaryMeta and SectionMeta.
+
+    No lief dependency — operates on synthetic dicts only. Required for
+    Phase 4 analysis cache: an AndroidAnalysis stored to JSON must
+    rebuild into an equivalent object.
+    """
+
+    def _bm(self) -> BinaryMeta:
+        return BinaryMeta(
+            name="libfoo.so", path="/abs/lib/libfoo.so",
+            hash="sha256:deadbeef", format="ELF", arch="arm64",
+            os_hint="android", image_base=0x1000, aslr=True,
+            sections=[
+                SectionMeta(name=".text", virtual_address=0x1000,
+                            virtual_size=0x800, executable=True),
+                SectionMeta(name=".rodata", virtual_address=0x1800,
+                            virtual_size=0x200, executable=False),
+            ],
+            imports=["JNI_OnLoad", "free"],
+            exports=["Java_com_x_A_native"],
+            libraries=["libc.so", "libdl.so"],
+        )
+
+    def test_section_round_trip(self) -> None:
+        s = SectionMeta(name=".text", virtual_address=0x4000,
+                        virtual_size=128, executable=True)
+        restored = SectionMeta.from_dict(s.to_dict())
+        self.assertEqual(restored, s)
+
+    def test_section_accepts_decimal_string(self) -> None:
+        # Forward compat: accept plain decimal strings as well as 0x hex.
+        s = SectionMeta.from_dict({
+            "name": ".data", "virtual_address": "8192",
+            "virtual_size": 64, "executable": False,
+        })
+        self.assertEqual(s.virtual_address, 8192)
+
+    def test_binary_round_trip(self) -> None:
+        original = self._bm()
+        restored = BinaryMeta.from_dict(original.to_dict())
+        self.assertEqual(restored, original)
+        self.assertEqual(restored.image_base, 0x1000)
+        self.assertEqual(len(restored.sections), 2)
+        self.assertTrue(restored.sections[0].executable)
+
+    def test_binary_image_base_accepts_int(self) -> None:
+        d = self._bm().to_dict()
+        d["image_base"] = 0x4000   # already an int — must still parse
+        restored = BinaryMeta.from_dict(d)
+        self.assertEqual(restored.image_base, 0x4000)
+
+    def test_binary_minimal_dict(self) -> None:
+        # Optional sections/imports/exports/libraries default to empty.
+        restored = BinaryMeta.from_dict({
+            "name": "x.so", "path": "/x.so", "hash": "sha256:00",
+            "format": "ELF", "arch": "arm64", "os_hint": "android",
+            "image_base": "0x0", "aslr": False,
+        })
+        self.assertEqual(restored.sections, [])
+        self.assertEqual(restored.imports, [])
+
+
 class BinaryInfoOsFieldTests(unittest.TestCase):
     """Backward-compat for BinaryInfo: legacy JSON parses, os round-trips, None is omitted."""
 

@@ -39,12 +39,33 @@ class BinaryMetaError(RuntimeError):
     """Raised when binary metadata cannot be extracted (missing dep, parse failure, unknown format)."""
 
 
+def _parse_int_or_hex(value: Any) -> int:
+    """Accept int (already parsed) or string like '0x1000'/'4096' (from JSON)."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        if s.startswith(("0x", "0X")):
+            return int(s, 16)
+        return int(s)
+    raise TypeError(f"expected int or hex string, got {type(value).__name__}")
+
+
 @dataclass
 class SectionMeta:
     name: str
     virtual_address: int
     virtual_size: int
     executable: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SectionMeta":
+        return cls(
+            name=data["name"],
+            virtual_address=_parse_int_or_hex(data["virtual_address"]),
+            virtual_size=int(data["virtual_size"]),
+            executable=bool(data.get("executable", False)),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +92,23 @@ class BinaryMeta:
     imports: list[str] = field(default_factory=list)  # flat function symbol names (imported)
     exports: list[str] = field(default_factory=list)  # flat function symbol names (exported)
     libraries: list[str] = field(default_factory=list)  # imported DLL/.so names
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "BinaryMeta":
+        return cls(
+            name=data["name"],
+            path=data["path"],
+            hash=data["hash"],
+            format=data["format"],
+            arch=data["arch"],
+            os_hint=data["os_hint"],
+            image_base=_parse_int_or_hex(data["image_base"]),
+            aslr=bool(data["aslr"]),
+            sections=[SectionMeta.from_dict(s) for s in data.get("sections", [])],
+            imports=list(data.get("imports", [])),
+            exports=list(data.get("exports", [])),
+            libraries=list(data.get("libraries", [])),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
