@@ -306,6 +306,114 @@ class AndroidAuditCliTests(unittest.TestCase):
                 ])
         self.assertEqual(ctx.exception.code, 1)
 
+    def test_cache_dir_does_not_store_failed_manifest_decode(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            cache_dir = tdp / "cache"
+
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                return_value=_stub_binary_meta("/tmp/libfoo.so"),
+            ), mock.patch(
+                "venomhook.android_pipeline.decode_apk",
+                side_effect=__import__(
+                    "venomhook.apk_decoder", fromlist=["ApktoolNotFoundError"]
+                ).ApktoolNotFoundError("not on PATH"),
+            ), self.assertRaises(SystemExit) as ctx:
+                self._run([
+                    "android-audit",
+                    "--apk", str(apk),
+                    "--out-dir", str(tdp / "work"),
+                    "--no-jadx",
+                    "--quiet",
+                    "--cache-dir", str(cache_dir),
+                ])
+
+            from venomhook.analysis_cache import AnalysisCache
+            with AnalysisCache(cache_dir / "cache.db") as cache:
+                self.assertEqual(cache.list_entries(), [])
+
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_stale_cache_without_manifest_is_ignored_and_replaced(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_without_lib(tdp)
+            apktool = _apktool_stub(tdp, _MANIFEST_DEBUGGABLE)
+            cache_dir = tdp / "cache"
+
+            from venomhook.analysis_cache import AnalysisCache
+            from venomhook.android_pipeline import AndroidAnalysis
+            from venomhook.apk_extractor import extract_apk_meta
+
+            apk_meta = extract_apk_meta(apk)
+            with AnalysisCache(cache_dir / "cache.db") as cache:
+                cache.put(AndroidAnalysis(
+                    apk_meta=apk_meta,
+                    selected_abi=None,
+                    extracted_so_path=None,
+                    so_meta=None,
+                    app_meta=None,
+                ))
+
+            out = self._run([
+                "android-audit",
+                "--apk", str(apk),
+                "--out-dir", str(tdp / "work"),
+                "--apktool-path", str(apktool),
+                "--no-jadx",
+                "--cache-dir", str(cache_dir),
+            ])
+
+            with AnalysisCache(cache_dir / "cache.db") as cache:
+                restored = cache.get(apk_meta.hash)
+
+        self.assertIn("MANIFEST-001", out)
+        self.assertEqual(restored.app_meta.package_name, "com.demo")
+        self.assertIsNotNone(restored.audit_report)
+
+    def test_cached_app_meta_without_audit_report_is_rebuilt(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_without_lib(tdp)
+            cache_dir = tdp / "cache"
+
+            from venomhook.analysis_cache import AnalysisCache
+            from venomhook.android_pipeline import AndroidAnalysis
+            from venomhook.apk_extractor import extract_apk_meta
+            from venomhook.models import AndroidAppMeta
+
+            apk_meta = extract_apk_meta(apk)
+            with AnalysisCache(cache_dir / "cache.db") as cache:
+                cache.put(AndroidAnalysis(
+                    apk_meta=apk_meta,
+                    selected_abi=None,
+                    extracted_so_path=None,
+                    so_meta=None,
+                    app_meta=AndroidAppMeta(
+                        package_name="com.demo",
+                        debuggable=True,
+                    ),
+                ))
+
+            with mock.patch("venomhook.cli.analyze_apk") as analyze_mock:
+                out = self._run([
+                    "android-audit",
+                    "--apk", str(apk),
+                    "--out-dir", str(tdp / "work"),
+                    "--no-jadx",
+                    "--cache-dir", str(cache_dir),
+                ])
+                analyze_mock.assert_not_called()
+
+            with AnalysisCache(cache_dir / "cache.db") as cache:
+                restored = cache.get(apk_meta.hash)
+
+        self.assertIn("MANIFEST-001", out)
+        self.assertIsNotNone(restored.audit_report)
+        self.assertGreaterEqual(len(restored.pocs), 1)
+
     def test_cache_dir_writes_after_first_run(self):
         with tempfile.TemporaryDirectory() as td:
             tdp = Path(td)

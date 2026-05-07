@@ -156,6 +156,43 @@ class CacheDiffTests(unittest.TestCase):
             self.assertIn("Findings added", out)
             self.assertIn("MANIFEST-002", out)
 
+    def test_diff_can_select_schema_versions_for_same_hash(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache_dir = Path(td) / "c"
+            cache_dir.mkdir()
+            old = _analysis("sha256:same", "com.x", [])
+            new = _analysis(
+                "sha256:same", "com.x", [_finding("MANIFEST-002")]
+            )
+            with AnalysisCache(cache_dir / "cache.db") as cache:
+                cache._conn.execute(
+                    "INSERT INTO analyses "
+                    "(apk_hash, schema_version, created_at, package_name, "
+                    " apk_name, finding_count, payload) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        old.apk_meta.hash,
+                        0,
+                        "2026-01-01T00:00:00+00:00",
+                        "com.x",
+                        old.apk_meta.name,
+                        0,
+                        json.dumps(old.to_dict()),
+                    ),
+                )
+                cache._conn.commit()
+                cache.put(new)
+
+            out = _run([
+                "android-cache-diff",
+                "--cache-dir", str(cache_dir),
+                "--old", "sha256:same",
+                "--old-schema", "0",
+                "--new", "sha256:same",
+            ])
+
+        self.assertIn("Findings added", out)
+        self.assertIn("MANIFEST-002", out)
+
     def test_diff_no_changes_message(self):
         with tempfile.TemporaryDirectory() as td:
             cache_dir = Path(td) / "c"

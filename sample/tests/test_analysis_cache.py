@@ -82,10 +82,13 @@ class CacheLifecycleTests(unittest.TestCase):
             cache = AnalysisCache(db)
             self.assertTrue(db.exists())
             # Table exists
-            with sqlite3.connect(db) as raw:
+            raw = sqlite3.connect(db)
+            try:
                 names = [r[0] for r in raw.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 ).fetchall()]
+            finally:
+                raw.close()
             self.assertIn("analyses", names)
             cache.close()
 

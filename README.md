@@ -505,6 +505,11 @@ venomhook android-cache-list --cache-dir ./.venomhook-cache --json | jq
 venomhook android-cache-diff --cache-dir ./.venomhook-cache \
     --old sha256:<v1.0_hash> --new sha256:<v1.1_hash> \
     --json out/regression.json
+
+# 같은 APK hash의 서로 다른 schema row를 비교할 때
+venomhook android-cache-diff --cache-dir ./.venomhook-cache \
+    --old sha256:<apk_hash> --old-schema 0 \
+    --new sha256:<apk_hash> --new-schema 1
 ```
 
 CI 회귀 게이트:

@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from venomhook import __version__
-from venomhook.analysis_cache import AnalysisCache
+from venomhook.analysis_cache import SCHEMA_VERSION, AnalysisCache
 from venomhook.analysis_diff import diff_analyses, format_diff_text
 from venomhook.android_pipeline import AndroidPipelineError, analyze_apk
 from venomhook.apk_decoder import ApktoolConfig
@@ -25,11 +25,12 @@ from venomhook.manifest_audit import (
     SEV_INFO,
     SEV_LOW,
     SEV_MEDIUM,
+    audit_manifest,
     format_audit_summary,
 )
 from venomhook.orchestrator import run_frida
 from venomhook.poc_export import export_pocs
-from venomhook.poc_generator import format_pocs_text
+from venomhook.poc_generator import format_pocs_text, generate_pocs
 from venomhook.scoring import ScoreConfig
 from venomhook.static_pipeline import StaticPipeline
 from venomhook.runtime_report import summarize_log_file, write_markdown_summary, write_html_summary
@@ -410,6 +411,14 @@ def main(argv: list[str] | None = None) -> None:
         help="APK hash (sha256:<hex>) of the comparison analysis",
     )
     cache_diff_parser.add_argument(
+        "--old-schema", type=int, default=SCHEMA_VERSION,
+        help="Schema version for --old (default: current SCHEMA_VERSION)",
+    )
+    cache_diff_parser.add_argument(
+        "--new-schema", type=int, default=SCHEMA_VERSION,
+        help="Schema version for --new (default: current SCHEMA_VERSION)",
+    )
+    cache_diff_parser.add_argument(
         "--json", type=Path,
         help="Write the diff as JSON to this path (in addition to stdout)",
     )
@@ -740,87 +749,106 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
     if args.cache_dir:
         cache = AnalysisCache(args.cache_dir / "cache.db")
 
-    result = None
-    if cache and not args.no_cache_replay:
-        # Cheap hash probe: extract_apk_meta only opens the zip + sha256s,
-        # which is much cheaper than running apktool/jadx/lief.
-        try:
-            apk_meta_probe = extract_apk_meta(args.apk)
-        except ApkExtractError as e:
-            cache.close()
-            logging.error("android-audit failed: %s", e)
-            raise SystemExit(1) from e
-        cached = cache.get(apk_meta_probe.hash)
-        if cached is not None:
-            logging.info("cache hit for %s — replaying stored analysis",
-                         apk_meta_probe.hash)
-            result = cached
+    try:
+        result = None
+        cache_update_needed = False
+        if cache and not args.no_cache_replay:
+            # Cheap hash probe: extract_apk_meta only opens the zip + sha256s,
+            # which is much cheaper than running apktool/jadx/lief.
+            try:
+                apk_meta_probe = extract_apk_meta(args.apk)
+            except ApkExtractError as e:
+                logging.error("android-audit failed: %s", e)
+                raise SystemExit(1) from e
+            cached = cache.get(apk_meta_probe.hash)
+            if cached is not None:
+                if cached.app_meta is None:
+                    logging.warning(
+                        "cache hit for %s has no decoded manifest; "
+                        "ignoring cached analysis",
+                        apk_meta_probe.hash,
+                    )
+                else:
+                    logging.info("cache hit for %s — replaying stored analysis",
+                                 apk_meta_probe.hash)
+                    result = cached
 
-    if result is None:
-        try:
-            result = analyze_apk(
-                args.apk,
-                work_dir,
-                abi=args.abi,
-                lib_name=args.apk_lib,
-                use_apktool=True,
-                use_jadx=not args.no_jadx,
-                apktool_config=apktool_config,
-                jadx_config=jadx_config,
-                fail_on_missing_tools=args.strict_tools,
-                require_native=False,
+        if result is None:
+            try:
+                result = analyze_apk(
+                    args.apk,
+                    work_dir,
+                    abi=args.abi,
+                    lib_name=args.apk_lib,
+                    use_apktool=True,
+                    use_jadx=not args.no_jadx,
+                    apktool_config=apktool_config,
+                    jadx_config=jadx_config,
+                    fail_on_missing_tools=args.strict_tools,
+                    require_native=False,
+                )
+            except AndroidPipelineError as e:
+                logging.error("android-audit failed: %s", e)
+                raise SystemExit(1) from e
+            cache_update_needed = True
+
+        for w in result.warnings:
+            logging.warning("%s", w)
+
+        if result.app_meta is None:
+            logging.error(
+                "manifest decode skipped — audit cannot run. Install apktool or "
+                "pass --apktool-path; or use --strict-tools to surface the error."
             )
-        except AndroidPipelineError as e:
-            if cache:
-                cache.close()
-            logging.error("android-audit failed: %s", e)
-            raise SystemExit(1) from e
-        if cache and not args.no_cache_write:
+            raise SystemExit(1)
+
+        if result.audit_report is None:
+            logging.info(
+                "cached analysis missing audit report; rebuilding from app_meta"
+            )
+            result.audit_report = audit_manifest(result.app_meta)
+            result.pocs = generate_pocs(result.app_meta, result.audit_report)
+            cache_update_needed = True
+
+        audit_report = result.audit_report
+        pocs = result.pocs
+
+        if cache and cache_update_needed and not args.no_cache_write:
             cache.put(result)
             logging.info("analysis cached under %s (apk_hash=%s)",
                          args.cache_dir, result.apk_meta.hash)
 
-    for w in result.warnings:
-        logging.warning("%s", w)
+        if not args.quiet:
+            print(format_audit_summary(audit_report))
+            print()
+            print(format_pocs_text(pocs))
 
-    if result.app_meta is None:
-        logging.error(
-            "manifest decode skipped — audit cannot run. Install apktool or "
-            "pass --apktool-path; or use --strict-tools to surface the error."
-        )
-        raise SystemExit(1)
+        if args.report_json:
+            write_json(args.report_json, result.to_dict())
+            logging.info("AndroidAnalysis written to %s", args.report_json)
+        if args.audit_json:
+            write_json(args.audit_json, audit_report.to_dict())
+            logging.info("AndroidAuditReport written to %s", args.audit_json)
+        if args.poc_json:
+            write_json(args.poc_json, [p.to_dict() for p in pocs])
+            logging.info("PoC artifacts written to %s", args.poc_json)
+        if args.poc_bundle_dir:
+            written = export_pocs(pocs, args.poc_bundle_dir)
+            logging.info("PoC bundle (%d files) written under %s",
+                         len(written), args.poc_bundle_dir)
 
-    audit_report = result.audit_report
-    pocs = result.pocs
-
-    if not args.quiet:
-        print(format_audit_summary(audit_report))
-        print()
-        print(format_pocs_text(pocs))
-
-    if args.report_json:
-        write_json(args.report_json, result.to_dict())
-        logging.info("AndroidAnalysis written to %s", args.report_json)
-    if args.audit_json:
-        write_json(args.audit_json, audit_report.to_dict())
-        logging.info("AndroidAuditReport written to %s", args.audit_json)
-    if args.poc_json:
-        write_json(args.poc_json, [p.to_dict() for p in pocs])
-        logging.info("PoC artifacts written to %s", args.poc_json)
-    if args.poc_bundle_dir:
-        written = export_pocs(pocs, args.poc_bundle_dir)
-        logging.info("PoC bundle (%d files) written under %s",
-                     len(written), args.poc_bundle_dir)
-
-    if cache:
-        cache.close()
-
-    if args.severity_threshold and audit_report.has_severity_at_least(args.severity_threshold):
-        logging.error(
-            "severity gate triggered: at least one finding at or above '%s'",
-            args.severity_threshold,
-        )
-        raise SystemExit(2)
+        if (
+            args.severity_threshold
+            and audit_report.has_severity_at_least(args.severity_threshold)
+        ):
+            logging.error(
+                "severity gate triggered: at least one finding at or above '%s'",
+                args.severity_threshold,
+            )
+            raise SystemExit(2)
+    finally:
+        if cache:
+            cache.close()
 
 
 def cmd_android_cache_list(args: argparse.Namespace) -> None:
@@ -880,14 +908,22 @@ def cmd_android_cache_diff(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
     with AnalysisCache(db_path) as cache:
-        old = cache.get(args.old)
-        new = cache.get(args.new)
+        old = cache.get(args.old, schema_version=args.old_schema)
+        new = cache.get(args.new, schema_version=args.new_schema)
 
     if old is None:
-        logging.error("apk_hash not found in cache: %s", args.old)
+        logging.error(
+            "apk_hash not found in cache: %s (schema=%s)",
+            args.old,
+            args.old_schema,
+        )
         raise SystemExit(1)
     if new is None:
-        logging.error("apk_hash not found in cache: %s", args.new)
+        logging.error(
+            "apk_hash not found in cache: %s (schema=%s)",
+            args.new,
+            args.new_schema,
+        )
         raise SystemExit(1)
 
     diff = diff_analyses(old, new)
