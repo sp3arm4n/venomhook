@@ -11,13 +11,15 @@ test device. Placeholders in the form ``{...}`` are filled where the
 manifest data permits; remaining placeholders are documented in each
 artifact's ``notes``.
 
-Coverage (v1):
+Coverage:
     MANIFEST-001  Debuggable       — jdwp + run-as
     MANIFEST-002  Cleartext        — mitmproxy interception recipe
     MANIFEST-003  Allow Backup     — adb backup data extraction
     MANIFEST-004  Exported comp    — am start/startservice/broadcast per type
-    MANIFEST-005  Exported provider— content query/insert (authority TBD)
+    MANIFEST-005  Exported provider— content query (real authority when
+                                     AndroidComponent.authorities is set)
     MANIFEST-006  grantUri        — path-traversal probes via content://
+                                     (authority resolved from manifest)
 
 MANIFEST-007/008/009 are policy/posture findings without a direct PoC and
 are intentionally skipped.
@@ -268,10 +270,34 @@ def _build_exported_no_permission(
     return artifacts
 
 
+def _provider_authority(meta: AndroidAppMeta, finding: ManifestFinding) -> tuple[str, str]:
+    """Return (authority, notes_suffix) for a provider finding.
+
+    Looks up the AndroidComponent matching finding.component and uses its
+    first declared authority. Falls back to '<AUTHORITY>' placeholder with
+    a guidance note when the manifest declared no authority (e.g., older
+    apktool output) or the component isn't present in meta.
+    """
+    component = _find_component(meta, finding.component)
+    if component and component.authorities:
+        primary = component.authorities[0]
+        suffix = ""
+        if len(component.authorities) > 1:
+            extras = ", ".join(component.authorities[1:])
+            suffix = f"Additional authorities declared: {extras}."
+        return primary, suffix
+    return (
+        "<AUTHORITY>",
+        "android:authorities was not present on this provider; substitute "
+        "the actual authority from the decoded AndroidManifest.xml.",
+    )
+
+
 def _build_exported_provider(
     meta: AndroidAppMeta, finding: ManifestFinding
 ) -> list[PoCArtifact]:
     pkg = meta.package_name or "<package>"
+    authority, notes_suffix = _provider_authority(meta, finding)
     return [
         PoCArtifact(
             rule_id=finding.rule_id,
@@ -286,20 +312,14 @@ def _build_exported_provider(
                 "query/insert/update/delete via `adb shell content`."
             ),
             commands=[
-                "# Look up the provider authority from AndroidManifest.xml",
-                "#   <provider android:name=\"...\" android:authorities=\"<AUTHORITY>\" .../>",
-                "adb shell content query --uri content://<AUTHORITY>/",
-                "adb shell content query --uri content://<AUTHORITY>/<path>",
+                f"adb shell content query --uri content://{authority}/",
+                f"adb shell content query --uri content://{authority}/<path>",
             ],
             expected_evidence=(
                 "Returned rows from the provider, or 'No result found.' "
                 "(an unauthorized denial would surface SecurityException)."
             ),
-            notes=(
-                "AUTHORITY is not part of AndroidAuditReport (Phase 2 model "
-                "didn't extract it). Read it directly from the decoded "
-                "AndroidManifest.xml — typically '<pkg>.provider' or similar."
-            ),
+            notes=notes_suffix,
             references=list(finding.references),
         ),
     ]
@@ -307,6 +327,10 @@ def _build_exported_provider(
 
 def _build_grant_uri(meta: AndroidAppMeta, finding: ManifestFinding) -> list[PoCArtifact]:
     pkg = meta.package_name or "<package>"
+    authority, notes_suffix = _provider_authority(meta, finding)
+    notes = "Pair with MANIFEST-005 if the provider is also exported."
+    if notes_suffix:
+        notes = f"{notes} {notes_suffix}"
     return [
         PoCArtifact(
             rule_id=finding.rule_id,
@@ -322,10 +346,10 @@ def _build_grant_uri(meta: AndroidAppMeta, finding: ManifestFinding) -> list[PoC
             ),
             commands=[
                 "# Probe with a normal path first to confirm reachability:",
-                "adb shell content query --uri content://<AUTHORITY>/files/test",
+                f"adb shell content query --uri content://{authority}/files/test",
                 "# Then probe traversal payloads:",
-                "adb shell content read --uri content://<AUTHORITY>/files/../../../etc/hosts",
-                "adb shell content read --uri content://<AUTHORITY>/files/..%2F..%2F..%2Fdata%2Fdata%2F"
+                f"adb shell content read --uri content://{authority}/files/../../../etc/hosts",
+                f"adb shell content read --uri content://{authority}/files/..%2F..%2F..%2Fdata%2Fdata%2F"
                 + pkg + "%2Fshared_prefs%2F",
             ],
             expected_evidence=(
@@ -333,10 +357,7 @@ def _build_grant_uri(meta: AndroidAppMeta, finding: ManifestFinding) -> list[PoC
                 "(e.g., /etc/hosts or app-private SharedPreferences) — "
                 "indicates missing canonicalization."
             ),
-            notes=(
-                "Pair with MANIFEST-005 if the provider is also exported. "
-                "Authority extraction is a Phase 4 candidate."
-            ),
+            notes=notes,
             references=list(finding.references),
         ),
     ]

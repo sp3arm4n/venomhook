@@ -380,6 +380,10 @@ class AndroidComponent:
     # Provider-only attribute audited by manifest_audit (PR #11). Defaults to
     # False; True signals possible URI-based path traversal if not validated.
     grant_uri_permissions: bool = False
+    # Provider-only — list of `android:authorities` values, semicolon-split.
+    # PoC generator (Phase 3) substitutes the first authority into
+    # content:// recipes when present; empty for non-provider components.
+    authorities: list[str] = field(default_factory=list)
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AndroidComponent":
         return cls(
@@ -390,6 +394,7 @@ class AndroidComponent:
             permission=data.get("permission"),
             intent_actions=list(data.get("intent_actions", [])),
             grant_uri_permissions=bool(data.get("grant_uri_permissions", False)),
+            authorities=list(data.get("authorities", [])),
         )
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -405,6 +410,8 @@ class AndroidComponent:
             result["intent_actions"] = list(self.intent_actions)
         if self.grant_uri_permissions:
             result["grant_uri_permissions"] = True
+        if self.authorities:
+            result["authorities"] = list(self.authorities)
         return result
 @dataclass
 class AndroidAppMeta:

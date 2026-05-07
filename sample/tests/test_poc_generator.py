@@ -226,7 +226,7 @@ class ExportedNoPermissionBuilderTests(unittest.TestCase):
 
 
 class ExportedProviderBuilderTests(unittest.TestCase):
-    def test_query_recipe_emitted(self) -> None:
+    def test_query_recipe_emitted_with_placeholder_when_authority_absent(self) -> None:
         comp = _comp(
             type="provider", name="com.x.Prov",
             exported=True, exported_declared=True,
@@ -237,7 +237,36 @@ class ExportedProviderBuilderTests(unittest.TestCase):
         self.assertGreaterEqual(len(arts), 1)
         a = next(x for x in arts if x.rule_id == "MANIFEST-005")
         self.assertTrue(any("content query" in c for c in a.commands))
-        self.assertIn("AUTHORITY", a.notes)
+        # No authorities on the component -> placeholder + guidance note.
+        self.assertTrue(any("<AUTHORITY>" in c for c in a.commands))
+        self.assertIn("android:authorities was not present", a.notes)
+
+    def test_query_recipe_uses_real_authority_when_present(self) -> None:
+        comp = _comp(
+            type="provider", name="com.x.Prov",
+            exported=True, exported_declared=True,
+            authorities=["com.x.fileprovider"],
+        )
+        meta = _meta(components=[comp], target_sdk=33)
+        arts = generate_pocs(meta, audit_manifest(meta))
+        a = next(x for x in arts if x.rule_id == "MANIFEST-005")
+        self.assertTrue(any("content://com.x.fileprovider/" in c for c in a.commands))
+        # No fallback notes when real authority is in hand.
+        self.assertNotIn("substitute the actual authority", a.notes)
+
+    def test_multiple_authorities_recorded_in_notes(self) -> None:
+        comp = _comp(
+            type="provider", name="com.x.Prov",
+            exported=True, exported_declared=True,
+            authorities=["com.x.primary", "com.x.secondary", "com.x.legacy"],
+        )
+        meta = _meta(components=[comp], target_sdk=33)
+        arts = generate_pocs(meta, audit_manifest(meta))
+        a = next(x for x in arts if x.rule_id == "MANIFEST-005")
+        # First authority used in URI; the rest surfaced as a note.
+        self.assertTrue(any("content://com.x.primary/" in c for c in a.commands))
+        self.assertIn("com.x.secondary", a.notes)
+        self.assertIn("com.x.legacy", a.notes)
 
 
 class GrantUriBuilderTests(unittest.TestCase):
@@ -253,6 +282,18 @@ class GrantUriBuilderTests(unittest.TestCase):
         joined = " ".join(a.commands)
         self.assertIn("../", joined)
         self.assertIn(meta.package_name, joined)
+
+    def test_traversal_uses_real_authority_when_present(self) -> None:
+        comp = _comp(
+            type="provider", name="com.x.Prov",
+            exported=True, exported_declared=True,
+            grant_uri_permissions=True,
+            authorities=["com.x.fileprovider"],
+        )
+        meta = _meta(components=[comp])
+        arts = generate_pocs(meta, audit_manifest(meta))
+        a = next(x for x in arts if x.rule_id == "MANIFEST-006")
+        self.assertTrue(any("content://com.x.fileprovider/" in c for c in a.commands))
 
 
 # ---------- registry & informational rules ----------

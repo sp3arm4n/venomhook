@@ -389,6 +389,76 @@ class TestParseAndroidManifest(unittest.TestCase):
             self.assertEqual(meta.activities[0].type, "activity")
             self.assertEqual(meta.activities[0].name, "p.Alias")
 
+    def test_provider_authorities_single(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "AndroidManifest.xml"
+            p.write_text(
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.x">\n'
+                '  <application>\n'
+                '    <provider android:name=".FileProv"\n'
+                '              android:authorities="com.x.fileprovider"\n'
+                '              android:exported="true"\n'
+                '              android:grantUriPermissions="true"/>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            )
+            meta = parse_android_manifest(p)
+            self.assertEqual(len(meta.providers), 1)
+            prov = meta.providers[0]
+            self.assertEqual(prov.authorities, ["com.x.fileprovider"])
+            self.assertTrue(prov.grant_uri_permissions)
+
+    def test_provider_authorities_semicolon_split(self):
+        # Per Android spec android:authorities accepts a ';' separated list.
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "AndroidManifest.xml"
+            p.write_text(
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.x">\n'
+                '  <application>\n'
+                '    <provider android:name=".P"\n'
+                '              android:authorities="com.x.primary; com.x.legacy ;com.x.alt"\n'
+                '              android:exported="true"/>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            )
+            meta = parse_android_manifest(p)
+            self.assertEqual(
+                meta.providers[0].authorities,
+                ["com.x.primary", "com.x.legacy", "com.x.alt"],
+            )
+
+    def test_non_provider_components_have_empty_authorities(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "AndroidManifest.xml"
+            p.write_text(
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.x">\n'
+                '  <application>\n'
+                '    <activity android:name=".A"/>\n'
+                '    <service android:name=".S"/>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            )
+            meta = parse_android_manifest(p)
+            self.assertEqual(meta.activities[0].authorities, [])
+            self.assertEqual(meta.services[0].authorities, [])
+
+    def test_provider_without_authorities_attribute(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "AndroidManifest.xml"
+            p.write_text(
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.x">\n'
+                '  <application>\n'
+                '    <provider android:name=".P" android:exported="true"/>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            )
+            meta = parse_android_manifest(p)
+            self.assertEqual(meta.providers[0].authorities, [])
+
 
 # ---------- run_apktool_decode ----------
 
