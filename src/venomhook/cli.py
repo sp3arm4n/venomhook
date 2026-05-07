@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 
 from venomhook import __version__
+from venomhook.android_pipeline import AndroidPipelineError, analyze_apk
+from venomhook.apk_decoder import ApktoolConfig
 from venomhook.apk_extractor import (
     ApkExtractError,
     extract_apk_meta,
@@ -14,7 +16,18 @@ from venomhook.apk_extractor import (
 )
 from venomhook.dynamic_pipeline import DynamicPipeline
 from venomhook.ghidra_runner import GhidraRunner
+from venomhook.jadx_runner import JadxConfig
+from venomhook.manifest_audit import (
+    SEV_CRITICAL,
+    SEV_HIGH,
+    SEV_INFO,
+    SEV_LOW,
+    SEV_MEDIUM,
+    format_audit_summary,
+)
 from venomhook.orchestrator import run_frida
+from venomhook.poc_export import export_pocs
+from venomhook.poc_generator import format_pocs_text
 from venomhook.scoring import ScoreConfig
 from venomhook.static_pipeline import StaticPipeline
 from venomhook.runtime_report import summarize_log_file, write_markdown_summary, write_html_summary
@@ -289,6 +302,64 @@ def main(argv: list[str] | None = None) -> None:
     e2e_parser.add_argument("--dry-run", action="store_true", help="Pass --no-pause etc but do not execute (for frida)")
     e2e_parser.add_argument("--summarize-log", action="store_true", help="Summarize frida log if present")
     e2e_parser.set_defaults(func=cmd_offset_e2e)
+
+    audit_parser = subparsers.add_parser(
+        "android-audit",
+        help="Decode APK manifest, run vulnerability audit, generate PoC recipes",
+    )
+    audit_parser.add_argument("--apk", type=Path, required=True, help="Path to Android APK")
+    audit_parser.add_argument(
+        "--abi", type=str, default="auto",
+        help='ABI to extract for .so analysis ("auto"/"arm64-v8a"/etc.)',
+    )
+    audit_parser.add_argument(
+        "--apk-lib", type=str, help="Specific .so basename within ABI (default: first available)",
+    )
+    audit_parser.add_argument(
+        "--out-dir", type=Path,
+        help="Working directory for apktool/jadx outputs (default: temp dir)",
+    )
+    audit_parser.add_argument(
+        "--report-json", type=Path,
+        help="Write full AndroidAnalysis.to_dict() JSON to this path",
+    )
+    audit_parser.add_argument(
+        "--audit-json", type=Path,
+        help="Write only the AndroidAuditReport JSON to this path",
+    )
+    audit_parser.add_argument(
+        "--poc-json", type=Path,
+        help="Write the PoC artifact list as JSON to this path",
+    )
+    audit_parser.add_argument(
+        "--poc-bundle-dir", type=Path,
+        help="Export each PoC as a runnable .sh / .frida.js / .md under this "
+        "directory along with a README.md index",
+    )
+    audit_parser.add_argument(
+        "--apktool-path", type=str, help="Override apktool binary path (default: $PATH lookup)",
+    )
+    audit_parser.add_argument(
+        "--jadx-path", type=str, help="Override jadx binary path (default: $PATH lookup)",
+    )
+    audit_parser.add_argument(
+        "--no-jadx", action="store_true",
+        help="Skip jadx (java decompile + JNI bridges); audit-only mode",
+    )
+    audit_parser.add_argument(
+        "--strict-tools", action="store_true",
+        help="Fail with non-zero exit when apktool/jadx are unavailable",
+    )
+    audit_parser.add_argument(
+        "--severity-threshold",
+        choices=[SEV_CRITICAL, SEV_HIGH, SEV_MEDIUM, SEV_LOW, SEV_INFO],
+        help="Exit non-zero (CI gate) if any finding's severity is at or above this level",
+    )
+    audit_parser.add_argument(
+        "--quiet", action="store_true",
+        help="Suppress per-finding stdout output (still writes JSON if requested)",
+    )
+    audit_parser.set_defaults(func=cmd_android_audit)
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format=LOG_FORMAT)
@@ -570,6 +641,97 @@ def cmd_offset_e2e(args: argparse.Namespace) -> None:
             logging.info("runtime summaries written to %s, %s", summary_md, summary_html)
     else:
         logging.info("frida run skipped (use --run-frida to execute)")
+
+
+def cmd_android_audit(args: argparse.Namespace) -> None:
+    """Decode an APK's manifest, run the audit rule engine, and emit PoCs.
+
+    Output channels:
+      - stdout   : audit summary + PoC bundle (suppressible with --quiet)
+      - --report-json : full AndroidAnalysis.to_dict() (apk_meta, app_meta,
+                        bridges, audit_report, pocs, ...)
+      - --audit-json  : only AndroidAuditReport.to_dict()
+      - --poc-json    : only the PoCArtifact list
+
+    Exit codes:
+      0 — success, no severity gate triggered
+      1 — pipeline error (APK invalid, no native libs, missing tools when
+          --strict-tools, etc.)
+      2 — severity gate: at least one finding at or above
+          --severity-threshold
+    """
+    import json
+    import tempfile
+
+    def write_json(path: Path, payload: object) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2))
+
+    if args.out_dir:
+        work_dir = args.out_dir
+        work_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        work_dir = Path(tempfile.mkdtemp(prefix="venomhook_audit_"))
+        logging.info("using temporary work dir: %s", work_dir)
+
+    apktool_config = ApktoolConfig(apktool_path=args.apktool_path) if args.apktool_path else None
+    jadx_config = JadxConfig(jadx_path=args.jadx_path) if args.jadx_path else None
+
+    try:
+        result = analyze_apk(
+            args.apk,
+            work_dir,
+            abi=args.abi,
+            lib_name=args.apk_lib,
+            use_apktool=True,
+            use_jadx=not args.no_jadx,
+            apktool_config=apktool_config,
+            jadx_config=jadx_config,
+            fail_on_missing_tools=args.strict_tools,
+            require_native=False,
+        )
+    except AndroidPipelineError as e:
+        logging.error("android-audit failed: %s", e)
+        raise SystemExit(1) from e
+
+    for w in result.warnings:
+        logging.warning("%s", w)
+
+    if result.app_meta is None:
+        logging.error(
+            "manifest decode skipped — audit cannot run. Install apktool or "
+            "pass --apktool-path; or use --strict-tools to surface the error."
+        )
+        raise SystemExit(1)
+
+    audit_report = result.audit_report
+    pocs = result.pocs
+
+    if not args.quiet:
+        print(format_audit_summary(audit_report))
+        print()
+        print(format_pocs_text(pocs))
+
+    if args.report_json:
+        write_json(args.report_json, result.to_dict())
+        logging.info("AndroidAnalysis written to %s", args.report_json)
+    if args.audit_json:
+        write_json(args.audit_json, audit_report.to_dict())
+        logging.info("AndroidAuditReport written to %s", args.audit_json)
+    if args.poc_json:
+        write_json(args.poc_json, [p.to_dict() for p in pocs])
+        logging.info("PoC artifacts written to %s", args.poc_json)
+    if args.poc_bundle_dir:
+        written = export_pocs(pocs, args.poc_bundle_dir)
+        logging.info("PoC bundle (%d files) written under %s",
+                     len(written), args.poc_bundle_dir)
+
+    if args.severity_threshold and audit_report.has_severity_at_least(args.severity_threshold):
+        logging.error(
+            "severity gate triggered: at least one finding at or above '%s'",
+            args.severity_threshold,
+        )
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":

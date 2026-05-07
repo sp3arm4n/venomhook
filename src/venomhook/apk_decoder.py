@@ -282,6 +282,14 @@ def _parse_component(elem: ET.Element, comp_type: str, package: str) -> AndroidC
             if action_name:
                 intent_actions.append(action_name)
 
+    # android:authorities is a semicolon-separated list per the platform spec.
+    # Only providers actually use this; on other component types the attribute
+    # is absent and authorities stays empty.
+    authorities_attr = elem.attrib.get(f"{ANDROID_NS}authorities")
+    authorities: list[str] = []
+    if authorities_attr:
+        authorities = [a.strip() for a in authorities_attr.split(";") if a.strip()]
+
     return AndroidComponent(
         type=comp_type,
         name=name,
@@ -290,6 +298,7 @@ def _parse_component(elem: ET.Element, comp_type: str, package: str) -> AndroidC
         permission=permission,
         intent_actions=intent_actions,
         grant_uri_permissions=grant_uri,
+        authorities=authorities,
     )
 
 
