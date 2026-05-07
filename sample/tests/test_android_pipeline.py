@@ -281,6 +281,31 @@ class TestAnalyzeApkAbiSelection(unittest.TestCase):
 
 
 class TestAndroidAnalysisModel(unittest.TestCase):
+    def test_positional_warnings_argument_remains_compatible(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp, {"arm64-v8a": ["libfoo.so"]})
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                return_value=_stub_binary_meta("/tmp/libfoo.so", []),
+            ):
+                baseline = analyze_apk(
+                    apk, tdp / "work", use_apktool=False, use_jadx=False
+                )
+            result = AndroidAnalysis(
+                baseline.apk_meta,
+                baseline.selected_abi,
+                baseline.extracted_so_path,
+                baseline.so_meta,
+                baseline.app_meta,
+                baseline.java_natives,
+                baseline.bridges,
+                ["legacy warning"],
+            )
+            self.assertEqual(result.warnings, ["legacy warning"])
+            self.assertIsNone(result.audit_report)
+            self.assertEqual(result.pocs, [])
+
     def test_to_dict_includes_all_fields(self):
         with tempfile.TemporaryDirectory() as td:
             tdp = Path(td)

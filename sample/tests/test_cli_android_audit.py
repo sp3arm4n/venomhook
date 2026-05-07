@@ -35,6 +35,13 @@ def _make_apk_with_lib(tmp: Path, abi: str = "arm64-v8a", lib: str = "libfoo.so"
     return apk
 
 
+def _make_apk_without_lib(tmp: Path) -> Path:
+    apk = tmp / "synth-no-lib.apk"
+    with zipfile.ZipFile(apk, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("AndroidManifest.xml", b"\x00\x00\x00\x00")
+    return apk
+
+
 def _executable(path: Path, body: str) -> Path:
     path.write_text(body)
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -149,9 +156,9 @@ class AndroidAuditCliTests(unittest.TestCase):
             tdp = Path(td)
             apk = _make_apk_with_lib(tdp)
             apktool = _apktool_stub(tdp, _MANIFEST_DEBUGGABLE)
-            report_path = tdp / "report.json"
-            audit_path = tdp / "audit.json"
-            poc_path = tdp / "poc.json"
+            report_path = tdp / "nested" / "json" / "report.json"
+            audit_path = tdp / "nested" / "json" / "audit.json"
+            poc_path = tdp / "nested" / "json" / "poc.json"
 
             with mock.patch(
                 "venomhook.android_pipeline.extract_binary_meta",
@@ -177,6 +184,27 @@ class AndroidAuditCliTests(unittest.TestCase):
         self.assertEqual(audit["package_name"], "com.demo")
         self.assertGreaterEqual(len(pocs), 1)
         self.assertEqual(pocs[0]["rule_id"], "MANIFEST-001")
+
+    def test_audit_runs_for_apk_without_native_libraries(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_without_lib(tdp)
+            apktool = _apktool_stub(tdp, _MANIFEST_DEBUGGABLE)
+
+            with mock.patch("venomhook.android_pipeline.extract_binary_meta") as binary_meta:
+                out = self._run([
+                    "android-audit",
+                    "--apk", str(apk),
+                    "--out-dir", str(tdp / "work"),
+                    "--apktool-path", str(apktool),
+                    "--no-jadx",
+                ])
+
+            binary_meta.assert_not_called()
+
+        self.assertIn("AndroidManifest audit", out)
+        self.assertIn("MANIFEST-001", out)
+        self.assertIn("PoC bundle", out)
 
     def test_poc_bundle_dir_writes_runnable_scripts(self):
         with tempfile.TemporaryDirectory() as td:
@@ -279,12 +307,11 @@ class AndroidAuditCliTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 1)
 
     def test_pipeline_error_exits_1(self):
-        # Empty APK (no native libs) -> AndroidPipelineError -> exit 1
+        # Invalid APK archive -> AndroidPipelineError -> exit 1
         with tempfile.TemporaryDirectory() as td:
             tdp = Path(td)
-            apk = tdp / "empty.apk"
-            with zipfile.ZipFile(apk, "w") as zf:
-                zf.writestr("AndroidManifest.xml", b"\x00\x00\x00\x00")
+            apk = tdp / "bad.apk"
+            apk.write_text("not a zip")
             with self.assertRaises(SystemExit) as ctx:
                 self._run([
                     "android-audit",

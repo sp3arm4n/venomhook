@@ -9,15 +9,17 @@ binary-metadata extractor and the Phase 3 audit/PoC layer:
   apk_extractor   ->  ApkMeta + extracted .so file
   apk_decoder     ->  AndroidAppMeta            (optional; skipped if apktool absent)
   jadx_runner     ->  list[JavaNativeMethod]    (optional; skipped if jadx absent)
-  binary_meta     ->  BinaryMeta of the .so     (lief; required)
+  binary_meta     ->  BinaryMeta of the .so     (lief; required by default)
   jni_bridge      ->  list[JniBridge]           (correlated against .so exports)
   manifest_audit  ->  AndroidAuditReport        (Phase 3; runs when app_meta present)
   poc_generator   ->  list[PoCArtifact]         (Phase 3; derived from audit report)
 
 `apktool` and `jadx` are *optional*. When unavailable the pipeline records a
 warning on the result and continues with reduced fidelity (the .so analysis
-path remains intact). `lief` is required because BinaryMeta.exports is what
-JNI correlation matches against; without it, no bridges can be produced.
+path remains intact). `lief` is required by default because BinaryMeta.exports
+is what JNI correlation matches against; without it, no bridges can be
+produced. Callers that only need manifest audit data may opt out of native
+analysis requirements.
 
 Ghidra-level function analysis is intentionally NOT invoked here. Callers
 who want full FunctionMeta should run static_pipeline on
@@ -92,17 +94,17 @@ class AndroidAnalysis:
     """
 
     apk_meta: ApkMeta
-    selected_abi: str
-    extracted_so_path: str  # absolute path to the extracted .so on disk
-    so_meta: BinaryMeta
+    selected_abi: Optional[str]
+    extracted_so_path: Optional[str]  # absolute path to the extracted .so on disk
+    so_meta: Optional[BinaryMeta]
     app_meta: Optional[AndroidAppMeta] = None  # None if apktool unavailable / failed
     java_natives: list[JavaNativeMethod] = field(default_factory=list)  # empty if jadx skipped
     bridges: list[JniBridge] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     # Phase 3 additions: vulnerability surface + runnable PoC recipes.
     # Both are derived from app_meta — None / empty when apktool was absent.
     audit_report: Optional[AndroidAuditReport] = None
     pocs: list[PoCArtifact] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
 
     @property
     def matched_bridges(self) -> list[JniBridge]:
@@ -117,7 +119,7 @@ class AndroidAnalysis:
             "apk_meta": self.apk_meta.to_dict(),
             "selected_abi": self.selected_abi,
             "extracted_so_path": self.extracted_so_path,
-            "so_meta": self.so_meta.to_dict(),
+            "so_meta": self.so_meta.to_dict() if self.so_meta else None,
             "app_meta": self.app_meta.to_dict() if self.app_meta else None,
             "java_natives": [m.to_dict() for m in self.java_natives],
             "bridges": [b.to_dict() for b in self.bridges],
@@ -138,13 +140,14 @@ def analyze_apk(
     apktool_config: Optional[ApktoolConfig] = None,
     jadx_config: Optional[JadxConfig] = None,
     fail_on_missing_tools: bool = False,
+    require_native: bool = True,
 ) -> AndroidAnalysis:
     """Run the full Android-side static analysis pipeline on an APK.
 
     Steps (each may add a warning instead of raising, except where noted):
       1. Inspect APK with apk_extractor (REQUIRED — no fallback)
-      2. Select ABI & extract chosen .so to ``work_dir/lib/`` (REQUIRED)
-      3. Run lief on the extracted .so to produce BinaryMeta (REQUIRED)
+      2. Select ABI & extract chosen .so to ``work_dir/lib/`` (REQUIRED by default)
+      3. Run lief on the extracted .so to produce BinaryMeta (REQUIRED by default)
       4. (if use_apktool) Decode AndroidManifest.xml; missing apktool → warning
       5. (if use_jadx) Decompile DEX & extract native methods; missing jadx → warning
       6. (if any java_natives) Build JniBridges and correlate against
@@ -155,6 +158,11 @@ def analyze_apk(
     `fail_on_missing_tools=True` upgrades apktool/jadx unavailability from
     warnings to AndroidPipelineError. Useful when the caller wants strict
     Tier 1 Android workflow guarantees.
+
+    `require_native=False` lets manifest-only callers keep going when the APK
+    has no native libraries, the requested ABI is unavailable, or BinaryMeta
+    extraction fails. Native fields are then None / empty and JNI bridge
+    correlation is skipped.
 
     Returns ``AndroidAnalysis``. Raises ``AndroidPipelineError`` on REQUIRED-
     step failures or (when strict) tool unavailability.
@@ -171,32 +179,44 @@ def analyze_apk(
     except ApkExtractError as e:
         raise AndroidPipelineError(f"apk_extractor failed: {e}") from e
 
+    selected_abi: Optional[str] = None
+    so_path: Optional[Path] = None
+    so_meta: Optional[BinaryMeta] = None
+
     if not apk_meta.abis:
-        raise AndroidPipelineError(
-            f"APK contains no native libraries under lib/<abi>/: {apk}"
-        )
+        msg = f"APK contains no native libraries under lib/<abi>/: {apk}"
+        if require_native:
+            raise AndroidPipelineError(msg)
+        warnings.append(f"{msg}; native analysis skipped")
+    else:
+        # ----- Step 2: ABI selection + .so extraction -----
+        try:
+            selected_abi = select_abi(apk_meta, abi)
+        except ApkExtractError as e:
+            msg = f"ABI selection failed: {e}"
+            if require_native:
+                raise AndroidPipelineError(msg) from e
+            warnings.append(f"{msg}; native analysis skipped")
 
-    # ----- Step 2: ABI selection + .so extraction -----
-    try:
-        selected_abi = select_abi(apk_meta, abi)
-    except ApkExtractError as e:
-        raise AndroidPipelineError(f"ABI selection failed: {e}") from e
+        if selected_abi is not None:
+            so_dir = work / "lib"
+            try:
+                so_path = extract_native_lib(apk, selected_abi, lib_name, so_dir)
+            except ApkExtractError as e:
+                msg = f".so extraction failed (abi={selected_abi}, lib={lib_name}): {e}"
+                if require_native:
+                    raise AndroidPipelineError(msg) from e
+                warnings.append(f"{msg}; native analysis skipped")
 
-    so_dir = work / "lib"
-    try:
-        so_path = extract_native_lib(apk, selected_abi, lib_name, so_dir)
-    except ApkExtractError as e:
-        raise AndroidPipelineError(
-            f".so extraction failed (abi={selected_abi}, lib={lib_name}): {e}"
-        ) from e
-
-    # ----- Step 3: BinaryMeta of the .so (REQUIRED for JNI correlation) -----
-    try:
-        so_meta = extract_binary_meta(so_path)
-    except BinaryMetaError as e:
-        raise AndroidPipelineError(
-            f"binary_meta failed on {so_path}: {e}"
-        ) from e
+        # ----- Step 3: BinaryMeta of the .so (REQUIRED for JNI correlation) -----
+        if so_path is not None:
+            try:
+                so_meta = extract_binary_meta(so_path)
+            except BinaryMetaError as e:
+                msg = f"binary_meta failed on {so_path}: {e}"
+                if require_native:
+                    raise AndroidPipelineError(msg) from e
+                warnings.append(f"{msg}; native analysis skipped")
 
     # ----- Step 4: AndroidManifest decode (optional) -----
     app_meta: Optional[AndroidAppMeta] = None
@@ -228,7 +248,7 @@ def analyze_apk(
 
     # ----- Step 6: JNI bridge construction + correlation -----
     bridges: list[JniBridge] = []
-    if java_natives:
+    if java_natives and so_meta is not None:
         bridges = build_bridges(java_natives)
         correlate_symbols(bridges, so_meta.exports)
 
@@ -242,12 +262,12 @@ def analyze_apk(
     return AndroidAnalysis(
         apk_meta=apk_meta,
         selected_abi=selected_abi,
-        extracted_so_path=str(so_path),
+        extracted_so_path=str(so_path) if so_path else None,
         so_meta=so_meta,
         app_meta=app_meta,
         java_natives=java_natives,
         bridges=bridges,
+        warnings=warnings,
         audit_report=audit_report,
         pocs=pocs,
-        warnings=warnings,
     )

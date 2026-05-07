@@ -10,6 +10,8 @@ emit nothing.
 
 from __future__ import annotations
 
+import json
+import shlex
 import sys
 import unittest
 from pathlib import Path
@@ -209,6 +211,38 @@ class ExportedNoPermissionBuilderTests(unittest.TestCase):
         self.assertIn("getIntent()", body)
         self.assertIn("frida -U", frida.notes)
 
+    def test_adb_action_is_quoted_for_host_and_remote_shells(self) -> None:
+        action = "x.ACTION; touch /tmp/venomhook_pwned"
+        comp = _comp(
+            type="activity", name="com.x.PublicAct",
+            exported=True, exported_declared=True,
+            intent_actions=[action],
+        )
+        meta = _meta(components=[comp])
+        arts = generate_pocs(meta, audit_manifest(meta))
+        adb = next(a for a in arts if a.kind == "adb")
+        argv = shlex.split(adb.commands[0])
+        self.assertEqual(argv[:2], ["adb", "shell"])
+        remote_argv = shlex.split(argv[2])
+        self.assertEqual(
+            remote_argv,
+            ["am", "start", "-a", action, "-n", "com.x/com.x.PublicAct"],
+        )
+
+    def test_frida_class_name_is_js_string_encoded(self) -> None:
+        klass = 'com.x.A"; console.log("pwned"); //'
+        comp = _comp(
+            type="activity", name=klass,
+            exported=True, exported_declared=True,
+            intent_actions=["android.intent.action.VIEW"],
+        )
+        meta = _meta(components=[comp])
+        arts = generate_pocs(meta, audit_manifest(meta))
+        frida = next(a for a in arts if a.kind == "frida")
+        line = next(c for c in frida.commands if "Java.use(" in c)
+        literal = line.strip().removeprefix("const Klass = Java.use(").removesuffix(");")
+        self.assertEqual(json.loads(literal), klass)
+
     def test_service_uses_startservice(self) -> None:
         comp = _comp(
             type="service", name="com.x.Svc",
@@ -276,6 +310,24 @@ class ExportedProviderBuilderTests(unittest.TestCase):
         self.assertTrue(any("content://com.x.fileprovider/" in c for c in a.commands))
         # No fallback notes when real authority is in hand.
         self.assertNotIn("substitute the actual authority", a.notes)
+
+    def test_authority_is_quoted_for_host_and_remote_shells(self) -> None:
+        authority = "com.x.provider; touch /tmp/venomhook_pwned"
+        comp = _comp(
+            type="provider", name="com.x.Prov",
+            exported=True, exported_declared=True,
+            authorities=[authority],
+        )
+        meta = _meta(components=[comp], target_sdk=33)
+        arts = generate_pocs(meta, audit_manifest(meta))
+        a = next(x for x in arts if x.rule_id == "MANIFEST-005")
+        argv = shlex.split(a.commands[0])
+        self.assertEqual(argv[:2], ["adb", "shell"])
+        remote_argv = shlex.split(argv[2])
+        self.assertEqual(
+            remote_argv,
+            ["content", "query", "--uri", f"content://{authority}/"],
+        )
 
     def test_multiple_authorities_recorded_in_notes(self) -> None:
         comp = _comp(
