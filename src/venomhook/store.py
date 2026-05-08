@@ -62,19 +62,21 @@ class HookSpecSqliteStore:
                     proto TEXT,
                     hook TEXT,
                     module_aliases TEXT,
+                    description TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
             )
-            # Defensive migration: existing DBs created before module_aliases.
+            # Defensive migrations for existing DBs created before optional columns.
             # ALTER TABLE ADD COLUMN is idempotent-friendly via try/except.
-            try:
-                conn.execute(
-                    f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN module_aliases TEXT"
-                )
-            except sqlite3.OperationalError:
-                # Column already present (fresh schema or prior migration)
-                pass
+            for column in ("module_aliases", "description"):
+                try:
+                    conn.execute(
+                        f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN {column} TEXT"
+                    )
+                except sqlite3.OperationalError:
+                    # Column already present (fresh schema or prior migration)
+                    pass
             conn.commit()
         finally:
             conn.close()
@@ -87,8 +89,11 @@ class HookSpecSqliteStore:
                 conn.execute(
                     f"""
                     INSERT INTO {self.TABLE_NAME}
-                    (module, arch, offset, sig, name, tags, proto, hook, module_aliases)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (
+                        module, arch, offset, sig, name, tags, proto, hook,
+                        module_aliases, description
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         spec.module,
@@ -100,6 +105,7 @@ class HookSpecSqliteStore:
                         json.dumps(spec.proto.to_dict() if spec.proto else None),
                         json.dumps(spec.hook.to_dict()),
                         json.dumps(list(spec.module_aliases)) if spec.module_aliases else None,
+                        spec.description,
                     ),
                 )
             conn.commit()
@@ -111,7 +117,9 @@ class HookSpecSqliteStore:
         try:
             rows = conn.execute(
                 f"""
-                SELECT module, arch, offset, sig, name, tags, proto, hook, module_aliases
+                SELECT
+                    module, arch, offset, sig, name, tags, proto, hook,
+                    module_aliases, description
                 FROM {self.TABLE_NAME}
                 ORDER BY id ASC
                 """
@@ -120,7 +128,18 @@ class HookSpecSqliteStore:
         finally:
             conn.close()
         specs: list[HookSpec] = []
-        for module, arch, offset, sig, name, tags, proto, hook, module_aliases in rows:
+        for (
+            module,
+            arch,
+            offset,
+            sig,
+            name,
+            tags,
+            proto,
+            hook,
+            module_aliases,
+            description,
+        ) in rows:
             spec_dict = {
                 "module": module,
                 "arch": arch,
@@ -131,6 +150,7 @@ class HookSpecSqliteStore:
                 "proto": json.loads(proto) if proto else None,
                 "hook": json.loads(hook) if hook else {},
                 "module_aliases": json.loads(module_aliases) if module_aliases else [],
+                "description": description,
             }
             specs.append(HookSpec.from_dict(spec_dict))
         return specs

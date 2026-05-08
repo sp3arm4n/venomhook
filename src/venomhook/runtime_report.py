@@ -66,7 +66,18 @@ def summarize_log_file(path: Path) -> dict[str, Any]:
         return parse_log_lines(fp)
 
 
-def write_markdown_summary(summary: dict[str, Any], path: Path) -> None:
+def write_markdown_summary(
+    summary: dict[str, Any],
+    path: Path,
+    *,
+    analyst_summary: str | None = None,
+) -> None:
+    """Write the rule-based runtime markdown report.
+
+    Optional ``analyst_summary`` (Phase 5 ④) appends an "Analyst
+    Summary" section at the end. Pass ``None`` (default) to keep the
+    report identical to pre-Phase-5 output.
+    """
     lines = [
         "# Runtime Log Summary",
         "",
@@ -103,11 +114,18 @@ def write_markdown_summary(summary: dict[str, Any], path: Path) -> None:
             lines.append(f"- {hook} args: " + "; ".join(samples))
         for hook, samples in ret_samples.items():
             lines.append(f"- {hook} ret: " + "; ".join(samples))
+    if analyst_summary:
+        lines.extend(["", "## Analyst Summary", "", analyst_summary])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def write_html_summary(summary: dict[str, Any], path: Path) -> None:
+def write_html_summary(
+    summary: dict[str, Any],
+    path: Path,
+    *,
+    analyst_summary: str | None = None,
+) -> None:
     hooks = summary.get("hooks", {})
     errors = summary.get("errors", {})
     total_events = summary.get("total_events", 0)
@@ -144,6 +162,17 @@ def write_html_summary(summary: dict[str, Any], path: Path) -> None:
         samples_html = "; ".join(escape(str(sample), quote=True) for sample in samples)
         args_blocks.append("<div><strong>{}</strong> ret: {}</div>".format(hook_html, samples_html))
 
+    analyst_block: list[str] = []
+    if analyst_summary:
+        # Render the markdown-ish analyst summary as a <pre> block; keeps
+        # the layout simple and avoids parsing markdown inside the HTML
+        # writer. Escapes user-derived content so a noisy LLM response
+        # can't inject HTML.
+        analyst_block = [
+            "<h2>Analyst Summary</h2>",
+            f"<pre>{escape(analyst_summary)}</pre>",
+        ]
+
     html = "\n".join(
         [
             "<!doctype html>",
@@ -160,6 +189,7 @@ def write_html_summary(summary: dict[str, Any], path: Path) -> None:
             *string_blocks,
             "<h2>Sample Args/Ret</h2>",
             *args_blocks,
+            *analyst_block,
             "</body></html>",
         ]
     )

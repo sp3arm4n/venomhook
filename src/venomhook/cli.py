@@ -67,6 +67,186 @@ DYNAMIC_DEFAULTS = {
 }
 
 
+_LLM_FEATURE_FLAGS = {
+    "tagging": (
+        "--use-llm-tagging",
+        "Phase 5 ① — call LLM to add semantic:* tags on top of rule-based scoring",
+    ),
+    "proto": (
+        "--use-llm-proto",
+        "Phase 5 ② — call LLM to fill HookSpec.proto (ret + arg types) "
+        "for specs the rule layer left empty",
+    ),
+    "flow": (
+        "--use-llm-flow",
+        "Phase 5 ③ — call LLM to write a one-sentence Java↔Native "
+        "description into HookSpec.description (JNI-named specs only)",
+    ),
+    "report": (
+        "--use-llm-report",
+        "Phase 5 ④ — call LLM to append an 'Analyst Summary' to the runtime report",
+    ),
+    "recovery": (
+        "--use-llm-recovery",
+        "Phase 5 ⑤ — call LLM to insert wildcards (??) into HookSpec.sig "
+        "at byte positions likely to vary across builds",
+    ),
+}
+
+
+def _add_llm_flags(
+    parser: argparse.ArgumentParser,
+    *,
+    features: tuple[str, ...],
+) -> None:
+    """Attach only the LLM feature flags that affect this subcommand."""
+    for feature in features:
+        try:
+            flag, help_text = _LLM_FEATURE_FLAGS[feature]
+        except KeyError as exc:
+            raise ValueError(f"unknown LLM feature: {feature}") from exc
+        parser.add_argument(flag, action="store_true", help=help_text)
+    parser.add_argument(
+        "--llm-provider",
+        type=str,
+        default="anthropic",
+        help="LLM provider name (default: anthropic). Use 'echo' for offline tests.",
+    )
+    parser.add_argument(
+        "--llm-model",
+        type=str,
+        help="Override the provider's default model (e.g., claude-haiku-4-5-20251001)",
+    )
+    parser.add_argument(
+        "--llm-token-budget",
+        type=int,
+        default=20000,
+        help="Hard cap on total input+output tokens per run (default: 20000)",
+    )
+    parser.add_argument(
+        "--llm-cache-dir",
+        type=Path,
+        help="Directory for the LLM response cache (default: ~/.venomhook/llm_cache.sqlite3)",
+    )
+    parser.add_argument(
+        "--no-llm-cache",
+        action="store_true",
+        help="Disable the LLM response cache for this run",
+    )
+
+
+def _build_llm_runtime(args: argparse.Namespace):
+    """Construct (provider, budget, cache) once per run, shared by every
+    Phase 5 integration point. Returns None when no ``--use-llm-*`` flag
+    is set so the pipeline stays import-clean.
+
+    Sharing is deliberate: a single budget cap applies across tagging +
+    proto + future flow/report/recovery, and a single cache file lets
+    every integration point benefit from any other point's hits on the
+    same prompt (in practice they don't collide because metadata role
+    tags differ, but the cache layer remains consistent).
+    """
+    enabled_flags = [
+        getattr(args, "use_llm_tagging", False),
+        getattr(args, "use_llm_proto", False),
+        getattr(args, "use_llm_flow", False),
+        getattr(args, "use_llm_report", False),
+        getattr(args, "use_llm_recovery", False),
+    ]
+    if not any(enabled_flags):
+        return None
+
+    from venomhook.llm.budget import TokenBudget
+    from venomhook.llm.cache import LLMCache
+    from venomhook.llm.provider import get_provider
+
+    provider = get_provider(args.llm_provider, model=args.llm_model)
+    budget = TokenBudget(cap=args.llm_token_budget)
+
+    cache = None
+    if not getattr(args, "no_llm_cache", False):
+        cache_path = args.llm_cache_dir
+        if cache_path is None:
+            cache_path = Path.home() / ".venomhook" / "llm_cache.sqlite3"
+        elif cache_path.is_dir() or not cache_path.suffix:
+            cache_path = Path(cache_path) / "llm_cache.sqlite3"
+        cache = LLMCache(cache_path)
+
+    return provider, budget, cache
+
+
+def _build_llm_options(args: argparse.Namespace):
+    """Build the per-integration-point Options dataclasses once, sharing a
+    single (provider, budget, cache) so the budget cap and cache are
+    enforced across *all* enabled Phase 5 points rather than per-point.
+
+    Returns ``(tagging_options, proto_options, flow_options, recovery_options)`` tuple.
+    Each element is None when the corresponding ``--use-llm-*`` flag
+    wasn't set.
+    """
+    static_enabled_flags = [
+        getattr(args, "use_llm_tagging", False),
+        getattr(args, "use_llm_proto", False),
+        getattr(args, "use_llm_flow", False),
+        getattr(args, "use_llm_recovery", False),
+    ]
+    if not any(static_enabled_flags):
+        return None, None, None, None
+
+    runtime = _build_llm_runtime(args)
+    if runtime is None:
+        return None, None, None, None
+    provider, budget, cache = runtime
+
+    tagging_options = None
+    if getattr(args, "use_llm_tagging", False):
+        from venomhook.static_pipeline import LLMTaggingOptions
+        tagging_options = LLMTaggingOptions(
+            provider=provider, budget=budget, cache=cache
+        )
+
+    proto_options = None
+    if getattr(args, "use_llm_proto", False):
+        from venomhook.static_pipeline import LLMProtoOptions
+        proto_options = LLMProtoOptions(
+            provider=provider, budget=budget, cache=cache
+        )
+
+    flow_options = None
+    if getattr(args, "use_llm_flow", False):
+        from venomhook.static_pipeline import LLMFlowOptions
+        # bridges=None: the offset-static path doesn't currently feed JNI
+        # bridges into the static pipeline. The flow module falls back to
+        # demangling Java_<class>_<method> from the symbol name, which
+        # gives the LLM a usable class/method label without bridges.
+        flow_options = LLMFlowOptions(
+            provider=provider, budget=budget, cache=cache, bridges=None,
+        )
+
+    recovery_options = None
+    if getattr(args, "use_llm_recovery", False):
+        from venomhook.static_pipeline import LLMRecoveryOptions
+        recovery_options = LLMRecoveryOptions(
+            provider=provider, budget=budget, cache=cache,
+        )
+
+    return tagging_options, proto_options, flow_options, recovery_options
+
+
+def _close_llm_option_caches(*options: object | None) -> None:
+    """Close each unique LLM cache carried by option objects, if any."""
+    seen: set[int] = set()
+    for option in options:
+        cache = getattr(option, "cache", None)
+        if cache is None:
+            continue
+        cache_id = id(cache)
+        if cache_id in seen:
+            continue
+        seen.add(cache_id)
+        cache.close()
+
+
 def app(argv: list[str] | None = None) -> None:
     main(argv)
 
@@ -135,6 +315,7 @@ def main(argv: list[str] | None = None) -> None:
         help="Ghidra project name",
     )
     static_parser.add_argument("--top", "-t", type=int, default=10, help="Top N endpoints to export")
+    _add_llm_flags(static_parser, features=("tagging", "proto", "flow", "recovery"))
     static_parser.set_defaults(func=cmd_offset_static)
 
     hook_parser = subparsers.add_parser("offset-hook", help="Generate Frida script from HookSpec JSON")
@@ -253,6 +434,7 @@ def main(argv: list[str] | None = None) -> None:
     runtime_parser.add_argument("--log", "-i", type=Path, required=True, help="Frida log file (JSON lines)")
     runtime_parser.add_argument("--out-md", type=Path, help="Markdown summary output")
     runtime_parser.add_argument("--out-html", type=Path, help="HTML summary output")
+    _add_llm_flags(runtime_parser, features=("report",))
     runtime_parser.set_defaults(func=cmd_offset_report_runtime)
 
     e2e_parser = subparsers.add_parser("offset-e2e", help="Run static->hook->frida script pipeline (optional frida run); supports APK input")
@@ -304,6 +486,7 @@ def main(argv: list[str] | None = None) -> None:
     e2e_parser.add_argument("--run-frida", action="store_true", help="Run frida (otherwise skip)")
     e2e_parser.add_argument("--dry-run", action="store_true", help="Pass --no-pause etc but do not execute (for frida)")
     e2e_parser.add_argument("--summarize-log", action="store_true", help="Summarize frida log if present")
+    _add_llm_flags(e2e_parser, features=("tagging", "proto", "flow", "recovery"))
     e2e_parser.set_defaults(func=cmd_offset_e2e)
 
     audit_parser = subparsers.add_parser(
@@ -502,20 +685,33 @@ def cmd_offset_static(args: argparse.Namespace) -> None:
             project_dir=args.ghidra_project_dir,
             project_name=args.ghidra_project_name,
         )
-    pipeline = StaticPipeline(top_n=args.top, score_config=score_cfg, sig_max_bytes=args.sig_max_bytes, ghidra_runner=ghidra_runner)
-    if not args.static_json and not args.binary:
-        raise SystemExit("Provide either --static-json or --binary")
-    hooks = pipeline.run(
-        static_meta=args.static_json,
-        binary=args.binary,
-        out=args.out,
-        report_md=args.report_md,
-        ghidra_runner=ghidra_runner,
-    )
-    if args.out_db:
-        HookSpecStore.save(args.out_db, hooks)
-        logging.info("also wrote HookSpec to %s", args.out_db)
-    logging.info("generated %d HookSpec entries", len(hooks))
+    llm_tagging, llm_proto, llm_flow, llm_recovery = _build_llm_options(args)
+    try:
+        pipeline = StaticPipeline(
+            top_n=args.top,
+            score_config=score_cfg,
+            sig_max_bytes=args.sig_max_bytes,
+            ghidra_runner=ghidra_runner,
+            llm_tagging=llm_tagging,
+            llm_proto=llm_proto,
+            llm_flow=llm_flow,
+            llm_recovery=llm_recovery,
+        )
+        if not args.static_json and not args.binary:
+            raise SystemExit("Provide either --static-json or --binary")
+        hooks = pipeline.run(
+            static_meta=args.static_json,
+            binary=args.binary,
+            out=args.out,
+            report_md=args.report_md,
+            ghidra_runner=ghidra_runner,
+        )
+        if args.out_db:
+            HookSpecStore.save(args.out_db, hooks)
+            logging.info("also wrote HookSpec to %s", args.out_db)
+        logging.info("generated %d HookSpec entries", len(hooks))
+    finally:
+        _close_llm_option_caches(llm_tagging, llm_proto, llm_flow, llm_recovery)
 
 
 def cmd_offset_hook(args: argparse.Namespace) -> None:
@@ -617,11 +813,27 @@ def cmd_offset_report_runtime(args: argparse.Namespace) -> None:
     summary = summarize_log_file(args.log)
     if not args.out_md and not args.out_html:
         raise SystemExit("Provide at least one of --out-md or --out-html")
+
+    analyst_summary = None
+    if getattr(args, "use_llm_report", False):
+        runtime = _build_llm_runtime(args)
+        if runtime is not None:
+            provider, budget, cache = runtime
+            try:
+                from venomhook.llm.runtime_summary import summarize_runtime_log
+                analyst_summary, stats = summarize_runtime_log(
+                    summary, provider=provider, budget=budget, cache=cache,
+                )
+                logging.info(stats.as_summary_line())
+            finally:
+                if cache is not None:
+                    cache.close()
+
     if args.out_md:
-        write_markdown_summary(summary, args.out_md)
+        write_markdown_summary(summary, args.out_md, analyst_summary=analyst_summary)
         logging.info("runtime log summary (md) written to %s", args.out_md)
     if args.out_html:
-        write_html_summary(summary, args.out_html)
+        write_html_summary(summary, args.out_html, analyst_summary=analyst_summary)
         logging.info("runtime log summary (html) written to %s", args.out_html)
 
 
@@ -663,52 +875,75 @@ def cmd_offset_e2e(args: argparse.Namespace) -> None:
     hook_md = out_dir / "venomhook.md"
     frida_js = out_dir / "venomhook.js"
 
-    static_pipe = StaticPipeline(top_n=args.top, score_config=score_cfg, sig_max_bytes=args.sig_max_bytes, ghidra_runner=ghidra_runner)
-    hooks = static_pipe.run(static_meta=args.static_json, binary=args.binary, out=hook_json, report_md=hook_md, ghidra_runner=ghidra_runner)
-    extra_aliases = getattr(args, "module_alias", None) or []
-    if extra_aliases:
-        for spec in hooks:
-            spec.module_aliases = list(spec.module_aliases) + extra_aliases
-    HookSpecStore.save(hook_db, hooks)
-
-    apply_dynamic_profile(args, profile_data)
-    dyn_pipe = DynamicPipeline(
-        target=args.target,
-        log_format=args.log_format,
-        log_prefix=args.log_prefix,
-        scenario_message=args.scenario_message,
-        auto_start_scenario=args.auto_start_scenario,
-        hexdump_len=args.hexdump_len,
-        string_args=args.string_arg or [],
-        string_ret=args.string_ret,
-        string_len=args.string_len,
-        scan_size=args.scan_size,
-        retry_attach=args.retry_attach,
-    )
-    dyn_pipe.save_script(frida_js, hooks)
-
-    frida_log = args.frida_log or (out_dir / "frida.log")
-    if args.run_frida:
-        cmd_str = run_frida(
-            target=args.target,
-            script=frida_js,
-            frida_path=args.frida_path,
-            attach=False,
-            no_pause=True,
-            extra_args=None,
-            log_file=frida_log,
-            dry_run=args.dry_run,
+    llm_tagging, llm_proto, llm_flow, llm_recovery = _build_llm_options(args)
+    try:
+        static_pipe = StaticPipeline(
+            top_n=args.top,
+            score_config=score_cfg,
+            sig_max_bytes=args.sig_max_bytes,
+            ghidra_runner=ghidra_runner,
+            llm_tagging=llm_tagging,
+            llm_proto=llm_proto,
+            llm_flow=llm_flow,
+            llm_recovery=llm_recovery,
         )
-        logging.info("frida command%s: %s", " (dry-run)" if args.dry_run else "", cmd_str)
-        if args.summarize_log and frida_log.exists() and frida_log.stat().st_size > 0:
-            summary_md = out_dir / "runtime_summary.md"
-            summary_html = out_dir / "runtime_summary.html"
-            summary = summarize_log_file(frida_log)
-            write_markdown_summary(summary, summary_md)
-            write_html_summary(summary, summary_html)
-            logging.info("runtime summaries written to %s, %s", summary_md, summary_html)
-    else:
-        logging.info("frida run skipped (use --run-frida to execute)")
+        hooks = static_pipe.run(
+            static_meta=args.static_json,
+            binary=args.binary,
+            out=hook_json,
+            report_md=hook_md,
+            ghidra_runner=ghidra_runner,
+        )
+        extra_aliases = getattr(args, "module_alias", None) or []
+        if extra_aliases:
+            for spec in hooks:
+                spec.module_aliases = list(spec.module_aliases) + extra_aliases
+        HookSpecStore.save(hook_db, hooks)
+
+        apply_dynamic_profile(args, profile_data)
+        dyn_pipe = DynamicPipeline(
+            target=args.target,
+            log_format=args.log_format,
+            log_prefix=args.log_prefix,
+            scenario_message=args.scenario_message,
+            auto_start_scenario=args.auto_start_scenario,
+            hexdump_len=args.hexdump_len,
+            string_args=args.string_arg or [],
+            string_ret=args.string_ret,
+            string_len=args.string_len,
+            scan_size=args.scan_size,
+            retry_attach=args.retry_attach,
+        )
+        dyn_pipe.save_script(frida_js, hooks)
+
+        frida_log = args.frida_log or (out_dir / "frida.log")
+        if args.run_frida:
+            cmd_str = run_frida(
+                target=args.target,
+                script=frida_js,
+                frida_path=args.frida_path,
+                attach=False,
+                no_pause=True,
+                extra_args=None,
+                log_file=frida_log,
+                dry_run=args.dry_run,
+            )
+            logging.info(
+                "frida command%s: %s",
+                " (dry-run)" if args.dry_run else "",
+                cmd_str,
+            )
+            if args.summarize_log and frida_log.exists() and frida_log.stat().st_size > 0:
+                summary_md = out_dir / "runtime_summary.md"
+                summary_html = out_dir / "runtime_summary.html"
+                summary = summarize_log_file(frida_log)
+                write_markdown_summary(summary, summary_md)
+                write_html_summary(summary, summary_html)
+                logging.info("runtime summaries written to %s, %s", summary_md, summary_html)
+        else:
+            logging.info("frida run skipped (use --run-frida to execute)")
+    finally:
+        _close_llm_option_caches(llm_tagging, llm_proto, llm_flow, llm_recovery)
 
 
 def cmd_android_audit(args: argparse.Namespace) -> None:
@@ -723,8 +958,8 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
 
     Exit codes:
       0 — success, no severity gate triggered
-      1 — pipeline error (APK invalid, no native libs, missing tools when
-          --strict-tools, etc.)
+      1 — pipeline error (APK invalid, manifest decode failure, missing tools
+          when --strict-tools, etc.)
       2 — severity gate: at least one finding at or above
           --severity-threshold
     """

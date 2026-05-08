@@ -236,6 +236,11 @@ class HookSpec:
     # Mach-O dylib variants (libfoo.dylib vs libfoo.1.dylib), and PE/wine
     # name differences (app.exe vs app).
     module_aliases: list[str] = field(default_factory=list)
+    # Phase 5 ③ — natural-language one-liner describing the Java↔Native
+    # flow. Populated only when --use-llm-flow is enabled; remains None
+    # in pure-rule output, so existing JSON consumers stay backward-
+    # compatible (omitted from to_dict when None).
+    description: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "HookSpec":
@@ -255,6 +260,7 @@ class HookSpec:
             proto=proto,
             hook=hook_cfg,
             module_aliases=list(data.get("module_aliases", [])),
+            description=data.get("description"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -272,6 +278,8 @@ class HookSpec:
         # Omit when empty to keep parity with pre-PR-4 JSON shapes
         if self.module_aliases:
             payload["module_aliases"] = list(self.module_aliases)
+        if self.description is not None:
+            payload["description"] = self.description
         return payload
 
 def iter_hookspecs(items: Iterable[dict[str, Any]]) -> list[HookSpec]:

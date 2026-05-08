@@ -65,6 +65,20 @@ out/
 sed -n '1,120p' ./out/venomhook.js
 ```
 
+## Common Commands
+
+`pip install -e .` 이후에는 아래처럼 `venomhook` 명령만 사용하면 됩니다.
+
+| 목적 | 명령 |
+| --- | --- |
+| 샘플로 전체 흐름 확인 | `venomhook offset-e2e --static-json ./sample/examples/static_meta.sample.json --target sample.exe --out-dir ./out` |
+| LLM 보조 전체 흐름 | `venomhook offset-e2e --static-json ./sample/examples/static_meta.sample.json --target sample.exe --out-dir ./out --use-llm-tagging --llm-provider anthropic` |
+| HookSpec 생성 | `venomhook offset-static --static-json ./sample/examples/static_meta.sample.json --out ./out/venomhook.json --out-db ./out/venomhook.db` |
+| Frida 스크립트 생성 | `venomhook offset-hook --hookspec ./out/venomhook.json --target sample.exe --out-script ./out/venomhook.js` |
+| APK manifest 빠른 감사 | `venomhook android-audit --apk ./sample/myapp.apk --no-jadx --out-dir ./out_audit --audit-json ./out_audit/audit.json` |
+| PoC 번들 생성 | `venomhook android-audit --apk ./sample/myapp.apk --out-dir ./out_audit --poc-bundle-dir ./out_audit/pocs` |
+| 런타임 로그 요약 | `venomhook offset-report-runtime --log ./logs/frida.log --out-md ./out/summary.md --out-html ./out/summary.html` |
+
 ## Install
 
 기본 CLI만 사용할 경우:
@@ -141,6 +155,19 @@ powershell -ExecutionPolicy Bypass -File .\setup\mkdir.ps1
 ```
 
 ## Core Workflow
+
+가장 단순한 경로는 `offset-e2e`입니다. StaticMeta를 HookSpec JSON/SQLite,
+Markdown 요약, Frida 스크립트까지 한 번에 변환합니다.
+
+```bash
+venomhook offset-e2e \
+  --static-json ./sample/examples/static_meta.sample.json \
+  --target sample.exe \
+  --out-dir ./out
+```
+
+세부 단계를 직접 제어하거나 중간 산출물을 검토하려면 아래처럼 단계별로
+실행합니다.
 
 ### 1. StaticMeta 생성
 
@@ -315,55 +342,44 @@ frida -U -n com.example.app -l ./frida_scripts/myapp.js
 
 ### APK 전체 컨텍스트 분석
 
-`android_pipeline.analyze_apk`는 APK에서 native library, module metadata, AndroidManifest, Java native methods, JNI bridge를 한 번에 수집합니다.
+APK 전체 컨텍스트는 `android-audit`로 수집합니다. 이 명령은 APK metadata,
+manifest, Java native method, JNI bridge, audit finding, PoC를 하나의
+JSON으로 저장할 수 있습니다.
 
 ```bash
-python -c "
-from venomhook.android_pipeline import analyze_apk
-
-r = analyze_apk('./sample/myapp.apk', './out_android', abi='auto')
-print('ABI:', r.selected_abi)
-print('SO:', r.extracted_so_path)
-print('manifest:', r.app_meta.package_name if r.app_meta else 'not decoded')
-print('java natives:', len(r.java_natives))
-print('matched bridges:', len(r.matched_bridges), '/', len(r.bridges))
-print('warnings:', r.warnings)
-"
+venomhook android-audit \
+  --apk ./sample/myapp.apk \
+  --out-dir ./out_android \
+  --report-json ./out_android/analysis.json \
+  --poc-bundle-dir ./out_android/pocs
 ```
 
-`apktool` 또는 `jadx`가 없으면 해당 단계만 warning으로 남기고 계속 진행합니다. 반드시 필요하게 만들려면:
-
-```python
-analyze_apk("./sample/myapp.apk", "./out_android", fail_on_missing_tools=True)
-```
+`apktool` 또는 `jadx`가 없으면 가능한 단계만 warning으로 남기고 계속
+진행합니다. 도구 누락을 실패로 처리하려면 `--strict-tools`를 추가합니다.
 
 ### AndroidManifest 감사
 
-`apk_decoder`로 디코드한 manifest metadata를 `manifest_audit` 룰 엔진에 넣습니다.
+Manifest만 빠르게 감사하려면 `--no-jadx`를 사용합니다. Java decompile과
+JNI bridge 분석을 생략하므로 APK의 공격 표면을 빠르게 확인할 때 적합합니다.
 
 ```bash
-python -c "
-from venomhook.apk_decoder import decode_apk
-from venomhook.manifest_audit import audit_manifest, format_audit_summary
-
-_, app = decode_apk('./sample/myapp.apk', './out_audit/apktool')
-report = audit_manifest(app)
-print(format_audit_summary(report))
-"
+venomhook android-audit \
+  --apk ./sample/myapp.apk \
+  --no-jadx \
+  --out-dir ./out_audit \
+  --audit-json ./out_audit/audit.json \
+  --poc-json ./out_audit/pocs.json
 ```
 
 CI gate 예시:
 
 ```bash
-python -c "
-import sys
-from venomhook.apk_decoder import decode_apk
-from venomhook.manifest_audit import audit_manifest
-
-_, app = decode_apk('./sample/myapp.apk', './out_audit/apktool')
-report = audit_manifest(app)
-sys.exit(1 if report.has_severity_at_least('high') else 0)
-"
+venomhook android-audit \
+  --apk ./sample/myapp.apk \
+  --no-jadx \
+  --quiet \
+  --severity-threshold high
+echo "exit=$?"   # 2 if high 이상 finding 존재
 ```
 
 현재 manifest audit rule:
@@ -412,7 +428,7 @@ venomhook android-audit \
 | 코드 | 의미 |
 | --- | --- |
 | 0 | 성공, severity gate 통과 |
-| 1 | 파이프라인 오류 (no native libs / `--strict-tools`로 apktool 누락 등) |
+| 1 | 파이프라인 오류 (잘못된 APK, manifest decode 실패, `--strict-tools`로 apktool/jadx 누락 등) |
 | 2 | severity gate 발동 — `--severity-threshold` 이상의 finding 존재 |
 
 `--poc-bundle-dir` 출력 예시:
@@ -443,8 +459,9 @@ venomhook android-audit \
 echo "exit=$?"   # 2 if gate fired, 0 otherwise
 ```
 
-`--no-jadx`로 jadx를 건너뛰면 audit-only 모드로 동작 (Java decompile + JNI
-bridge 생략). `--strict-tools`는 apktool/jadx 누락 시 즉시 비0 종료를 강제합니다.
+`--no-jadx`로 jadx를 건너뛰면 빠른 manifest audit 모드로 동작합니다
+(Java decompile + JNI bridge 생략). `--strict-tools`는 apktool/jadx 누락 시
+즉시 비0 종료를 강제합니다.
 
 ### Phase 3 — PoC artifact 형태
 
@@ -529,6 +546,231 @@ PoC / export / JNI bridge / 패키지명이 동일하면 "no changes"로 보고�
 Schema 버전(`SCHEMA_VERSION`)은 `AndroidAnalysis.to_dict()` 형식이 호환되지
 않게 변경될 때만 올라갑니다. 같은 APK 해시의 다른 스키마 버전 행은 공존
 가능 — 과거 분석을 보존한 채로 새 분석을 추가할 수 있습니다.
+
+## Developer API Examples
+
+대부분의 사용자는 위 CLI만 사용하면 됩니다. 아래 예시는 VenomHook을 Python
+라이브러리로 직접 조합해야 하는 개발자용입니다.
+
+### APK analysis API
+
+`android_pipeline.analyze_apk`는 APK에서 native library, module metadata,
+AndroidManifest, Java native methods, JNI bridge를 한 번에 수집합니다.
+
+```bash
+python -c "
+from venomhook.android_pipeline import analyze_apk
+
+r = analyze_apk('./sample/myapp.apk', './out_android', abi='auto')
+print('ABI:', r.selected_abi)
+print('SO:', r.extracted_so_path)
+print('manifest:', r.app_meta.package_name if r.app_meta else 'not decoded')
+print('java natives:', len(r.java_natives))
+print('matched bridges:', len(r.matched_bridges), '/', len(r.bridges))
+print('warnings:', r.warnings)
+"
+```
+
+도구 누락을 예외로 처리하려면:
+
+```python
+analyze_apk("./sample/myapp.apk", "./out_android", fail_on_missing_tools=True)
+```
+
+### Manifest audit API
+
+Python에서 직접 조합할 때는 `apk_decoder`로 디코드한 manifest metadata를
+`manifest_audit` 룰 엔진에 넣습니다.
+
+```bash
+python -c "
+from venomhook.apk_decoder import decode_apk
+from venomhook.manifest_audit import audit_manifest, format_audit_summary
+
+_, app = decode_apk('./sample/myapp.apk', './out_audit/apktool')
+report = audit_manifest(app)
+print(format_audit_summary(report))
+"
+```
+
+## Optional LLM Layer (Phase 5)
+
+자동화 코어는 그대로 두고, LLM은 5개 지정 포인트에서 *옵트인*으로만 호출됩니다.
+플래그가 없으면 LLM 모듈은 import조차 되지 않으며 결과는 결정론적입니다.
+
+설치 (Anthropic SDK):
+
+```bash
+pip install -e '.[llm]'
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+정적 분석 LLM 플래그(`--use-llm-tagging`, `--use-llm-proto`,
+`--use-llm-flow`, `--use-llm-recovery`)는 `offset-static`과 `offset-e2e`
+양쪽에서 사용할 수 있습니다.
+
+```bash
+venomhook offset-e2e \
+  --static-json ./sample/examples/static_meta.sample.json \
+  --target sample.exe \
+  --out-dir ./out \
+  --use-llm-tagging \
+  --llm-provider anthropic
+```
+
+### ① 의미 태깅 — `--use-llm-tagging`
+
+`offset-static`에서 룰 기반 점수가 끝난 뒤, top-N endpoint에 `semantic:*`
+태그를 추가합니다 (예: `semantic:login-handler`, `semantic:tls-pin`).
+원본 endpoint와 reason은 보존되고, LLM 결과는 prefix로 구분됩니다.
+
+```bash
+venomhook offset-static \
+  --static-json ./sample/examples/static_meta.sample.json \
+  --use-llm-tagging \
+  --llm-provider anthropic \
+  --llm-model claude-haiku-4-5-20251001 \
+  --llm-token-budget 20000 \
+  --out ./out/venomhook.json
+```
+
+플래그 요약:
+- `--use-llm-tagging` — Phase 5 ① 활성화
+- `--llm-provider {anthropic|echo}` — 백엔드 (default: `anthropic`).
+  `echo`는 네트워크 호출 없는 결정론적 테스트 더블
+- `--llm-model` — 프로바이더 기본 모델 override
+- `--llm-token-budget N` — 입력+출력 합산 토큰 캡 (default: 20000).
+  예산 초과 시 해당 endpoint를 스킵하며, 실제 사용량이 초과된 응답은
+  결과에 적용하거나 캐시에 저장하지 않음
+- `--llm-cache-dir DIR` — LLM 응답 캐시 위치
+  (default: `~/.venomhook/llm_cache.sqlite3`)
+- `--no-llm-cache` — 응답 캐시 비활성화 (재실행마다 새 호출)
+
+폴백 정책:
+- 프로바이더 unavailable / SDK 미설치 / API key 없음 → 모든 endpoint
+  스킵, 룰 기반 결과 그대로 반환 (예외 발생 안 함).
+- 프로바이더 호출 실패 → 해당 endpoint만 `failed` 카운트, 나머지 진행.
+- 응답 형식 불일치 (`tag: reason` 라인이 아니면) → 해당 endpoint에
+  태그 추가 안 함, 에러 없음.
+
+캐시는 `(provider, model, request_hash, schema_version)`으로 keyed —
+같은 endpoint를 재분석하면 0회 호출로 동일 태그를 얻습니다.
+
+### ② proto 추론 — `--use-llm-proto`
+
+룰 기반에서 비어있는 (`HookSpec.proto.ret is None and not args`) 스펙에
+대해서만 LLM이 prototype을 채웁니다. 룰이 이미 채운 proto는 우선권
+보존 — 절대 덮어쓰지 않습니다.
+
+```bash
+venomhook offset-static \
+  --static-json ./sample/examples/static_meta.sample.json \
+  --use-llm-proto \
+  --use-llm-tagging \
+  --llm-provider anthropic \
+  --llm-token-budget 30000 \
+  --out ./out/venomhook.json
+```
+
+`--use-llm-tagging`와 함께 쓰면 **하나의 토큰 예산**과 **하나의 캐시
+파일**을 공유합니다 (per-flag 예산이 아니라 run 전체 예산).
+
+LLM에 요구되는 출력 형식 (strict):
+
+```
+ret: jstring
+arg0: JNIEnv *
+arg1: jobject
+arg2: const char *
+```
+
+타입은 짧은 C 스타일 ("int", "void *", "const char *", "size_t",
+"JNIEnv *", "jobject"...). 파서는 line-prefix bullets/dashes/whitespace
+관용적으로 처리하지만 `<>{}` 등 마크다운 잔여물이 들어간 타입은 거부.
+`ret:` 라인이 없으면 모델이 답변을 거부한 것으로 보고 proto 변경 안 함.
+
+폴백은 ①과 동일 — provider unavailable / parse 실패 / 예산 초과는 모두
+조용히 룰 기반 proto (즉 빈 `HookProto`) 그대로 유지.
+
+### ③ Java↔Native 흐름 — `--use-llm-flow`
+
+JNI 함수(이름이 `Java_<class>_<method>` 패턴)에 대해 Java 호출자와
+native 코드를 합쳐 한 문장 설명을 `HookSpec.description`(신설 필드)에
+씁니다. 비-JNI 심볼(rust_main, internal_helper 등)은 자동으로 스킵.
+
+```bash
+venomhook offset-static \
+  --static-json ./out/staticmeta.android.json \
+  --use-llm-flow \
+  --llm-token-budget 30000 \
+  --out ./out/venomhook.json
+```
+
+prompt 입력:
+- 가능하면 `JniBridge` (정확한 Java 클래스 FQN + 선언 시그니처)
+- 없으면 JNI 심볼명을 demangle해 class/method label만 추출 (fallback)
+- native side는 imports/strings (foundation의 trim 정책 그대로)
+
+출력은 단일 문장(<=40 단어). 모델이 metadata가 부족하다고 판단하면
+`SKIP` 한 줄을 출력하고, 파서는 description을 비워둡니다 (false-positive
+방지). 길이 280자 초과는 잘려 ellipsis로 끝납니다.
+
+`HookSpec.description`은 *신설 옵셔널 필드*입니다:
+- 미설정(`None`): `to_dict()` 출력에서 omit (기존 JSON 소비자 호환)
+- 설정됨: `to_dict()` 결과에 `"description": "..."` 포함
+
+`offset-static --apk` 경로는 현재 단계에서 JniBridge를 static
+파이프라인에 직접 전달하지 않습니다 (apktool/jadx 결과는 android-audit
+경로에서 사용). 따라서 `--apk + --use-llm-flow` 조합은 demangle
+fallback로 동작합니다. 정확한 Java 선언 기반 설명이 필요하면
+`android-audit` 결과의 JNI bridge 정보를 함께 활용하는 확장이 필요합니다.
+
+### ④ 런타임 해석 — `--use-llm-report`
+
+`offset-report-runtime`이 만들어내는 markdown/HTML 보고서 끝에
+"Analyst Summary" 섹션을 추가합니다. LLM은 통계(per-hook 이벤트 수,
+오류 수, 샘플 args/ret/strings)만 받고 *해석*을 작성 — 분석가가
+"무엇을 더 봐야 하는가"를 한 단락으로 정리.
+
+```bash
+venomhook offset-report-runtime \
+  --log ./logs/frida.log \
+  --out-md ./out/summary.md \
+  --out-html ./out/summary.html \
+  --use-llm-report \
+  --llm-token-budget 5000
+```
+
+- `total_events == 0`인 빈 로그는 자동 스킵
+- 모델이 metadata 부족으로 판단하면 `SKIP` 출력 → 섹션 미생성
+- 길이 1500자 cap, 코드펜스(\`\`\`) 자동 제거, 과도한 빈 줄 정리
+- HTML 출력은 항상 escape 처리 → 응답이 노이즈여도 XSS 안전
+
+### ⑤ Sig 자가복구 — `--use-llm-recovery`
+
+`HookSpec.sig`(byte 패턴)에 빌드별로 변하는 위치(immediates, relocation
+대상)를 LLM이 식별해 `??` 와일드카드로 교체합니다. 결과 sig는 빌드
+간 호환성이 향상되어 Frida `Memory.scan` 매칭 성공률을 높입니다.
+
+```bash
+venomhook offset-static \
+  --static-json ./out/staticmeta.json \
+  --use-llm-recovery \
+  --llm-token-budget 30000 \
+  --out ./out/venomhook.json
+```
+
+엄격한 검증 — LLM 응답을 무조건 신뢰하지 않습니다:
+- 응답에서 `sig:` 라인 추출
+- 토큰 수가 원본과 일치해야 함 (insertion/deletion 거부)
+- 토큰은 `2-hex` 또는 `??`만 허용
+- 비-와일드카드 토큰은 원본 byte와 정확히 일치해야 함
+  (LLM이 byte 값을 *변경*하려 시도하면 거부 — 자가복구는 wildcard 추가만)
+- 와일드카드 비율 75% 초과 시 거부 (너무 generic하면 매칭 폭주)
+- 위 조건 위반 시 원본 sig 유지, `skipped_invalid_response` 카운트
+
+`SKIP` 응답은 모델이 개선할 부분이 없다고 판단한 것으로 처리 →
+`skipped_model_declined` 카운트, sig 변경 없음.
 
 ## Binary Metadata Helper
 
@@ -621,6 +863,16 @@ venomhook/
 │       ├── jni_bridge.py
 │       ├── analysis_cache.py
 │       ├── analysis_diff.py
+│       ├── llm/                     # Phase 5 — opt-in LLM layer
+│       │   ├── __init__.py
+│       │   ├── budget.py            # TokenBudget + BudgetExhausted
+│       │   ├── cache.py             # SQLite LLM response cache
+│       │   ├── provider.py          # LLMProvider ABC, EchoProvider, AnthropicProvider
+│       │   ├── flow_description.py  # ③ --use-llm-flow (HookSpec.description)
+│       │   ├── proto_inference.py   # ② --use-llm-proto (HookSpec.proto)
+│       │   ├── runtime_summary.py   # ④ --use-llm-report (Analyst Summary)
+│       │   ├── sig_recovery.py      # ⑤ --use-llm-recovery (HookSpec.sig wildcards)
+│       │   └── tagging.py           # ① --use-llm-tagging (semantic:* tags)
 │       ├── manifest_audit.py
 │       ├── models.py
 │       ├── orchestrator.py

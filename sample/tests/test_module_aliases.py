@@ -15,7 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from venomhook.dynamic_pipeline import DynamicPipeline
@@ -23,12 +23,17 @@ from venomhook.models import HookConfig, HookSpec, OnEnterHook, OnLeaveHook
 from venomhook.store import HookSpecJsonStore, HookSpecSqliteStore, HookSpecStore
 
 
-def _spec(module: str = "libfoo.so", aliases: list[str] | None = None) -> HookSpec:
+def _spec(
+    module: str = "libfoo.so",
+    aliases: list[str] | None = None,
+    description: str | None = None,
+) -> HookSpec:
     return HookSpec(
         module=module,
         arch="arm64",
         offset=0x1234,
         name="Java_X",
+        description=description,
         module_aliases=list(aliases) if aliases else [],
         hook=HookConfig(
             onEnter=OnEnterHook(log_args=[0]),
@@ -132,6 +137,56 @@ class HookSpecAliasSqliteTests(unittest.TestCase):
             store.save_all(loaded)
             reloaded = store.load_all()
             self.assertEqual(reloaded[0].module_aliases, ["legacy.exe.bak"])
+
+    def test_sqlite_roundtrip_with_description(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "venomhook.db"
+            specs = [_spec(description="Java login calls native token verifier.")]
+            store = HookSpecSqliteStore(path)
+            store.save_all(specs)
+            loaded = store.load_all()
+            self.assertEqual(
+                loaded[0].description,
+                "Java login calls native token verifier.",
+            )
+
+    def test_sqlite_migration_adds_description_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy.db"
+            conn = sqlite3.connect(path)
+            conn.execute(
+                """
+                CREATE TABLE hookspecs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    module TEXT NOT NULL, arch TEXT NOT NULL, offset INTEGER NOT NULL,
+                    sig TEXT, name TEXT, tags TEXT, proto TEXT, hook TEXT,
+                    module_aliases TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO hookspecs
+                    (module, arch, offset, sig, name, tags, proto, hook, module_aliases)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("legacy.exe", "x64", 0x5678, None, "old", "[]", "null", "{}", None),
+            )
+            conn.commit()
+            conn.close()
+
+            store = HookSpecSqliteStore(path)
+            loaded = store.load_all()
+            self.assertIsNone(loaded[0].description)
+
+            loaded[0].description = "Recovered from migrated SQLite schema."
+            store.save_all(loaded)
+            reloaded = store.load_all()
+            self.assertEqual(
+                reloaded[0].description,
+                "Recovered from migrated SQLite schema.",
+            )
 
 
 class DynamicPipelineAliasJsTests(unittest.TestCase):
