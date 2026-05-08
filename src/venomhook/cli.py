@@ -91,6 +91,11 @@ def _add_llm_flags(parser: argparse.ArgumentParser) -> None:
         help="Phase 5 ③ — call LLM to write a one-sentence Java↔Native description into HookSpec.description (JNI-named specs only)",
     )
     parser.add_argument(
+        "--use-llm-report",
+        action="store_true",
+        help="Phase 5 ④ — call LLM to append an 'Analyst Summary' to the runtime report",
+    )
+    parser.add_argument(
         "--llm-provider",
         type=str,
         default="anthropic",
@@ -134,6 +139,7 @@ def _build_llm_runtime(args: argparse.Namespace):
         getattr(args, "use_llm_tagging", False),
         getattr(args, "use_llm_proto", False),
         getattr(args, "use_llm_flow", False),
+        getattr(args, "use_llm_report", False),
     ]
     if not any(enabled_flags):
         return None
@@ -386,6 +392,7 @@ def main(argv: list[str] | None = None) -> None:
     runtime_parser.add_argument("--log", "-i", type=Path, required=True, help="Frida log file (JSON lines)")
     runtime_parser.add_argument("--out-md", type=Path, help="Markdown summary output")
     runtime_parser.add_argument("--out-html", type=Path, help="HTML summary output")
+    _add_llm_flags(runtime_parser)
     runtime_parser.set_defaults(func=cmd_offset_report_runtime)
 
     e2e_parser = subparsers.add_parser("offset-e2e", help="Run static->hook->frida script pipeline (optional frida run); supports APK input")
@@ -759,11 +766,23 @@ def cmd_offset_report_runtime(args: argparse.Namespace) -> None:
     summary = summarize_log_file(args.log)
     if not args.out_md and not args.out_html:
         raise SystemExit("Provide at least one of --out-md or --out-html")
+
+    analyst_summary = None
+    if getattr(args, "use_llm_report", False):
+        runtime = _build_llm_runtime(args)
+        if runtime is not None:
+            provider, budget, cache = runtime
+            from venomhook.llm.runtime_summary import summarize_runtime_log
+            analyst_summary, stats = summarize_runtime_log(
+                summary, provider=provider, budget=budget, cache=cache,
+            )
+            logging.info(stats.as_summary_line())
+
     if args.out_md:
-        write_markdown_summary(summary, args.out_md)
+        write_markdown_summary(summary, args.out_md, analyst_summary=analyst_summary)
         logging.info("runtime log summary (md) written to %s", args.out_md)
     if args.out_html:
-        write_html_summary(summary, args.out_html)
+        write_html_summary(summary, args.out_html, analyst_summary=analyst_summary)
         logging.info("runtime log summary (html) written to %s", args.out_html)
 
 

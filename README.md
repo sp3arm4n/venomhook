@@ -648,7 +648,30 @@ prompt 입력:
 fallback로 동작 — class 이름 정확도는 낮지만 description의 가치는 유지.
 정밀 결합은 후속 unit에서.
 
-④ 런타임 해석 / ⑤ Sig 자가복구는 후속 unit에서 추가됩니다.
+### ④ 런타임 해석 — `--use-llm-report`
+
+`offset-report-runtime`이 만들어내는 markdown/HTML 보고서 끝에
+"Analyst Summary" 섹션을 추가합니다. LLM은 통계(per-hook 이벤트 수,
+오류 수, 샘플 args/ret/strings)만 받고 *해석*을 작성 — 분석가가
+"무엇을 더 봐야 하는가"를 한 단락으로 정리.
+
+```bash
+venomhook offset-report-runtime \
+  --log ./logs/frida.log \
+  --out-md ./out/summary.md \
+  --out-html ./out/summary.html \
+  --use-llm-report \
+  --llm-token-budget 5000
+```
+
+- `total_events == 0`인 빈 로그는 자동 스킵
+- 모델이 metadata 부족으로 판단하면 `SKIP` 출력 → 섹션 미생성
+- 길이 1500자 cap, 코드펜스(\`\`\`) 자동 제거, 과도한 빈 줄 정리
+- HTML 출력은 항상 escape 처리 → 응답이 노이즈여도 XSS 안전
+
+### ⑤ Sig 자가복구
+
+Sig 자가복구(`--use-llm-recovery`)는 후속 unit에서 추가됩니다.
 
 ## Binary Metadata Helper
 
@@ -748,6 +771,7 @@ venomhook/
 │       │   ├── provider.py          # LLMProvider ABC, EchoProvider, AnthropicProvider
 │       │   ├── flow_description.py  # ③ --use-llm-flow (HookSpec.description)
 │       │   ├── proto_inference.py   # ② --use-llm-proto (HookSpec.proto)
+│       │   ├── runtime_summary.py   # ④ --use-llm-report (Analyst Summary)
 │       │   └── tagging.py           # ① --use-llm-tagging (semantic:* tags)
 │       ├── manifest_audit.py
 │       ├── models.py
