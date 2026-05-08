@@ -28,6 +28,7 @@ logs/
 
 # Manually-dropped APK test inputs (large binaries; tests use synthetic fixtures)
 sample/*.apk
+sample/apk/
 
 # OS/editor noise
 .DS_Store
