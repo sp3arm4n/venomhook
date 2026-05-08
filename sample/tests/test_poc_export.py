@@ -94,6 +94,25 @@ class RenderShTests(unittest.TestCase):
         out = render_sh(_adb_artifact(commands=[]))
         self.assertIn("기록된 명령이 없습니다", out)
 
+    def test_multiline_header_fields_remain_comments(self):
+        out = render_sh(_adb_artifact(
+            title="safe title\nuname -a",
+            component="com.demo.MainActivity\nid",
+            description="description\nwhoami",
+            expected_evidence="evidence\ncat /etc/passwd",
+            notes="note\npwd",
+            references=["CWE-489\nprintf pwned"],
+        ))
+        header = out.split("\nset -u", 1)[0]
+        for line in header.splitlines():
+            self.assertTrue(
+                line.startswith("#"),
+                f"header line is not commented: {line!r}",
+            )
+        self.assertNotIn("\nuname -a", out)
+        self.assertNotIn("\nid", out)
+        self.assertNotIn("\nwhoami", out)
+
 
 class RenderIndexTests(unittest.TestCase):
     def test_groups_artifacts_under_finding_headings(self):
@@ -156,6 +175,20 @@ class RenderIndexTests(unittest.TestCase):
         out = render_index(arts, names)
         self.assertIn("`com.x.LoginActivity`", out)
 
+    def test_markdown_table_escapes_untrusted_text(self):
+        arts = [_adb_artifact(
+            rule_id="MANIFEST-004",
+            title="bad | title\nsecond line",
+            component="com.x.`A`|B\nC",
+            kind="adb|shell",
+        )]
+        names = ["MANIFEST-004-1_bad.sh"]
+        out = render_index(arts, names)
+        self.assertIn("bad \\| title second line", out)
+        self.assertIn("adb\\|shell", out)
+        self.assertIn("com.x.`A`\\|B C", out)
+        self.assertNotIn("\nsecond line", out)
+
     def test_empty_bundle_still_renders(self):
         out = render_index([], [])
         self.assertIn("아티팩트 0개", out)
@@ -182,9 +215,22 @@ class ExportPocsTests(unittest.TestCase):
             export_pocs([_adb_artifact()], tdp)
             readme = tdp / "README.md"
             self.assertTrue(readme.exists())
-            content = readme.read_text()
+            content = readme.read_text(encoding="utf-8")
             self.assertIn("MANIFEST-001", content)
             self.assertIn("attach-jdb-to-debuggable-process", content)
+
+    def test_writes_localized_bundle_as_utf8(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td) / "pocs"
+            paths = export_pocs([
+                _adb_artifact(
+                    title="디버깅 가능 프로세스",
+                    description="한글 설명 — UTF-8로 기록되어야 합니다.",
+                )
+            ], tdp)
+            for path in paths:
+                text = path.read_text(encoding="utf-8")
+                self.assertTrue(text)
 
     def test_creates_directory_when_missing(self):
         with tempfile.TemporaryDirectory() as td:

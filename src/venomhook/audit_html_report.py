@@ -29,7 +29,6 @@ Pure rendering — no I/O happens until ``write_audit_html`` is called.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
@@ -216,7 +215,7 @@ def _group_pocs_by_finding(
                 rel = (bundle_dir / _filename_for(idx, art)).resolve().relative_to(
                     out_path.parent.resolve()
                 )
-                href = str(rel)
+                href = rel.as_posix()
             except Exception:
                 # Cross-volume / unrelated paths fall back to no link rather
                 # than emitting an absolute file:// URL the operator may not
@@ -294,9 +293,6 @@ def _render_severity_bar(report: AndroidAuditReport) -> str:
         )
     chips.append(f'<span class="sev-chip"><span class="count">{len(report.findings)}</span> 합계</span>')
     return '<div class="severity-bar">' + "".join(chips) + "</div>"
-
-
-_LANG_BY_KIND = {"adb": "shell", "shell": "shell", "frida": "javascript", "info": ""}
 
 
 def _render_poc(link: _PocLink) -> str:
