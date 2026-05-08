@@ -67,6 +67,80 @@ DYNAMIC_DEFAULTS = {
 }
 
 
+def _add_llm_flags(parser: argparse.ArgumentParser) -> None:
+    """Attach the shared --use-llm-* / --llm-* flag set to a subparser.
+
+    All flags are opt-in; when ``--use-llm-tagging`` (and other future
+    Phase 5 flags) are absent, no LLM module code runs. A subcommand
+    that calls this helper inherits the full flag set so operators see
+    a consistent surface across ``offset-static`` and (future) other
+    LLM-aware subcommands.
+    """
+    parser.add_argument(
+        "--use-llm-tagging",
+        action="store_true",
+        help="Phase 5 ① — call LLM to add semantic:* tags on top of rule-based scoring",
+    )
+    parser.add_argument(
+        "--llm-provider",
+        type=str,
+        default="anthropic",
+        help="LLM provider name (default: anthropic). Use 'echo' for offline tests.",
+    )
+    parser.add_argument(
+        "--llm-model",
+        type=str,
+        help="Override the provider's default model (e.g., claude-haiku-4-5-20251001)",
+    )
+    parser.add_argument(
+        "--llm-token-budget",
+        type=int,
+        default=20000,
+        help="Hard cap on total input+output tokens per run (default: 20000)",
+    )
+    parser.add_argument(
+        "--llm-cache-dir",
+        type=Path,
+        help="Directory for the LLM response cache (default: ~/.venomhook/llm_cache.sqlite3)",
+    )
+    parser.add_argument(
+        "--no-llm-cache",
+        action="store_true",
+        help="Disable the LLM response cache for this run",
+    )
+
+
+def _build_llm_tagging_options(args: argparse.Namespace):
+    """Construct an :class:`LLMTaggingOptions` from CLI flags, or return None.
+
+    Returns None when no ``--use-llm-*`` flag was set, so the pipeline
+    skips the LLM stack entirely and stays import-clean.
+    """
+    if not getattr(args, "use_llm_tagging", False):
+        return None
+
+    # Lazy imports keep the LLM module out of the import path of users
+    # who haven't enabled any --use-llm-* flag.
+    from venomhook.llm.budget import TokenBudget
+    from venomhook.llm.cache import LLMCache
+    from venomhook.llm.provider import get_provider
+    from venomhook.static_pipeline import LLMTaggingOptions
+
+    provider = get_provider(args.llm_provider, model=args.llm_model)
+    budget = TokenBudget(cap=args.llm_token_budget)
+
+    cache = None
+    if not getattr(args, "no_llm_cache", False):
+        cache_path = args.llm_cache_dir
+        if cache_path is None:
+            cache_path = Path.home() / ".venomhook" / "llm_cache.sqlite3"
+        elif cache_path.is_dir() or not cache_path.suffix:
+            cache_path = Path(cache_path) / "llm_cache.sqlite3"
+        cache = LLMCache(cache_path)
+
+    return LLMTaggingOptions(provider=provider, budget=budget, cache=cache)
+
+
 def app(argv: list[str] | None = None) -> None:
     main(argv)
 
@@ -135,6 +209,7 @@ def main(argv: list[str] | None = None) -> None:
         help="Ghidra project name",
     )
     static_parser.add_argument("--top", "-t", type=int, default=10, help="Top N endpoints to export")
+    _add_llm_flags(static_parser)
     static_parser.set_defaults(func=cmd_offset_static)
 
     hook_parser = subparsers.add_parser("offset-hook", help="Generate Frida script from HookSpec JSON")
@@ -502,7 +577,14 @@ def cmd_offset_static(args: argparse.Namespace) -> None:
             project_dir=args.ghidra_project_dir,
             project_name=args.ghidra_project_name,
         )
-    pipeline = StaticPipeline(top_n=args.top, score_config=score_cfg, sig_max_bytes=args.sig_max_bytes, ghidra_runner=ghidra_runner)
+    llm_tagging = _build_llm_tagging_options(args)
+    pipeline = StaticPipeline(
+        top_n=args.top,
+        score_config=score_cfg,
+        sig_max_bytes=args.sig_max_bytes,
+        ghidra_runner=ghidra_runner,
+        llm_tagging=llm_tagging,
+    )
     if not args.static_json and not args.binary:
         raise SystemExit("Provide either --static-json or --binary")
     hooks = pipeline.run(

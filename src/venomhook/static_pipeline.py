@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -14,6 +15,20 @@ from venomhook.report import write_markdown
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class LLMTaggingOptions:
+    """Opt-in configuration for the Phase 5 ``--use-llm-tagging`` integration.
+
+    Wiring is intentionally narrow: the pipeline only checks whether
+    ``provider`` is set. When None, the pipeline runs identically to
+    pre-Phase-5 builds (no LLM calls, no API key needed).
+    """
+
+    provider: object  # venomhook.llm.LLMProvider — typed loosely to keep this module lazy
+    budget: object    # venomhook.llm.TokenBudget
+    cache: object | None = None  # venomhook.llm.LLMCache or None
+
+
 class StaticPipeline:
     def __init__(
         self,
@@ -21,11 +36,13 @@ class StaticPipeline:
         score_config: ScoreConfig | None = None,
         sig_max_bytes: int = 12,
         ghidra_runner: GhidraRunner | None = None,
+        llm_tagging: LLMTaggingOptions | None = None,
     ):
         self.top_n = top_n
         self.score_config = score_config or ScoreConfig()
         self.sig_max_bytes = sig_max_bytes
         self.ghidra_runner = ghidra_runner
+        self.llm_tagging = llm_tagging
 
     def run_from_static_meta(
         self, static_meta_path: Path, out_hookspec: Path, report_md: Path | None = None
@@ -34,6 +51,18 @@ class StaticPipeline:
         meta: StaticMeta = StaticMetaStore.load(static_meta_path)
         endpoints = score_endpoints(meta, top_n=self.top_n, config=self.score_config)
         logger.info("scored %d endpoints (top %d)", len(endpoints), self.top_n)
+        if self.llm_tagging is not None:
+            # Lazy import: venomhook.llm.tagging pulls in the LLM stack which
+            # we want to keep out of the import path of users not using it.
+            from venomhook.llm.tagging import tag_endpoints
+            stats = tag_endpoints(
+                endpoints,
+                meta.functions,
+                provider=self.llm_tagging.provider,  # type: ignore[arg-type]
+                budget=self.llm_tagging.budget,  # type: ignore[arg-type]
+                cache=self.llm_tagging.cache,  # type: ignore[arg-type]
+            )
+            logger.info(stats.as_summary_line())
         hookspecs = build_hookspecs(endpoints, functions=meta.functions, sig_max_bytes=self.sig_max_bytes)
         HookSpecStore.save(out_hookspec, hookspecs)
         logger.info("wrote HookSpec to %s", out_hookspec)

@@ -530,6 +530,58 @@ Schema 버전(`SCHEMA_VERSION`)은 `AndroidAnalysis.to_dict()` 형식이 호환�
 않게 변경될 때만 올라갑니다. 같은 APK 해시의 다른 스키마 버전 행은 공존
 가능 — 과거 분석을 보존한 채로 새 분석을 추가할 수 있습니다.
 
+## Optional LLM Layer (Phase 5)
+
+자동화 코어는 그대로 두고, LLM은 5개 지정 포인트에서 *옵트인*으로만 호출됩니다.
+플래그가 없으면 LLM 모듈은 import조차 되지 않으며 결과는 결정론적입니다.
+
+설치 (Anthropic SDK):
+
+```bash
+pip install -e '.[llm]'
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+### ① 의미 태깅 — `--use-llm-tagging`
+
+`offset-static`에서 룰 기반 점수가 끝난 뒤, top-N endpoint에 `semantic:*`
+태그를 추가합니다 (예: `semantic:login-handler`, `semantic:tls-pin`).
+원본 endpoint와 reason은 보존되고, LLM 결과는 prefix로 구분됩니다.
+
+```bash
+venomhook offset-static \
+  --static-json ./sample/examples/static_meta.sample.json \
+  --use-llm-tagging \
+  --llm-provider anthropic \
+  --llm-model claude-haiku-4-5-20251001 \
+  --llm-token-budget 20000 \
+  --out ./out/venomhook.json
+```
+
+플래그 요약:
+- `--use-llm-tagging` — Phase 5 ① 활성화
+- `--llm-provider {anthropic|echo}` — 백엔드 (default: `anthropic`).
+  `echo`는 네트워크 호출 없는 결정론적 테스트 더블
+- `--llm-model` — 프로바이더 기본 모델 override
+- `--llm-token-budget N` — 입력+출력 합산 토큰 캡 (default: 20000).
+  사전 체크에서 예산 초과 → 해당 endpoint 스킵, 결과 캐시는 유지
+- `--llm-cache-dir DIR` — LLM 응답 캐시 위치
+  (default: `~/.venomhook/llm_cache.sqlite3`)
+- `--no-llm-cache` — 응답 캐시 비활성화 (재실행마다 새 호출)
+
+폴백 정책:
+- 프로바이더 unavailable / SDK 미설치 / API key 없음 → 모든 endpoint
+  스킵, 룰 기반 결과 그대로 반환 (예외 발생 안 함).
+- 프로바이더 호출 실패 → 해당 endpoint만 `failed` 카운트, 나머지 진행.
+- 응답 형식 불일치 (`tag: reason` 라인이 아니면) → 해당 endpoint에
+  태그 추가 안 함, 에러 없음.
+
+캐시는 `(provider, model, request_hash, schema_version)`으로 keyed —
+같은 endpoint를 재분석하면 0회 호출로 동일 태그를 얻습니다.
+
+② proto 추론 / ③ Java↔Native 흐름 / ④ 런타임 해석 / ⑤ Sig 자가복구는
+후속 PR에서 추가됩니다.
+
 ## Binary Metadata Helper
 
 Ghidra 함수 분석 없이 module-level metadata만 빠르게 확인할 수 있습니다. `lief`가 필요합니다.
@@ -621,6 +673,12 @@ venomhook/
 │       ├── jni_bridge.py
 │       ├── analysis_cache.py
 │       ├── analysis_diff.py
+│       ├── llm/                     # Phase 5 — opt-in LLM layer
+│       │   ├── __init__.py
+│       │   ├── budget.py            # TokenBudget + BudgetExhausted
+│       │   ├── cache.py             # SQLite LLM response cache
+│       │   ├── provider.py          # LLMProvider ABC, EchoProvider, AnthropicProvider
+│       │   └── tagging.py           # ① --use-llm-tagging (semantic:* tags)
 │       ├── manifest_audit.py
 │       ├── models.py
 │       ├── orchestrator.py

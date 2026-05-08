@@ -28,6 +28,12 @@ from venomhook.llm.provider import (
     get_provider,
     list_providers,
 )
+from venomhook.llm.tagging import (
+    TaggingStats,
+    build_tagging_request,
+    parse_tagging_response,
+    tag_endpoints,
+)
 
 __all__ = [
     "AnthropicProvider",
@@ -40,8 +46,12 @@ __all__ = [
     "LLMRequest",
     "LLMResponse",
     "SCHEMA_VERSION",
+    "TaggingStats",
     "TokenBudget",
+    "build_tagging_request",
     "estimate_tokens",
     "get_provider",
     "list_providers",
+    "parse_tagging_response",
+    "tag_endpoints",
 ]
