@@ -54,6 +54,15 @@ class LLMFlowOptions:
     bridges: object | None = None
 
 
+@dataclass
+class LLMRecoveryOptions:
+    """Opt-in configuration for the Phase 5 ``--use-llm-recovery`` integration."""
+
+    provider: object
+    budget: object
+    cache: object | None = None
+
+
 class StaticPipeline:
     def __init__(
         self,
@@ -64,6 +73,7 @@ class StaticPipeline:
         llm_tagging: LLMTaggingOptions | None = None,
         llm_proto: LLMProtoOptions | None = None,
         llm_flow: LLMFlowOptions | None = None,
+        llm_recovery: LLMRecoveryOptions | None = None,
     ):
         self.top_n = top_n
         self.score_config = score_config or ScoreConfig()
@@ -72,6 +82,7 @@ class StaticPipeline:
         self.llm_tagging = llm_tagging
         self.llm_proto = llm_proto
         self.llm_flow = llm_flow
+        self.llm_recovery = llm_recovery
 
     def run_from_static_meta(
         self, static_meta_path: Path, out_hookspec: Path, report_md: Path | None = None
@@ -114,6 +125,16 @@ class StaticPipeline:
                 bridges=self.llm_flow.bridges,  # type: ignore[arg-type]
             )
             logger.info(flow_stats.as_summary_line())
+        if self.llm_recovery is not None:
+            from venomhook.llm.sig_recovery import recover_sigs
+            recovery_stats = recover_sigs(
+                hookspecs,
+                meta.functions,
+                provider=self.llm_recovery.provider,  # type: ignore[arg-type]
+                budget=self.llm_recovery.budget,  # type: ignore[arg-type]
+                cache=self.llm_recovery.cache,  # type: ignore[arg-type]
+            )
+            logger.info(recovery_stats.as_summary_line())
         HookSpecStore.save(out_hookspec, hookspecs)
         logger.info("wrote HookSpec to %s", out_hookspec)
         if report_md:

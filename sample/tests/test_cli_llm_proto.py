@@ -58,16 +58,18 @@ class CliUseLLMProtoTest(unittest.TestCase):
                 use_llm_tagging=True,
                 use_llm_proto=True,
                 use_llm_flow=False,
+                use_llm_recovery=False,
                 llm_provider="echo",
                 llm_model=None,
                 llm_token_budget=20000,
                 llm_cache_dir=Path(tmp),
                 no_llm_cache=False,
             )
-            tagging, proto, flow = _build_llm_options(args)
+            tagging, proto, flow, recovery = _build_llm_options(args)
             self.assertIsNotNone(tagging)
             self.assertIsNotNone(proto)
             self.assertIsNone(flow)
+            self.assertIsNone(recovery)
             # Same instances — single budget cap shared across both points.
             self.assertIs(tagging.provider, proto.provider)
             self.assertIs(tagging.budget, proto.budget)

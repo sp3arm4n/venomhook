@@ -96,6 +96,11 @@ def _add_llm_flags(parser: argparse.ArgumentParser) -> None:
         help="Phase 5 ④ — call LLM to append an 'Analyst Summary' to the runtime report",
     )
     parser.add_argument(
+        "--use-llm-recovery",
+        action="store_true",
+        help="Phase 5 ⑤ — call LLM to insert wildcards (??) into HookSpec.sig at byte positions likely to vary across builds",
+    )
+    parser.add_argument(
         "--llm-provider",
         type=str,
         default="anthropic",
@@ -140,6 +145,7 @@ def _build_llm_runtime(args: argparse.Namespace):
         getattr(args, "use_llm_proto", False),
         getattr(args, "use_llm_flow", False),
         getattr(args, "use_llm_report", False),
+        getattr(args, "use_llm_recovery", False),
     ]
     if not any(enabled_flags):
         return None
@@ -174,7 +180,7 @@ def _build_llm_options(args: argparse.Namespace):
     """
     runtime = _build_llm_runtime(args)
     if runtime is None:
-        return None, None, None
+        return None, None, None, None
     provider, budget, cache = runtime
 
     tagging_options = None
@@ -202,7 +208,14 @@ def _build_llm_options(args: argparse.Namespace):
             provider=provider, budget=budget, cache=cache, bridges=None,
         )
 
-    return tagging_options, proto_options, flow_options
+    recovery_options = None
+    if getattr(args, "use_llm_recovery", False):
+        from venomhook.static_pipeline import LLMRecoveryOptions
+        recovery_options = LLMRecoveryOptions(
+            provider=provider, budget=budget, cache=cache,
+        )
+
+    return tagging_options, proto_options, flow_options, recovery_options
 
 
 def app(argv: list[str] | None = None) -> None:
@@ -642,7 +655,7 @@ def cmd_offset_static(args: argparse.Namespace) -> None:
             project_dir=args.ghidra_project_dir,
             project_name=args.ghidra_project_name,
         )
-    llm_tagging, llm_proto, llm_flow = _build_llm_options(args)
+    llm_tagging, llm_proto, llm_flow, llm_recovery = _build_llm_options(args)
     pipeline = StaticPipeline(
         top_n=args.top,
         score_config=score_cfg,
@@ -651,6 +664,7 @@ def cmd_offset_static(args: argparse.Namespace) -> None:
         llm_tagging=llm_tagging,
         llm_proto=llm_proto,
         llm_flow=llm_flow,
+        llm_recovery=llm_recovery,
     )
     if not args.static_json and not args.binary:
         raise SystemExit("Provide either --static-json or --binary")

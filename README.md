@@ -669,9 +669,31 @@ venomhook offset-report-runtime \
 - 길이 1500자 cap, 코드펜스(\`\`\`) 자동 제거, 과도한 빈 줄 정리
 - HTML 출력은 항상 escape 처리 → 응답이 노이즈여도 XSS 안전
 
-### ⑤ Sig 자가복구
+### ⑤ Sig 자가복구 — `--use-llm-recovery`
 
-Sig 자가복구(`--use-llm-recovery`)는 후속 unit에서 추가됩니다.
+`HookSpec.sig`(byte 패턴)에 빌드별로 변하는 위치(immediates, relocation
+대상)를 LLM이 식별해 `??` 와일드카드로 교체합니다. 결과 sig는 빌드
+간 호환성이 향상되어 Frida `Memory.scan` 매칭 성공률을 높입니다.
+
+```bash
+venomhook offset-static \
+  --static-json ./out/staticmeta.json \
+  --use-llm-recovery \
+  --llm-token-budget 30000 \
+  --out ./out/venomhook.json
+```
+
+엄격한 검증 — LLM 응답을 무조건 신뢰하지 않습니다:
+- 응답에서 `sig:` 라인 추출
+- 토큰 수가 원본과 일치해야 함 (insertion/deletion 거부)
+- 토큰은 `2-hex` 또는 `??`만 허용
+- 비-와일드카드 토큰은 원본 byte와 정확히 일치해야 함
+  (LLM이 byte 값을 *변경*하려 시도하면 거부 — 자가복구는 wildcard 추가만)
+- 와일드카드 비율 75% 초과 시 거부 (너무 generic하면 매칭 폭주)
+- 위 조건 위반 시 원본 sig 유지, `skipped_invalid_response` 카운트
+
+`SKIP` 응답은 모델이 개선할 부분이 없다고 판단한 것으로 처리 →
+`skipped_model_declined` 카운트, sig 변경 없음.
 
 ## Binary Metadata Helper
 
@@ -772,6 +794,7 @@ venomhook/
 │       │   ├── flow_description.py  # ③ --use-llm-flow (HookSpec.description)
 │       │   ├── proto_inference.py   # ② --use-llm-proto (HookSpec.proto)
 │       │   ├── runtime_summary.py   # ④ --use-llm-report (Analyst Summary)
+│       │   ├── sig_recovery.py      # ⑤ --use-llm-recovery (HookSpec.sig wildcards)
 │       │   └── tagging.py           # ① --use-llm-tagging (semantic:* tags)
 │       ├── manifest_audit.py
 │       ├── models.py
