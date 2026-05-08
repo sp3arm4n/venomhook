@@ -125,7 +125,13 @@ def _build_debuggable(meta: AndroidAppMeta, finding: ManifestFinding) -> list[Po
             severity=finding.severity,
             kind="adb",
             package_name=pkg,
-            component=launcher_name,
+            # MANIFEST-001 is an app-level finding (component=None on the
+            # finding itself). The launcher activity is just a means to
+            # start the process — not a per-component target. Keep the
+            # component on the artifact aligned with the finding so the
+            # (rule_id, component) join used by the HTML report and the
+            # PoC bundle README groups them together.
+            component=finding.component,
             description=(
                 "android:debuggable=true allows attaching jdb / Android Studio "
                 "to the live process for breakpoint, variable inspection, and "

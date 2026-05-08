@@ -485,14 +485,39 @@ def render_audit_html(
 
     findings_html_parts: list[str] = []
     audit = analysis.audit_report
+    rendered_keys: set[tuple[str, Optional[str]]] = set()
     if audit:
         sorted_findings = sorted(audit.findings, key=_sev_sort_key)
         for finding in sorted_findings:
             key = _finding_key(finding.rule_id, finding.component)
             pocs_for_this = poc_index.get(key, [])
+            rendered_keys.add(key)
             findings_html_parts.append(
                 _render_finding_card(finding, pocs_for_this)
             )
+
+    # Defensive: surface any PoC whose (rule_id, component) didn't match a
+    # finding so it isn't silently dropped from the report. Should be rare
+    # — fires when poc_generator and manifest_audit disagree on whether a
+    # rule attaches to a component or app-level. Visible in the report so
+    # operators can investigate rather than wonder where their PoC went.
+    orphan_html = ""
+    orphan_keys = [k for k in poc_index.keys() if k not in rendered_keys]
+    if orphan_keys:
+        orphan_html_parts: list[str] = [
+            '<div class="warnings" style="margin-top: 16px;">'
+            "<strong>Unmatched PoC artifacts</strong>"
+            '<p style="margin: 6px 0 0 0; font-size: 0.88em;">'
+            "These PoCs did not join any finding by (rule_id, component). "
+            "Listed here so the bundle is exhaustive — investigate whether "
+            "the rule should produce a per-component finding or the PoC "
+            "should be app-level."
+            "</p></div>"
+        ]
+        for key in sorted(orphan_keys, key=lambda k: (k[0], k[1] or "")):
+            for link in poc_index[key]:
+                orphan_html_parts.append(_render_poc(link))
+        orphan_html = "".join(orphan_html_parts)
 
     findings_section = (
         f'<section class="findings-section">'
@@ -500,6 +525,7 @@ def render_audit_html(
         f"{_render_severity_bar(audit) if audit else ''}"
         + ("".join(findings_html_parts) or
            '<p style="color: var(--text-muted);">No findings.</p>')
+        + orphan_html
         + "</section>"
     )
 
