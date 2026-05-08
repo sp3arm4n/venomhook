@@ -12,6 +12,7 @@ with the ``echo`` provider so no live API call is made. Verifies:
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 import tempfile
@@ -27,6 +28,12 @@ from venomhook.cli import main
 
 
 class CliLLMTaggingFlagsTest(unittest.TestCase):
+    def _assert_argparse_error(self, argv: list[str]) -> None:
+        with mock.patch("sys.stderr", new=io.StringIO()):
+            with self.assertRaises(SystemExit) as ctx:
+                main(argv)
+        self.assertNotEqual(ctx.exception.code, 0)
+
     def test_offset_static_with_use_llm_tagging_echo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "venomhook.json"
@@ -97,6 +104,45 @@ class CliLLMTaggingFlagsTest(unittest.TestCase):
             main(argv)
             self.assertFalse(cache_dir.exists(),
                              "cache dir created despite --no-llm-cache")
+
+    def test_offset_static_rejects_runtime_report_llm_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "venomhook.json"
+            self._assert_argparse_error([
+                "offset-static",
+                "--static-json", str(SAMPLE_STATIC_META),
+                "--out", str(out),
+                "--use-llm-report",
+            ])
+
+    def test_offset_report_runtime_rejects_static_llm_flag(self) -> None:
+        self._assert_argparse_error([
+            "offset-report-runtime",
+            "--log", "frida.log",
+            "--out-md", "summary.md",
+            "--use-llm-tagging",
+        ])
+
+    def test_report_flag_does_not_build_static_llm_runtime(self) -> None:
+        import argparse
+        from venomhook.cli import _build_llm_options
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            args = argparse.Namespace(
+                use_llm_tagging=False,
+                use_llm_proto=False,
+                use_llm_flow=False,
+                use_llm_report=True,
+                use_llm_recovery=False,
+                llm_provider="echo",
+                llm_model=None,
+                llm_token_budget=20000,
+                llm_cache_dir=cache_dir,
+                no_llm_cache=False,
+            )
+            self.assertEqual(_build_llm_options(args), (None, None, None, None))
+            self.assertFalse(cache_dir.exists())
 
     def test_llm_cache_dir_creates_sqlite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

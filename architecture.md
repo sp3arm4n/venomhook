@@ -112,7 +112,7 @@
    - Frida Runner / Dynamic Pipeline
 ─────────────────────────────────────────────────────────────
 5. Interface Layer
-   - CLI (예: `vh offset-static`, `vh offset-hook`)
+   - CLI (예: `venomhook offset-static`, `venomhook offset-hook`)
    - Report Exporter (JSON/HTML/Markdown)
 ─────────────────────────────────────────────────────────────
 ```
@@ -174,7 +174,7 @@
     │
     ▼
 [2] 프로세스 실행/attach
-    - CLI: vh offset-hook --target sample.exe --hookspec venomhook.json
+    - CLI: venomhook offset-hook --target sample.exe --hookspec venomhook.json
     │
     ▼
 [3] Offset Hook Loader
@@ -292,7 +292,7 @@ StaticMeta → EndpointMeta → HookSpec 으로 단계별 정제/축소되면서
 ```text
          ┌─────────────────────────────────────┐
          │                 CLI                 │
-         │ vh offset-static  /  vh offset-hook │
+         │ venomhook offset-static / offset-hook │
          └──────────────────┬──────────────────┘
                             │
                   ┌─────────▼─────────┐

@@ -67,39 +67,45 @@ DYNAMIC_DEFAULTS = {
 }
 
 
-def _add_llm_flags(parser: argparse.ArgumentParser) -> None:
-    """Attach the shared --use-llm-* / --llm-* flag set to a subparser.
-
-    All flags are opt-in; when no ``--use-llm-*`` flag is set, no LLM
-    module code runs. A subcommand that calls this helper inherits the
-    full flag set so operators see a consistent surface across all
-    LLM-aware subcommands.
-    """
-    parser.add_argument(
+_LLM_FEATURE_FLAGS = {
+    "tagging": (
         "--use-llm-tagging",
-        action="store_true",
-        help="Phase 5 ① — call LLM to add semantic:* tags on top of rule-based scoring",
-    )
-    parser.add_argument(
+        "Phase 5 ① — call LLM to add semantic:* tags on top of rule-based scoring",
+    ),
+    "proto": (
         "--use-llm-proto",
-        action="store_true",
-        help="Phase 5 ② — call LLM to fill HookSpec.proto (ret + arg types) for specs the rule layer left empty",
-    )
-    parser.add_argument(
+        "Phase 5 ② — call LLM to fill HookSpec.proto (ret + arg types) "
+        "for specs the rule layer left empty",
+    ),
+    "flow": (
         "--use-llm-flow",
-        action="store_true",
-        help="Phase 5 ③ — call LLM to write a one-sentence Java↔Native description into HookSpec.description (JNI-named specs only)",
-    )
-    parser.add_argument(
+        "Phase 5 ③ — call LLM to write a one-sentence Java↔Native "
+        "description into HookSpec.description (JNI-named specs only)",
+    ),
+    "report": (
         "--use-llm-report",
-        action="store_true",
-        help="Phase 5 ④ — call LLM to append an 'Analyst Summary' to the runtime report",
-    )
-    parser.add_argument(
+        "Phase 5 ④ — call LLM to append an 'Analyst Summary' to the runtime report",
+    ),
+    "recovery": (
         "--use-llm-recovery",
-        action="store_true",
-        help="Phase 5 ⑤ — call LLM to insert wildcards (??) into HookSpec.sig at byte positions likely to vary across builds",
-    )
+        "Phase 5 ⑤ — call LLM to insert wildcards (??) into HookSpec.sig "
+        "at byte positions likely to vary across builds",
+    ),
+}
+
+
+def _add_llm_flags(
+    parser: argparse.ArgumentParser,
+    *,
+    features: tuple[str, ...],
+) -> None:
+    """Attach only the LLM feature flags that affect this subcommand."""
+    for feature in features:
+        try:
+            flag, help_text = _LLM_FEATURE_FLAGS[feature]
+        except KeyError as exc:
+            raise ValueError(f"unknown LLM feature: {feature}") from exc
+        parser.add_argument(flag, action="store_true", help=help_text)
     parser.add_argument(
         "--llm-provider",
         type=str,
@@ -178,6 +184,15 @@ def _build_llm_options(args: argparse.Namespace):
     Each element is None when the corresponding ``--use-llm-*`` flag
     wasn't set.
     """
+    static_enabled_flags = [
+        getattr(args, "use_llm_tagging", False),
+        getattr(args, "use_llm_proto", False),
+        getattr(args, "use_llm_flow", False),
+        getattr(args, "use_llm_recovery", False),
+    ]
+    if not any(static_enabled_flags):
+        return None, None, None, None
+
     runtime = _build_llm_runtime(args)
     if runtime is None:
         return None, None, None, None
@@ -300,7 +315,7 @@ def main(argv: list[str] | None = None) -> None:
         help="Ghidra project name",
     )
     static_parser.add_argument("--top", "-t", type=int, default=10, help="Top N endpoints to export")
-    _add_llm_flags(static_parser)
+    _add_llm_flags(static_parser, features=("tagging", "proto", "flow", "recovery"))
     static_parser.set_defaults(func=cmd_offset_static)
 
     hook_parser = subparsers.add_parser("offset-hook", help="Generate Frida script from HookSpec JSON")
@@ -419,7 +434,7 @@ def main(argv: list[str] | None = None) -> None:
     runtime_parser.add_argument("--log", "-i", type=Path, required=True, help="Frida log file (JSON lines)")
     runtime_parser.add_argument("--out-md", type=Path, help="Markdown summary output")
     runtime_parser.add_argument("--out-html", type=Path, help="HTML summary output")
-    _add_llm_flags(runtime_parser)
+    _add_llm_flags(runtime_parser, features=("report",))
     runtime_parser.set_defaults(func=cmd_offset_report_runtime)
 
     e2e_parser = subparsers.add_parser("offset-e2e", help="Run static->hook->frida script pipeline (optional frida run); supports APK input")
@@ -919,8 +934,8 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
 
     Exit codes:
       0 — success, no severity gate triggered
-      1 — pipeline error (APK invalid, no native libs, missing tools when
-          --strict-tools, etc.)
+      1 — pipeline error (APK invalid, manifest decode failure, missing tools
+          when --strict-tools, etc.)
       2 — severity gate: at least one finding at or above
           --severity-threshold
     """

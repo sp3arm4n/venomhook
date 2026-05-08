@@ -65,6 +65,19 @@ out/
 sed -n '1,120p' ./out/venomhook.js
 ```
 
+## Common Commands
+
+`pip install -e .` 이후에는 아래처럼 `venomhook` 명령만 사용하면 됩니다.
+
+| 목적 | 명령 |
+| --- | --- |
+| 샘플로 전체 흐름 확인 | `venomhook offset-e2e --static-json ./sample/examples/static_meta.sample.json --target sample.exe --out-dir ./out` |
+| HookSpec 생성 | `venomhook offset-static --static-json ./sample/examples/static_meta.sample.json --out ./out/venomhook.json --out-db ./out/venomhook.db` |
+| Frida 스크립트 생성 | `venomhook offset-hook --hookspec ./out/venomhook.json --target sample.exe --out-script ./out/venomhook.js` |
+| APK manifest 빠른 감사 | `venomhook android-audit --apk ./sample/myapp.apk --no-jadx --out-dir ./out_audit --audit-json ./out_audit/audit.json` |
+| PoC 번들 생성 | `venomhook android-audit --apk ./sample/myapp.apk --out-dir ./out_audit --poc-bundle-dir ./out_audit/pocs` |
+| 런타임 로그 요약 | `venomhook offset-report-runtime --log ./logs/frida.log --out-md ./out/summary.md --out-html ./out/summary.html` |
+
 ## Install
 
 기본 CLI만 사용할 경우:
@@ -315,6 +328,8 @@ frida -U -n com.example.app -l ./frida_scripts/myapp.js
 
 ### APK 전체 컨텍스트 분석
 
+일반 사용자는 아래의 `android-audit` CLI를 사용하면 됩니다. 이 섹션은 VenomHook을 Python 라이브러리로 직접 호출할 때 필요한 개발자용 API 예시입니다.
+
 `android_pipeline.analyze_apk`는 APK에서 native library, module metadata, AndroidManifest, Java native methods, JNI bridge를 한 번에 수집합니다.
 
 ```bash
@@ -339,7 +354,7 @@ analyze_apk("./sample/myapp.apk", "./out_android", fail_on_missing_tools=True)
 
 ### AndroidManifest 감사
 
-`apk_decoder`로 디코드한 manifest metadata를 `manifest_audit` 룰 엔진에 넣습니다.
+CLI에서는 `venomhook android-audit`가 이 과정을 자동으로 수행합니다. Python에서 직접 조합할 때는 `apk_decoder`로 디코드한 manifest metadata를 `manifest_audit` 룰 엔진에 넣습니다.
 
 ```bash
 python -c "
@@ -412,7 +427,7 @@ venomhook android-audit \
 | 코드 | 의미 |
 | --- | --- |
 | 0 | 성공, severity gate 통과 |
-| 1 | 파이프라인 오류 (no native libs / `--strict-tools`로 apktool 누락 등) |
+| 1 | 파이프라인 오류 (잘못된 APK, manifest decode 실패, `--strict-tools`로 apktool/jadx 누락 등) |
 | 2 | severity gate 발동 — `--severity-threshold` 이상의 finding 존재 |
 
 `--poc-bundle-dir` 출력 예시:
@@ -443,8 +458,9 @@ venomhook android-audit \
 echo "exit=$?"   # 2 if gate fired, 0 otherwise
 ```
 
-`--no-jadx`로 jadx를 건너뛰면 audit-only 모드로 동작 (Java decompile + JNI
-bridge 생략). `--strict-tools`는 apktool/jadx 누락 시 즉시 비0 종료를 강제합니다.
+`--no-jadx`로 jadx를 건너뛰면 빠른 manifest audit 모드로 동작합니다
+(Java decompile + JNI bridge 생략). `--strict-tools`는 apktool/jadx 누락 시
+즉시 비0 종료를 강제합니다.
 
 ### Phase 3 — PoC artifact 형태
 
@@ -564,7 +580,8 @@ venomhook offset-static \
   `echo`는 네트워크 호출 없는 결정론적 테스트 더블
 - `--llm-model` — 프로바이더 기본 모델 override
 - `--llm-token-budget N` — 입력+출력 합산 토큰 캡 (default: 20000).
-  사전 체크에서 예산 초과 → 해당 endpoint 스킵, 결과 캐시는 유지
+  예산 초과 시 해당 endpoint를 스킵하며, 실제 사용량이 초과된 응답은
+  결과에 적용하거나 캐시에 저장하지 않음
 - `--llm-cache-dir DIR` — LLM 응답 캐시 위치
   (default: `~/.venomhook/llm_cache.sqlite3`)
 - `--no-llm-cache` — 응답 캐시 비활성화 (재실행마다 새 호출)
@@ -645,8 +662,8 @@ prompt 입력:
 `offset-static --apk` 경로는 현재 단계에서 JniBridge를 static
 파이프라인에 직접 전달하지 않습니다 (apktool/jadx 결과는 android-audit
 경로에서 사용). 따라서 `--apk + --use-llm-flow` 조합은 demangle
-fallback로 동작 — class 이름 정확도는 낮지만 description의 가치는 유지.
-정밀 결합은 후속 unit에서.
+fallback로 동작합니다. 정확한 Java 선언 기반 설명이 필요하면
+`android-audit` 결과의 JNI bridge 정보를 함께 활용하는 확장이 필요합니다.
 
 ### ④ 런타임 해석 — `--use-llm-report`
 

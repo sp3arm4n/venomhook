@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "venomhook"
 version = "0.1.0"
-description = "Offset-based Native Hook Automation Platform skeleton"
+description = "Offset-based native hook automation CLI for binary and Android analysis"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 classifiers = [
