@@ -17,6 +17,7 @@ Covers:
         * model returns invalid -> skipped_invalid_response
         * model returns unchanged sig -> skipped_model_declined (no improvement)
         * provider failure -> failed
+        * post-charge budget overrun -> response discarded
         * cache hit -> no provider call
 """
 
@@ -275,18 +276,18 @@ class RecoverSigsHappyPathTest(unittest.TestCase):
 class RecoverSigsCacheTest(unittest.TestCase):
     def test_cache_hit_no_provider_call(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            cache = LLMCache(Path(td) / "llm.sqlite3")
-            spec = _spec()
-            fn = _function()
-            req = build_recovery_request(spec, fn)
-            cache.put(req, LLMResponse(
-                text="sig: 48 89 5C 24 ?? 57 48 83",
-                input_tokens=10, output_tokens=5,
-                provider="canned", model="canned-1",
-            ))
-            prov = _CannedProvider("UNUSED")
-            stats = recover_sigs([spec], [fn], provider=prov,
-                                 budget=TokenBudget(cap=10000), cache=cache)
+            with LLMCache(Path(td) / "llm.sqlite3") as cache:
+                spec = _spec()
+                fn = _function()
+                req = build_recovery_request(spec, fn)
+                cache.put(req, LLMResponse(
+                    text="sig: 48 89 5C 24 ?? 57 48 83",
+                    input_tokens=10, output_tokens=5,
+                    provider="canned", model="canned-1",
+                ))
+                prov = _CannedProvider("UNUSED")
+                stats = recover_sigs([spec], [fn], provider=prov,
+                                     budget=TokenBudget(cap=10000), cache=cache)
             self.assertEqual(stats.cached_hits, 1)
             self.assertEqual(stats.new_calls, 0)
             self.assertEqual(prov.calls, [])
@@ -317,6 +318,27 @@ class RecoverSigsFailureTest(unittest.TestCase):
                              provider=prov, budget=TokenBudget(cap=5))
         self.assertEqual(stats.skipped_budget, 1)
         self.assertEqual(prov.calls, [])
+
+    def test_charge_overrun_discards_response_and_stops(self) -> None:
+        specs = [_spec(offset=0x1000), _spec(offset=0x2000)]
+        prov = _CannedProvider(
+            "sig: 48 89 5C 24 ?? 57 48 83",
+            in_t=10000,
+            out_t=10000,
+        )
+        budget = TokenBudget(cap=30000)
+        stats = recover_sigs(
+            specs,
+            [_function(rva=0x1000), _function(rva=0x2000)],
+            provider=prov,
+            budget=budget,
+        )
+        self.assertEqual(stats.new_calls, 2)
+        self.assertEqual(stats.skipped_budget, 1)
+        self.assertEqual(stats.sigs_recovered, 1)
+        self.assertEqual(specs[0].sig, "48 89 5C 24 ?? 57 48 83")
+        self.assertEqual(specs[1].sig, "48 89 5C 24 08 57 48 83")
+        self.assertEqual(budget.spent, 20000)
 
     def test_empty_input_no_op(self) -> None:
         stats = recover_sigs([], [], provider=_UnavailableProvider(),

@@ -5,8 +5,8 @@ Covers:
       duplicate args, out-of-order indices, type plausibility checks
     - build_proto_request: fields included, role metadata, string truncation
     - infer_protos: rule-first (skips populated proto), happy path,
-      cached hit, budget refusal, unavailable provider, provider failure,
-      empty input, no eligible specs
+      cached hit, budget refusal / post-charge overrun, unavailable provider,
+      provider failure, empty input, no eligible specs
     - Cache key separation across (provider, model, request)
 """
 
@@ -274,18 +274,18 @@ class InferProtosHappyPathTest(unittest.TestCase):
 class InferProtosCacheTest(unittest.TestCase):
     def test_cache_hit_no_provider_call(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            cache = LLMCache(Path(td) / "llm.sqlite3")
-            spec = _spec()
-            fn = _function()
-            req = build_proto_request(spec, fn)
-            cache.put(req, LLMResponse(
-                text="ret: int\narg0: char *\n",
-                input_tokens=10, output_tokens=5,
-                provider="canned", model="canned-1",
-            ))
-            prov = _CannedProvider("UNUSED")  # would record any call
-            stats = infer_protos([spec], [fn], provider=prov,
-                                 budget=TokenBudget(cap=10000), cache=cache)
+            with LLMCache(Path(td) / "llm.sqlite3") as cache:
+                spec = _spec()
+                fn = _function()
+                req = build_proto_request(spec, fn)
+                cache.put(req, LLMResponse(
+                    text="ret: int\narg0: char *\n",
+                    input_tokens=10, output_tokens=5,
+                    provider="canned", model="canned-1",
+                ))
+                prov = _CannedProvider("UNUSED")  # would record any call
+                stats = infer_protos([spec], [fn], provider=prov,
+                                     budget=TokenBudget(cap=10000), cache=cache)
             self.assertEqual(stats.cached_hits, 1)
             self.assertEqual(stats.new_calls, 0)
             self.assertEqual(prov.calls, [])
@@ -327,6 +327,23 @@ class InferProtosFailureTest(unittest.TestCase):
         self.assertEqual(stats.new_calls, 0)
         self.assertEqual(prov.calls, [])
         self.assertIsNone(spec.proto.ret)
+
+    def test_charge_overrun_discards_response_and_stops(self) -> None:
+        specs = [_spec(offset=0x1000), _spec(offset=0x2000)]
+        prov = _CannedProvider("ret: int\n", in_t=10000, out_t=10000)
+        budget = TokenBudget(cap=30000)
+        stats = infer_protos(
+            specs,
+            [_function(rva=0x1000), _function(rva=0x2000)],
+            provider=prov,
+            budget=budget,
+        )
+        self.assertEqual(stats.new_calls, 2)
+        self.assertEqual(stats.skipped_budget, 1)
+        self.assertEqual(stats.protos_filled, 1)
+        self.assertEqual(specs[0].proto.ret, "int")
+        self.assertIsNone(specs[1].proto.ret)
+        self.assertEqual(budget.spent, 20000)
 
     def test_empty_specs_no_op(self) -> None:
         stats = infer_protos([], [], provider=_UnavailableProvider(),

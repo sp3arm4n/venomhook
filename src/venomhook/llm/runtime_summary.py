@@ -230,16 +230,12 @@ def summarize_runtime_log(
             return None, stats
         try:
             budget.charge(response)
-        except BudgetExhausted:
+        except BudgetExhausted as e:
             stats.skipped_budget = True
             stats.invoked = True
             stats.new_call = True
-            if cache is not None:
-                cache.put(request, response)
-            cleaned = parse_runtime_summary_response(response.text)
-            if cleaned is None:
-                stats.skipped_model_declined = True
-            return cleaned, stats
+            logger.warning("llm-report budget overrun: %s", e)
+            return None, stats
         stats.invoked = True
         stats.new_call = True
         if cache is not None:

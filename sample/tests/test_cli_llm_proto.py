@@ -51,7 +51,7 @@ class CliUseLLMProtoTest(unittest.TestCase):
         # Build options directly to confirm shared runtime: same provider,
         # same budget object, same cache object across both options.
         import argparse
-        from venomhook.cli import _build_llm_options
+        from venomhook.cli import _build_llm_options, _close_llm_option_caches
 
         with tempfile.TemporaryDirectory() as tmp:
             args = argparse.Namespace(
@@ -66,14 +66,17 @@ class CliUseLLMProtoTest(unittest.TestCase):
                 no_llm_cache=False,
             )
             tagging, proto, flow, recovery = _build_llm_options(args)
-            self.assertIsNotNone(tagging)
-            self.assertIsNotNone(proto)
-            self.assertIsNone(flow)
-            self.assertIsNone(recovery)
-            # Same instances — single budget cap shared across both points.
-            self.assertIs(tagging.provider, proto.provider)
-            self.assertIs(tagging.budget, proto.budget)
-            self.assertIs(tagging.cache, proto.cache)
+            try:
+                self.assertIsNotNone(tagging)
+                self.assertIsNotNone(proto)
+                self.assertIsNone(flow)
+                self.assertIsNone(recovery)
+                # Same instances — single budget cap shared across both points.
+                self.assertIs(tagging.provider, proto.provider)
+                self.assertIs(tagging.budget, proto.budget)
+                self.assertIs(tagging.cache, proto.cache)
+            finally:
+                _close_llm_option_caches(tagging, proto, flow, recovery)
 
 
 if __name__ == "__main__":

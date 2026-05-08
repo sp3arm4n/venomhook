@@ -7,7 +7,7 @@ Covers:
       fallback), JNI symbol vs unnamed, role metadata
     - describe_flows: rule-first (skips already-described), JNI gating
       (non-JNI specs skipped), happy path with/without bridge, cache,
-      budget, unavailable, provider failure
+      budget refusal / post-charge overrun, unavailable, provider failure
 """
 
 from __future__ import annotations
@@ -258,18 +258,18 @@ class DescribeFlowsHappyPathTest(unittest.TestCase):
 class DescribeFlowsCacheTest(unittest.TestCase):
     def test_cache_hit_no_provider_call(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            cache = LLMCache(Path(td) / "llm.sqlite3")
-            spec = _spec_jni()
-            fn = _function()
-            req = build_flow_request(spec, fn)
-            cache.put(req, LLMResponse(
-                text="Cached description sentence.",
-                input_tokens=10, output_tokens=5,
-                provider="canned", model="canned-1",
-            ))
-            prov = _CannedProvider("UNUSED")
-            stats = describe_flows([spec], [fn], provider=prov,
-                                   budget=TokenBudget(cap=10000), cache=cache)
+            with LLMCache(Path(td) / "llm.sqlite3") as cache:
+                spec = _spec_jni()
+                fn = _function()
+                req = build_flow_request(spec, fn)
+                cache.put(req, LLMResponse(
+                    text="Cached description sentence.",
+                    input_tokens=10, output_tokens=5,
+                    provider="canned", model="canned-1",
+                ))
+                prov = _CannedProvider("UNUSED")
+                stats = describe_flows([spec], [fn], provider=prov,
+                                       budget=TokenBudget(cap=10000), cache=cache)
             self.assertEqual(stats.cached_hits, 1)
             self.assertEqual(stats.new_calls, 0)
             self.assertEqual(prov.calls, [])
@@ -307,6 +307,23 @@ class DescribeFlowsFailureModeTest(unittest.TestCase):
         self.assertEqual(stats.skipped_budget, 1)
         self.assertEqual(stats.new_calls, 0)
         self.assertEqual(prov.calls, [])
+
+    def test_charge_overrun_discards_response_and_stops(self) -> None:
+        specs = [_spec_jni(offset=0x1000), _spec_jni(offset=0x2000)]
+        prov = _CannedProvider("Description.", in_t=10000, out_t=10000)
+        budget = TokenBudget(cap=30000)
+        stats = describe_flows(
+            specs,
+            [_function(rva=0x1000), _function(rva=0x2000)],
+            provider=prov,
+            budget=budget,
+        )
+        self.assertEqual(stats.new_calls, 2)
+        self.assertEqual(stats.skipped_budget, 1)
+        self.assertEqual(stats.descriptions_filled, 1)
+        self.assertEqual(specs[0].description, "Description.")
+        self.assertIsNone(specs[1].description)
+        self.assertEqual(budget.spent, 20000)
 
     def test_empty_input_no_op(self) -> None:
         stats = describe_flows([], [], provider=_UnavailableProvider(),

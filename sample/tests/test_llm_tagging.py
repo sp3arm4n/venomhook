@@ -9,7 +9,7 @@ Covers:
       response — exercises the silent-no-op path) and a controlled
       stub provider returning canned tag lines (full apply path)
     - tag_endpoints with cache hit (no provider call)
-    - tag_endpoints budget refusal (skipped_budget incremented)
+    - tag_endpoints budget refusal / post-charge overrun (skipped_budget incremented)
     - tag_endpoints provider not available (skipped_unavailable for all)
     - tag_endpoints provider raises (failed counter, no exception out)
     - tag_endpoints applies semantic: prefix and llm: reason prefix,
@@ -224,22 +224,22 @@ class TagEndpointsHappyPathTest(unittest.TestCase):
 class TagEndpointsCacheTest(unittest.TestCase):
     def test_cache_hit_skips_provider_call(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            cache = LLMCache(Path(td) / "llm.sqlite3")
-            ep = _endpoint()
-            fn = _function()
-            req = build_tagging_request(ep, fn)
-            cache.put(req, LLMResponse(
-                text="login-handler: cached\n",
-                input_tokens=10, output_tokens=5,
-                provider="canned", model="canned-1",
-            ))
-            # Provider would raise if called — proves cache hit short-circuits.
-            stats = tag_endpoints(
-                [ep], [fn],
-                provider=_BoomProvider() if False else _CannedProvider("UNUSED", model="canned-1"),
-                budget=TokenBudget(cap=10000),
-                cache=cache,
-            )
+            with LLMCache(Path(td) / "llm.sqlite3") as cache:
+                ep = _endpoint()
+                fn = _function()
+                req = build_tagging_request(ep, fn)
+                cache.put(req, LLMResponse(
+                    text="login-handler: cached\n",
+                    input_tokens=10, output_tokens=5,
+                    provider="canned", model="canned-1",
+                ))
+                # Provider would raise if called — proves cache hit short-circuits.
+                stats = tag_endpoints(
+                    [ep], [fn],
+                    provider=_BoomProvider() if False else _CannedProvider("UNUSED", model="canned-1"),
+                    budget=TokenBudget(cap=10000),
+                    cache=cache,
+                )
             self.assertEqual(stats.cached_hits, 1)
             self.assertEqual(stats.new_calls, 0)
             self.assertEqual(stats.total_tags_added, 1)
@@ -258,7 +258,7 @@ class TagEndpointsBudgetTest(unittest.TestCase):
         self.assertEqual(stats.total_tags_added, 0)
         self.assertEqual(prov.calls, [])
 
-    def test_charge_overrun_marks_skipped_and_stops(self) -> None:
+    def test_charge_overrun_discards_response_and_stops(self) -> None:
         # Pre-flight passes (low estimate) but actual usage blows the cap.
         ep1 = _endpoint(rva=0x1000)
         ep2 = _endpoint(rva=0x2000)
@@ -274,13 +274,13 @@ class TagEndpointsBudgetTest(unittest.TestCase):
         # First call's actual usage = 20000, fits within 30000 -> applies + new_calls=1
         # Second call: pre-flight estimate is small -> can_afford returns True for
         # input estimate, but charge of another 20000 would push to 40000 > 30000.
-        # So second call's charge raises BudgetExhausted -> skipped_budget=1,
-        # but tags from that response are still applied to ep2.
+        # So second call's charge raises BudgetExhausted -> skipped_budget=1.
+        # The over-budget response is discarded instead of being applied.
         self.assertEqual(stats.new_calls, 2)
-        self.assertGreaterEqual(stats.skipped_budget, 1)
-        # Both endpoints got their tags applied
+        self.assertEqual(stats.skipped_budget, 1)
         self.assertIn("semantic:login-handler", ep1.tags)
-        self.assertIn("semantic:login-handler", ep2.tags)
+        self.assertNotIn("semantic:login-handler", ep2.tags)
+        self.assertEqual(budget.spent, 20000)
 
 
 class TagEndpointsUnavailableProviderTest(unittest.TestCase):

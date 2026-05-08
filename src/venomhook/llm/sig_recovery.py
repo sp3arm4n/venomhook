@@ -253,7 +253,7 @@ def recover_sigs(
 
     fn_by_rva = _index_functions_by_rva(functions)
 
-    for spec in eligible:
+    for idx, spec in enumerate(eligible):
         function = fn_by_rva.get(spec.offset)
         request = build_recovery_request(spec, function)
 
@@ -279,13 +279,14 @@ def recover_sigs(
                 continue
             try:
                 budget.charge(response)
-            except BudgetExhausted:
-                stats.skipped_budget += 1
-                if cache is not None:
-                    cache.put(request, response)
+            except BudgetExhausted as e:
                 stats.new_calls += 1
-                _apply_recovery(spec, response.text, stats)
-                continue
+                stats.skipped_budget += len(eligible) - idx
+                logger.warning(
+                    "llm-recovery budget overrun for %s@%s: %s",
+                    spec.module, hex(spec.offset), e,
+                )
+                break
             stats.new_calls += 1
             if cache is not None:
                 cache.put(request, response)

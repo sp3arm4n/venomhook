@@ -11,7 +11,7 @@ Covers:
         * cached path -> cached_hit=True, no provider call
         * unavailable provider -> skipped_unavailable
         * provider failure -> failed=True
-        * budget pre-flight -> skipped_budget
+        * budget pre-flight / post-charge overrun -> skipped_budget
         * SKIP response -> skipped_model_declined
 """
 
@@ -225,20 +225,37 @@ class SummarizeRuntimeLogTest(unittest.TestCase):
         self.assertTrue(stats.skipped_budget)
         self.assertEqual(prov.calls, [])
 
+    def test_charge_overrun_discards_summary(self) -> None:
+        prov = _CannedProvider(
+            "This summary should not be surfaced.",
+            in_t=10000,
+            out_t=10000,
+        )
+        budget = TokenBudget(cap=15000)
+        result, stats = summarize_runtime_log(
+            _summary(), provider=prov, budget=budget,
+        )
+        self.assertIsNone(result)
+        self.assertTrue(stats.invoked)
+        self.assertTrue(stats.new_call)
+        self.assertTrue(stats.skipped_budget)
+        self.assertFalse(stats.skipped_model_declined)
+        self.assertEqual(budget.spent, 0)
+
     def test_cache_hit_no_provider_call(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            cache = LLMCache(Path(td) / "llm.sqlite3")
-            req = build_runtime_summary_request(_summary())
-            cache.put(req, LLMResponse(
-                text="cached analyst paragraph",
-                input_tokens=10, output_tokens=5,
-                provider="canned", model="canned-1",
-            ))
-            prov = _CannedProvider("UNUSED")
-            result, stats = summarize_runtime_log(
-                _summary(), provider=prov,
-                budget=TokenBudget(cap=10000), cache=cache,
-            )
+            with LLMCache(Path(td) / "llm.sqlite3") as cache:
+                req = build_runtime_summary_request(_summary())
+                cache.put(req, LLMResponse(
+                    text="cached analyst paragraph",
+                    input_tokens=10, output_tokens=5,
+                    provider="canned", model="canned-1",
+                ))
+                prov = _CannedProvider("UNUSED")
+                result, stats = summarize_runtime_log(
+                    _summary(), provider=prov,
+                    budget=TokenBudget(cap=10000), cache=cache,
+                )
             self.assertEqual(result, "cached analyst paragraph")
             self.assertTrue(stats.cached_hit)
             self.assertFalse(stats.new_call)

@@ -253,7 +253,7 @@ def infer_protos(
 
     fn_by_rva = _index_functions_by_rva(functions)
 
-    for spec in eligible:
+    for idx, spec in enumerate(eligible):
         function = fn_by_rva.get(spec.offset)
         request = build_proto_request(spec, function)
 
@@ -279,17 +279,14 @@ def infer_protos(
                 continue
             try:
                 budget.charge(response)
-            except BudgetExhausted:
-                stats.skipped_budget += 1
-                if cache is not None:
-                    cache.put(request, response)
+            except BudgetExhausted as e:
                 stats.new_calls += 1
-                # Apply this one response, then stop accepting new ones.
-                proto = parse_proto_response(response.text)
-                if proto is not None:
-                    spec.proto = proto
-                    stats.protos_filled += 1
-                continue
+                stats.skipped_budget += len(eligible) - idx
+                logger.warning(
+                    "llm-proto budget overrun for %s@%s: %s",
+                    spec.module, hex(spec.offset), e,
+                )
+                break
             stats.new_calls += 1
             if cache is not None:
                 cache.put(request, response)

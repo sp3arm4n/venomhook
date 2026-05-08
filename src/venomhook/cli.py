@@ -174,7 +174,7 @@ def _build_llm_options(args: argparse.Namespace):
     single (provider, budget, cache) so the budget cap and cache are
     enforced across *all* enabled Phase 5 points rather than per-point.
 
-    Returns ``(tagging_options, proto_options, flow_options)`` tuple.
+    Returns ``(tagging_options, proto_options, flow_options, recovery_options)`` tuple.
     Each element is None when the corresponding ``--use-llm-*`` flag
     wasn't set.
     """
@@ -216,6 +216,20 @@ def _build_llm_options(args: argparse.Namespace):
         )
 
     return tagging_options, proto_options, flow_options, recovery_options
+
+
+def _close_llm_option_caches(*options: object | None) -> None:
+    """Close each unique LLM cache carried by option objects, if any."""
+    seen: set[int] = set()
+    for option in options:
+        cache = getattr(option, "cache", None)
+        if cache is None:
+            continue
+        cache_id = id(cache)
+        if cache_id in seen:
+            continue
+        seen.add(cache_id)
+        cache.close()
 
 
 def app(argv: list[str] | None = None) -> None:
@@ -656,29 +670,32 @@ def cmd_offset_static(args: argparse.Namespace) -> None:
             project_name=args.ghidra_project_name,
         )
     llm_tagging, llm_proto, llm_flow, llm_recovery = _build_llm_options(args)
-    pipeline = StaticPipeline(
-        top_n=args.top,
-        score_config=score_cfg,
-        sig_max_bytes=args.sig_max_bytes,
-        ghidra_runner=ghidra_runner,
-        llm_tagging=llm_tagging,
-        llm_proto=llm_proto,
-        llm_flow=llm_flow,
-        llm_recovery=llm_recovery,
-    )
-    if not args.static_json and not args.binary:
-        raise SystemExit("Provide either --static-json or --binary")
-    hooks = pipeline.run(
-        static_meta=args.static_json,
-        binary=args.binary,
-        out=args.out,
-        report_md=args.report_md,
-        ghidra_runner=ghidra_runner,
-    )
-    if args.out_db:
-        HookSpecStore.save(args.out_db, hooks)
-        logging.info("also wrote HookSpec to %s", args.out_db)
-    logging.info("generated %d HookSpec entries", len(hooks))
+    try:
+        pipeline = StaticPipeline(
+            top_n=args.top,
+            score_config=score_cfg,
+            sig_max_bytes=args.sig_max_bytes,
+            ghidra_runner=ghidra_runner,
+            llm_tagging=llm_tagging,
+            llm_proto=llm_proto,
+            llm_flow=llm_flow,
+            llm_recovery=llm_recovery,
+        )
+        if not args.static_json and not args.binary:
+            raise SystemExit("Provide either --static-json or --binary")
+        hooks = pipeline.run(
+            static_meta=args.static_json,
+            binary=args.binary,
+            out=args.out,
+            report_md=args.report_md,
+            ghidra_runner=ghidra_runner,
+        )
+        if args.out_db:
+            HookSpecStore.save(args.out_db, hooks)
+            logging.info("also wrote HookSpec to %s", args.out_db)
+        logging.info("generated %d HookSpec entries", len(hooks))
+    finally:
+        _close_llm_option_caches(llm_tagging, llm_proto, llm_flow, llm_recovery)
 
 
 def cmd_offset_hook(args: argparse.Namespace) -> None:
@@ -786,11 +803,15 @@ def cmd_offset_report_runtime(args: argparse.Namespace) -> None:
         runtime = _build_llm_runtime(args)
         if runtime is not None:
             provider, budget, cache = runtime
-            from venomhook.llm.runtime_summary import summarize_runtime_log
-            analyst_summary, stats = summarize_runtime_log(
-                summary, provider=provider, budget=budget, cache=cache,
-            )
-            logging.info(stats.as_summary_line())
+            try:
+                from venomhook.llm.runtime_summary import summarize_runtime_log
+                analyst_summary, stats = summarize_runtime_log(
+                    summary, provider=provider, budget=budget, cache=cache,
+                )
+                logging.info(stats.as_summary_line())
+            finally:
+                if cache is not None:
+                    cache.close()
 
     if args.out_md:
         write_markdown_summary(summary, args.out_md, analyst_summary=analyst_summary)

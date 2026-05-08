@@ -244,7 +244,7 @@ def tag_endpoints(
 
     fn_by_rva = _index_functions_by_rva(functions)
 
-    for endpoint in endpoints:
+    for idx, endpoint in enumerate(endpoints):
         function = fn_by_rva.get(endpoint.rva)
         request = build_tagging_request(endpoint, function)
 
@@ -270,20 +270,14 @@ def tag_endpoints(
                 continue
             try:
                 budget.charge(response)
-            except BudgetExhausted:
-                stats.skipped_budget += 1
-                # The call succeeded and the response is still useful for
-                # *this* endpoint; cache it but stop applying after this one.
-                if cache is not None:
-                    cache.put(request, response)
+            except BudgetExhausted as e:
                 stats.new_calls += 1
-                added = _apply_tags(
-                    endpoint,
-                    parse_tagging_response(response.text, limit=max_tags_per_endpoint),
+                stats.skipped_budget += len(endpoints) - idx
+                logger.warning(
+                    "llm-tagging budget overrun for endpoint %s@%s: %s",
+                    endpoint.module, hex(endpoint.rva), e,
                 )
-                stats.total_tags_added += added
-                # Subsequent endpoints will fail the can_afford_request check.
-                continue
+                break
             stats.new_calls += 1
             if cache is not None:
                 cache.put(request, response)

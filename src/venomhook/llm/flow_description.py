@@ -278,7 +278,7 @@ def describe_flows(
         )
         return stats
 
-    for spec in eligible:
+    for idx, spec in enumerate(eligible):
         function = fn_by_rva.get(spec.offset)
         bridge = bridge_by_symbol.get(spec.name or "")
         request = build_flow_request(spec, function, bridge)
@@ -305,18 +305,14 @@ def describe_flows(
                 continue
             try:
                 budget.charge(response)
-            except BudgetExhausted:
-                stats.skipped_budget += 1
-                if cache is not None:
-                    cache.put(request, response)
+            except BudgetExhausted as e:
                 stats.new_calls += 1
-                desc = parse_flow_response(response.text)
-                if desc is not None:
-                    spec.description = desc
-                    stats.descriptions_filled += 1
-                else:
-                    stats.skipped_model_declined += 1
-                continue
+                stats.skipped_budget += len(eligible) - idx
+                logger.warning(
+                    "llm-flow budget overrun for %s@%s: %s",
+                    spec.module, hex(spec.offset), e,
+                )
+                break
             stats.new_calls += 1
             if cache is not None:
                 cache.put(request, response)
