@@ -124,9 +124,9 @@ class AndroidAuditCliTests(unittest.TestCase):
                     "--no-jadx",
                 ])
 
-        self.assertIn("AndroidManifest audit", out)
+        self.assertIn("AndroidManifest 감사", out)
         self.assertIn("MANIFEST-001", out)
-        self.assertIn("PoC bundle", out)
+        self.assertIn("PoC 번들", out)
         # PoC commands include the jdb attach line
         self.assertIn("adb forward", out)
 
@@ -202,9 +202,9 @@ class AndroidAuditCliTests(unittest.TestCase):
 
             binary_meta.assert_not_called()
 
-        self.assertIn("AndroidManifest audit", out)
+        self.assertIn("AndroidManifest 감사", out)
         self.assertIn("MANIFEST-001", out)
-        self.assertIn("PoC bundle", out)
+        self.assertIn("PoC 번들", out)
 
     def test_poc_bundle_dir_writes_runnable_scripts(self):
         with tempfile.TemporaryDirectory() as td:

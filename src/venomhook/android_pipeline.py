@@ -216,48 +216,46 @@ def analyze_apk(
     so_meta: Optional[BinaryMeta] = None
 
     if not apk_meta.abis:
-        msg = f"APK contains no native libraries under lib/<abi>/: {apk}"
+        msg = f"APK lib/<abi>/ 하위에 네이티브 라이브러리가 없습니다: {apk}"
         if require_native:
             raise AndroidPipelineError(msg)
-        warnings.append(f"{msg}; native analysis skipped")
+        warnings.append(f"{msg} — 네이티브 분석을 건너뜁니다")
     else:
         # ----- Step 2: ABI selection + .so extraction -----
         try:
             selected_abi = select_abi(apk_meta, abi)
         except ApkExtractError as e:
-            msg = f"ABI selection failed: {e}"
+            msg = f"ABI 선택 실패: {e}"
             if require_native:
                 raise AndroidPipelineError(msg) from e
-            warnings.append(f"{msg}; native analysis skipped")
+            warnings.append(f"{msg} — 네이티브 분석을 건너뜁니다")
 
         if selected_abi is not None:
             so_dir = work / "lib"
             try:
                 so_path = extract_native_lib(apk, selected_abi, lib_name, so_dir)
             except ApkExtractError as e:
-                msg = f".so extraction failed (abi={selected_abi}, lib={lib_name}): {e}"
+                msg = f".so 추출 실패 (abi={selected_abi}, lib={lib_name}): {e}"
                 if require_native:
                     raise AndroidPipelineError(msg) from e
-                warnings.append(f"{msg}; native analysis skipped")
+                warnings.append(f"{msg} — 네이티브 분석을 건너뜁니다")
 
-            # The pipeline analyzes one .so per run by design (kept simple to
-            # bound memory and runtime). When the APK ships multiple libs in
-            # the chosen ABI, the unselected ones become a silent gap in JNI
-            # bridge correlation — operators may see a high "unmatched" rate
-            # for natives that actually live in libsqlcipher / libssl /
-            # whatever third-party lib was bundled. Surface a warning so the
-            # gap is visible and the operator knows to re-run with --apk-lib
-            # for a thorough sweep.
+            # 본 파이프라인은 의도적으로 .so 1개만 분석합니다 (메모리/시간 상한
+            # 유지). 같은 ABI에 .so가 여러 개 있으면 선택 안 된 .so는 JNI 브리지
+            # 매칭에서 빠지는데, 운영자 입장에서는 "unmatched"가 많아 보이는데
+            # 그 이유를 모름. libsqlcipher / libssl 등 서드파티 .so에서 로드되는
+            # 클래스의 native 메소드가 그렇게 됩니다. 경고를 명시해 운영자가
+            # --apk-lib로 다시 실행할 수 있도록 안내.
             siblings = apk_meta.native_libs.get(selected_abi, [])
             if so_path is not None and len(siblings) > 1:
                 analyzed = so_path.name
                 others = [s for s in siblings if s != analyzed]
                 warnings.append(
-                    f"only {analyzed!r} was analyzed; the APK ships "
-                    f"{len(siblings)} libs in {selected_abi!r} "
-                    f"({', '.join(others)}). Re-run with --apk-lib <name> "
-                    "to cover them — JNI bridges declared from classes "
-                    "loading those libs will appear 'unmatched' here."
+                    f"'{analyzed}'만 분석되었습니다. APK는 '{selected_abi}' "
+                    f"ABI에 {len(siblings)}개의 .so를 포함하고 있습니다 "
+                    f"({', '.join(others)}). 빠진 .so를 분석하려면 --apk-lib "
+                    "<이름>으로 재실행하세요. 그쪽 .so를 로드하는 클래스의 JNI "
+                    "브리지는 본 보고서에서 'unmatched'로 표시됩니다."
                 )
 
         # ----- Step 3: BinaryMeta of the .so (REQUIRED for JNI correlation) -----
@@ -265,10 +263,10 @@ def analyze_apk(
             try:
                 so_meta = extract_binary_meta(so_path)
             except BinaryMetaError as e:
-                msg = f"binary_meta failed on {so_path}: {e}"
+                msg = f"{so_path}에 대한 binary_meta 추출 실패: {e}"
                 if require_native:
                     raise AndroidPipelineError(msg) from e
-                warnings.append(f"{msg}; native analysis skipped")
+                warnings.append(f"{msg} — 네이티브 분석을 건너뜁니다")
 
     # ----- Step 4: AndroidManifest decode (optional) -----
     app_meta: Optional[AndroidAppMeta] = None
@@ -277,12 +275,12 @@ def analyze_apk(
         try:
             _, app_meta = decode_apk(apk, apktool_out, config=apktool_config)
         except ApktoolNotFoundError as e:
-            msg = f"apktool unavailable, skipping manifest decode: {e}"
+            msg = f"apktool을 사용할 수 없습니다 — manifest 디코드를 건너뜁니다: {e}"
             if fail_on_missing_tools:
                 raise AndroidPipelineError(msg) from e
             warnings.append(msg)
         except ApkDecoderError as e:
-            warnings.append(f"apktool decode failed (continuing): {e}")
+            warnings.append(f"apktool 디코드 실패 (계속 진행): {e}")
 
     # ----- Step 5: jadx decompile + native method extract (optional) -----
     java_natives: list[JavaNativeMethod] = []
@@ -291,12 +289,12 @@ def analyze_apk(
         try:
             _, java_natives = decompile_apk(apk, jadx_out, config=jadx_config)
         except JadxNotFoundError as e:
-            msg = f"jadx unavailable, skipping Java decompile: {e}"
+            msg = f"jadx를 사용할 수 없습니다 — Java 디컴파일을 건너뜁니다: {e}"
             if fail_on_missing_tools:
                 raise AndroidPipelineError(msg) from e
             warnings.append(msg)
         except JadxError as e:
-            warnings.append(f"jadx decompile failed (continuing): {e}")
+            warnings.append(f"jadx 디컴파일 실패 (계속 진행): {e}")
 
     # ----- Step 6: JNI bridge construction + correlation -----
     bridges: list[JniBridge] = []

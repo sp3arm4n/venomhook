@@ -246,24 +246,33 @@ def _render_summary_dl(analysis: AndroidAnalysis) -> str:
     app = analysis.app_meta
     rows: list[tuple[str, str]] = []
     if app:
-        rows.append(("Package", escape(app.package_name)))
-    rows.append(("APK", escape(apk.name)))
+        rows.append(("패키지", escape(app.package_name)))
+    rows.append(("APK 파일", escape(apk.name)))
     rows.append(("SHA-256", escape(apk.hash)))
     if apk.abis:
-        rows.append(("ABIs", ", ".join(escape(a) for a in apk.abis)))
+        rows.append(("ABI 목록", ", ".join(escape(a) for a in apk.abis)))
     if analysis.selected_abi:
-        rows.append(("Analyzed ABI", escape(analysis.selected_abi)))
+        rows.append(("분석된 ABI", escape(analysis.selected_abi)))
     if app:
-        rows.append(("Debuggable", "yes" if app.debuggable else "no"))
-        rows.append(("Allow backup", "yes" if app.allow_backup else "no"))
+        rows.append(("디버깅 가능", "예" if app.debuggable else "아니오"))
+        rows.append(("백업 허용", "예" if app.allow_backup else "아니오"))
     so = analysis.so_meta
     if so:
-        rows.append(("Native lib", f"{escape(so.name)} ({escape(so.format)}/{escape(so.arch)})"))
-        rows.append(("Native imports / exports", f"{len(so.imports)} / {len(so.exports)}"))
+        rows.append(("네이티브 라이브러리", f"{escape(so.name)} ({escape(so.format)}/{escape(so.arch)})"))
+        rows.append(("네이티브 imports / exports", f"{len(so.imports)} / {len(so.exports)}"))
     if analysis.bridges:
         matched = sum(1 for b in analysis.bridges if b.matched_symbol)
-        rows.append(("JNI bridges", f"{matched} matched / {len(analysis.bridges)} declared"))
+        rows.append(("JNI 브리지", f"{matched}개 매칭 / {len(analysis.bridges)}개 선언"))
     return "<dl>" + "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in rows) + "</dl>"
+
+
+_SEVERITY_LABEL_KO = {
+    "critical": "심각",
+    "high": "높음",
+    "medium": "중간",
+    "low": "낮음",
+    "info": "정보",
+}
 
 
 def _render_severity_bar(report: AndroidAuditReport) -> str:
@@ -272,17 +281,18 @@ def _render_severity_bar(report: AndroidAuditReport) -> str:
         s = f.severity.lower()
         counts[s] = counts.get(s, 0) + 1
     if not counts:
-        return '<div class="severity-bar"><span class="sev-chip sev-info"><span class="count">0</span> findings</span></div>'
+        return '<div class="severity-bar"><span class="sev-chip sev-info"><span class="count">0</span> 건</span></div>'
     chips = []
     for sev in ("critical", "high", "medium", "low", "info"):
         n = counts.get(sev, 0)
         if n == 0:
             continue
+        label = _SEVERITY_LABEL_KO.get(sev, sev)
         chips.append(
             f'<span class="sev-chip sev-{sev}">'
-            f'<span class="count">{n}</span> {sev}</span>'
+            f'<span class="count">{n}</span> {label}</span>'
         )
-    chips.append(f'<span class="sev-chip"><span class="count">{len(report.findings)}</span> total</span>')
+    chips.append(f'<span class="sev-chip"><span class="count">{len(report.findings)}</span> 합계</span>')
     return '<div class="severity-bar">' + "".join(chips) + "</div>"
 
 
@@ -297,7 +307,7 @@ def _render_poc(link: _PocLink) -> str:
     if link.href is not None:
         file_link = (
             f'<a class="file-link" href="{escape(link.href, quote=True)}" '
-            f'title="open the runnable artifact">{escape(Path(link.href).name)}</a>'
+            f'title="실행 가능 아티팩트 열기">{escape(Path(link.href).name)}</a>'
         )
     body_parts: list[str] = []
     if a.description:
@@ -307,17 +317,17 @@ def _render_poc(link: _PocLink) -> str:
         body_parts.append(f"<pre>{escape(cmd_text)}</pre>")
     if a.expected_evidence:
         body_parts.append(
-            f"<p><strong>Expected:</strong> {escape(a.expected_evidence)}</p>"
+            f"<p><strong>예상 결과:</strong> {escape(a.expected_evidence)}</p>"
         )
     if a.notes:
-        body_parts.append(f"<p><strong>Notes:</strong> {escape(a.notes)}</p>")
+        body_parts.append(f"<p><strong>비고:</strong> {escape(a.notes)}</p>")
     if a.references:
         body_parts.append(
-            "<p><strong>Refs:</strong> "
+            "<p><strong>참고:</strong> "
             + ", ".join(escape(r) for r in a.references)
             + "</p>"
         )
-    body_html = "".join(body_parts) or "<p><em>(no body recorded)</em></p>"
+    body_html = "".join(body_parts) or "<p><em>(내용이 기록되지 않았습니다)</em></p>"
     return (
         f'<details class="poc">'
         f'<summary>'
@@ -335,7 +345,7 @@ def _render_finding_card(
     pocs: list[_PocLink],
 ) -> str:
     sev_cls = _severity_class(finding.severity)
-    sev_label = escape(finding.severity.upper())
+    sev_label = escape(_SEVERITY_LABEL_KO.get(finding.severity.lower(), finding.severity).upper())
     rule_id = escape(finding.rule_id)
     title = escape(finding.title)
     comp_html = (
@@ -347,7 +357,7 @@ def _render_finding_card(
         body_parts.append(f'<div class="description">{escape(finding.detail)}</div>')
     if finding.remediation:
         body_parts.append(
-            '<div class="description"><strong>Remediation:</strong> '
+            '<div class="description"><strong>대응 방안:</strong> '
             f'{escape(finding.remediation)}</div>'
         )
     desc = "".join(body_parts)
@@ -362,16 +372,16 @@ def _render_finding_card(
         items = "".join(_render_poc(p) for p in pocs)
         poc_section = (
             f'<div class="pocs">'
-            f'<h4>Proof-of-Concept ({len(pocs)})</h4>'
+            f'<h4>개념 증명(PoC) {len(pocs)}건</h4>'
             f'{items}'
             f"</div>"
         )
     else:
         poc_section = (
             '<div class="pocs">'
-            '<h4>Proof-of-Concept (0)</h4>'
+            '<h4>개념 증명(PoC) 0건</h4>'
             '<p style="color: var(--text-muted); font-size: 0.85em; margin: 4px 0;">'
-            'No PoC artifact was generated for this rule. Manual review required.'
+            '본 룰에는 자동 생성된 PoC 아티팩트가 없습니다. 수동 검토가 필요합니다.'
             "</p></div>"
         )
     return (
@@ -392,11 +402,17 @@ def _render_finding_card(
 def _render_components_table(components: list[AndroidComponent]) -> str:
     if not components:
         return ""
+    type_korean = {
+        "activity": "액티비티",
+        "service": "서비스",
+        "receiver": "리시버",
+        "provider": "프로바이더",
+    }
     rows = []
     for c in components:
         exported_html = (
-            '<span class="yes">yes</span>' if c.exported
-            else '<span class="no">no</span>'
+            '<span class="yes">예</span>' if c.exported
+            else '<span class="no">아니오</span>'
         )
         perm = escape(c.permission) if c.permission else "—"
         intents = (
@@ -405,7 +421,7 @@ def _render_components_table(components: list[AndroidComponent]) -> str:
         ) if c.intent_actions else "—"
         rows.append(
             f"<tr>"
-            f"<td>{escape(c.type)}</td>"
+            f"<td>{escape(type_korean.get(c.type, c.type))}</td>"
             f'<td class="fqn">{escape(c.name)}</td>'
             f"<td>{exported_html}</td>"
             f"<td>{perm}</td>"
@@ -414,7 +430,7 @@ def _render_components_table(components: list[AndroidComponent]) -> str:
         )
     return (
         '<table class="tbl">'
-        "<thead><tr><th>type</th><th>name</th><th>exported</th><th>permission</th><th>intent-filter actions</th></tr></thead>"
+        "<thead><tr><th>종류</th><th>이름</th><th>외부 노출</th><th>권한</th><th>intent-filter 액션</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
     )
@@ -430,7 +446,7 @@ def _render_bridges_table(bridges: list[JniBridge], limit: int = 50) -> str:
     for b in ordered[:limit]:
         jm = b.java_method
         sym = escape(b.matched_symbol) if b.matched_symbol else (
-            '<span class="no">unmatched</span>'
+            '<span class="no">미매칭</span>'
         )
         rows.append(
             f"<tr>"
@@ -443,12 +459,12 @@ def _render_bridges_table(bridges: list[JniBridge], limit: int = 50) -> str:
     if len(bridges) > limit:
         note = (
             f'<p style="color: var(--text-muted); font-size: 0.85em; margin: 6px 0 0 0;">'
-            f"Showing {limit} of {len(bridges)} bridges "
-            f"({len(matched)} matched first). Full list available in JSON.</p>"
+            f"전체 {len(bridges)}개 중 상위 {limit}개 표시 "
+            f"({len(matched)}개 매칭 우선). 전체 목록은 JSON 결과에서 확인하세요.</p>"
         )
     return (
         '<table class="tbl">'
-        "<thead><tr><th>java method</th><th>args</th><th>matched native symbol</th></tr></thead>"
+        "<thead><tr><th>Java 메서드</th><th>인자 수</th><th>매칭된 네이티브 심볼</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
         f"{note}"
@@ -459,7 +475,7 @@ def _render_warnings(warnings: list[str]) -> str:
     if not warnings:
         return ""
     items = "".join(f"<li>{escape(w)}</li>" for w in warnings)
-    return f'<div class="warnings"><strong>Warnings</strong><ul>{items}</ul></div>'
+    return f'<div class="warnings"><strong>경고</strong><ul>{items}</ul></div>'
 
 
 def render_audit_html(
@@ -476,7 +492,7 @@ def render_audit_html(
     ``out_path.parent``. With either missing, PoCs are still embedded in
     the cards but without a download link.
     """
-    title_html = escape(title) if title else "VenomHook Audit Report"
+    title_html = escape(title) if title else "VenomHook 감사 보고서"
     poc_index = _group_pocs_by_finding(
         list(analysis.pocs),
         Path(poc_bundle_dir) if poc_bundle_dir else None,
@@ -496,22 +512,21 @@ def render_audit_html(
                 _render_finding_card(finding, pocs_for_this)
             )
 
-    # Defensive: surface any PoC whose (rule_id, component) didn't match a
-    # finding so it isn't silently dropped from the report. Should be rare
-    # — fires when poc_generator and manifest_audit disagree on whether a
-    # rule attaches to a component or app-level. Visible in the report so
-    # operators can investigate rather than wonder where their PoC went.
+    # 방어적 처리: (rule_id, component)으로 finding과 매칭되지 않은 PoC를
+    # 보고서에서 누락시키지 않도록 별도 섹션으로 노출. poc_generator와
+    # manifest_audit가 룰의 컴포넌트/앱-레벨 분류에서 의견이 갈릴 때 발동.
+    # 운영자가 "PoC가 왜 없지"라고 의심하기보다 직접 확인할 수 있도록 표시.
     orphan_html = ""
     orphan_keys = [k for k in poc_index.keys() if k not in rendered_keys]
     if orphan_keys:
         orphan_html_parts: list[str] = [
             '<div class="warnings" style="margin-top: 16px;">'
-            "<strong>Unmatched PoC artifacts</strong>"
+            "<strong>매칭되지 않은 PoC 아티팩트</strong>"
             '<p style="margin: 6px 0 0 0; font-size: 0.88em;">'
-            "These PoCs did not join any finding by (rule_id, component). "
-            "Listed here so the bundle is exhaustive — investigate whether "
-            "the rule should produce a per-component finding or the PoC "
-            "should be app-level."
+            "(rule_id, component) 기준으로 어떤 finding과도 매칭되지 않은 "
+            "PoC들입니다. 번들 누락 방지를 위해 별도 표시 — 룰이 컴포넌트별 "
+            "finding을 생성해야 하는지 또는 PoC가 앱-레벨이어야 하는지 검토가 "
+            "필요합니다."
             "</p></div>"
         ]
         for key in sorted(orphan_keys, key=lambda k: (k[0], k[1] or "")):
@@ -521,10 +536,10 @@ def render_audit_html(
 
     findings_section = (
         f'<section class="findings-section">'
-        f"<h2>Findings ({len(audit.findings) if audit else 0})</h2>"
+        f"<h2>탐지된 취약점 ({len(audit.findings) if audit else 0}건)</h2>"
         f"{_render_severity_bar(audit) if audit else ''}"
         + ("".join(findings_html_parts) or
-           '<p style="color: var(--text-muted);">No findings.</p>')
+           '<p style="color: var(--text-muted);">탐지된 취약점이 없습니다.</p>')
         + orphan_html
         + "</section>"
     )
@@ -533,7 +548,7 @@ def render_audit_html(
     if analysis.app_meta and analysis.app_meta.components:
         components_section = (
             '<section class="components-section">'
-            f"<h2>Components ({len(analysis.app_meta.components)})</h2>"
+            f"<h2>컴포넌트 ({len(analysis.app_meta.components)}개)</h2>"
             f"{_render_components_table(analysis.app_meta.components)}"
             "</section>"
         )
@@ -543,7 +558,7 @@ def render_audit_html(
         matched_count = sum(1 for b in analysis.bridges if b.matched_symbol)
         bridges_section = (
             '<section class="bridges-section">'
-            f"<h2>JNI Bridges ({matched_count} matched / {len(analysis.bridges)} declared)</h2>"
+            f"<h2>JNI 브리지 ({matched_count}개 매칭 / {len(analysis.bridges)}개 선언)</h2>"
             f"{_render_bridges_table(analysis.bridges)}"
             "</section>"
         )
@@ -552,7 +567,7 @@ def render_audit_html(
 
     return (
         '<!doctype html>'
-        '<html lang="en">'
+        '<html lang="ko">'
         '<head>'
         '<meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -562,14 +577,14 @@ def render_audit_html(
         '<body><div class="container">'
         '<header class="report-head">'
         f"<h1>{title_html}</h1>"
-        '<div class="subtitle">VenomHook android-audit report</div>'
+        '<div class="subtitle">VenomHook android-audit 보고서</div>'
         f"{_render_summary_dl(analysis)}"
         "</header>"
         f"{warnings_html}"
         f"{findings_section}"
         f"{components_section}"
         f"{bridges_section}"
-        '<footer>Generated by venomhook · open this file in any browser · no JavaScript or external assets required.</footer>'
+        '<footer>VenomHook이 생성한 자체 포함 보고서 · 모든 브라우저에서 바로 열림 · JavaScript / 외부 자산 불필요</footer>'
         "</div></body></html>"
     )
 

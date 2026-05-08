@@ -178,7 +178,7 @@ class RenderStructureTest(unittest.TestCase):
 
     def test_components_section_renders_table(self) -> None:
         html = render_audit_html(_stub_analysis())
-        self.assertIn("Components (2)", html)
+        self.assertIn("컴포넌트 (2개)", html)
         self.assertIn("com.demo.bank.LoginActivity", html)
         self.assertIn("com.demo.bank.TrackUserProvider", html)
 
@@ -228,8 +228,8 @@ class PoCEmbeddingTest(unittest.TestCase):
         card_html = html[i_card:next_card] if next_card != -1 else html[i_card:]
         self.assertIn("Invoke exported activity", card_html)
         self.assertIn("Observe intents via Frida", card_html)
-        # Proof-of-Concept (2) header
-        self.assertIn("Proof-of-Concept (2)", card_html)
+        # 개념 증명 카운트 헤더
+        self.assertIn("개념 증명(PoC) 2건", card_html)
 
     def test_finding_with_no_poc_renders_zero_poc_section(self) -> None:
         # MANIFEST-007 has no matching PoC in our stub
@@ -238,8 +238,8 @@ class PoCEmbeddingTest(unittest.TestCase):
         self.assertNotEqual(i007, -1)
         next_section = html.find("</section>", i007)
         card_tail = html[i007:next_section]
-        self.assertIn("Proof-of-Concept (0)", card_tail)
-        self.assertIn("Manual review required", card_tail)
+        self.assertIn("개념 증명(PoC) 0건", card_tail)
+        self.assertIn("수동 검토가 필요합니다", card_tail)
 
     def test_poc_command_text_embedded(self) -> None:
         html = render_audit_html(_stub_analysis())
@@ -297,7 +297,7 @@ class WriteAuditHtmlTest(unittest.TestCase):
             self.assertEqual(result, out)
             self.assertTrue(out.exists())
             text = out.read_text(encoding="utf-8")
-            self.assertIn("VenomHook Audit Report", text)
+            self.assertIn("VenomHook 감사 보고서", text)
             self.assertIn("MANIFEST-001", text)
 
 
@@ -320,13 +320,13 @@ class BridgesSectionTest(unittest.TestCase):
             )
         )
         html = render_audit_html(analysis)
-        self.assertIn("JNI Bridges", html)
+        self.assertIn("JNI 브리지", html)
         self.assertIn("com.demo.bank.Crypto.encrypt", html)
         self.assertIn("Java_com_demo_bank_Crypto_encrypt", html)
 
     def test_bridges_section_omitted_when_empty(self) -> None:
         html = render_audit_html(_stub_analysis())
-        self.assertNotIn("JNI Bridges", html)
+        self.assertNotIn("JNI 브리지", html)
 
 
 if __name__ == "__main__":

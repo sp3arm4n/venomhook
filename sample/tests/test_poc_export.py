@@ -74,11 +74,11 @@ class RenderShTests(unittest.TestCase):
     def test_header_includes_metadata(self):
         out = render_sh(_adb_artifact())
         self.assertIn("MANIFEST-001", out)
-        self.assertIn("severity:    high", out)
-        self.assertIn("package:     com.demo", out)
-        self.assertIn("component:   com.demo.MainActivity", out)
+        self.assertIn("심각도:    high", out)
+        self.assertIn("패키지:    com.demo", out)
+        self.assertIn("컴포넌트:  com.demo.MainActivity", out)
         self.assertIn("CWE-489", out)
-        self.assertIn("expected evidence:", out)
+        self.assertIn("예상 결과:", out)
 
     def test_commands_appear_after_header(self):
         out = render_sh(_adb_artifact())
@@ -92,7 +92,7 @@ class RenderShTests(unittest.TestCase):
 
     def test_no_commands_falls_back_to_echo(self):
         out = render_sh(_adb_artifact(commands=[]))
-        self.assertIn("no commands recorded", out)
+        self.assertIn("기록된 명령이 없습니다", out)
 
 
 class RenderIndexTests(unittest.TestCase):
@@ -103,9 +103,9 @@ class RenderIndexTests(unittest.TestCase):
                                                 severity="medium")]
         names = ["MANIFEST-001-1_a.sh", "MANIFEST-003-2_b.sh"]
         out = render_index(arts, names)
-        self.assertIn("# venomhook PoC bundle", out)
+        self.assertIn("# venomhook PoC 번들", out)
         # New per-recipe table header
-        self.assertIn("| # | kind | recipe | file |", out)
+        self.assertIn("| # | 종류 | 레시피 | 파일 |", out)
         # Finding headings include severity + rule id
         self.assertIn("### [HIGH] MANIFEST-001", out)
         self.assertIn("### [MEDIUM] MANIFEST-003", out)
@@ -147,7 +147,7 @@ class RenderIndexTests(unittest.TestCase):
         arts = [_adb_artifact(rule_id="A1"), _adb_artifact(rule_id="A2")]
         names = ["A1-1_t.sh", "A2-2_t.sh"]
         out = render_index(arts, names)
-        self.assertIn("2 artifacts across 2 findings", out)
+        self.assertIn("아티팩트 2개 (취약점 2건 기준)", out)
 
     def test_component_label_rendered_when_present(self):
         arts = [_adb_artifact(rule_id="MANIFEST-004",
@@ -158,7 +158,7 @@ class RenderIndexTests(unittest.TestCase):
 
     def test_empty_bundle_still_renders(self):
         out = render_index([], [])
-        self.assertIn("0 artifacts", out)
+        self.assertIn("아티팩트 0개", out)
 
 
 class ExportPocsTests(unittest.TestCase):
