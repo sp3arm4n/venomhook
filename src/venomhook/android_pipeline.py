@@ -240,6 +240,26 @@ def analyze_apk(
                     raise AndroidPipelineError(msg) from e
                 warnings.append(f"{msg}; native analysis skipped")
 
+            # The pipeline analyzes one .so per run by design (kept simple to
+            # bound memory and runtime). When the APK ships multiple libs in
+            # the chosen ABI, the unselected ones become a silent gap in JNI
+            # bridge correlation — operators may see a high "unmatched" rate
+            # for natives that actually live in libsqlcipher / libssl /
+            # whatever third-party lib was bundled. Surface a warning so the
+            # gap is visible and the operator knows to re-run with --apk-lib
+            # for a thorough sweep.
+            siblings = apk_meta.native_libs.get(selected_abi, [])
+            if so_path is not None and len(siblings) > 1:
+                analyzed = so_path.name
+                others = [s for s in siblings if s != analyzed]
+                warnings.append(
+                    f"only {analyzed!r} was analyzed; the APK ships "
+                    f"{len(siblings)} libs in {selected_abi!r} "
+                    f"({', '.join(others)}). Re-run with --apk-lib <name> "
+                    "to cover them — JNI bridges declared from classes "
+                    "loading those libs will appear 'unmatched' here."
+                )
+
         # ----- Step 3: BinaryMeta of the .so (REQUIRED for JNI correlation) -----
         if so_path is not None:
             try:
