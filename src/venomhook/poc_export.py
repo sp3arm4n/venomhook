@@ -64,35 +64,48 @@ def _filename_for(idx: int, artifact: PoCArtifact) -> str:
     return f"{artifact.rule_id}-{idx}_{slug}.{ext}"
 
 
+def _split_comment_lines(value: object) -> list[str]:
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    return text.split("\n") or [""]
+
+
+def _comment_field(prefix: str, label: str, value: object) -> list[str]:
+    lines = _split_comment_lines(value)
+    out = [f"{prefix}{label}{lines[0]}"]
+    continuation = " " * len(label)
+    for line in lines[1:]:
+        out.append(f"{prefix}{continuation}{line}")
+    return out
+
+
+def _comment_text(prefix: str, value: object, *, indent: str = "") -> list[str]:
+    return [f"{prefix}{indent}{line}" for line in _split_comment_lines(value)]
+
+
 def _comment_block(artifact: PoCArtifact, prefix: str = "# ") -> list[str]:
     """Header comment block shared by sh/frida renderers (different prefixes)."""
-    lines = [
-        f"{prefix}venomhook PoC 아티팩트",
-        f"{prefix}룰:        {artifact.rule_id}",
-        f"{prefix}제목:      {artifact.title}",
-        f"{prefix}심각도:    {artifact.severity}",
-        f"{prefix}종류:      {artifact.kind}",
-        f"{prefix}패키지:    {artifact.package_name}",
-    ]
+    lines = [f"{prefix}venomhook PoC 아티팩트"]
+    lines.extend(_comment_field(prefix, "룰:        ", artifact.rule_id))
+    lines.extend(_comment_field(prefix, "제목:      ", artifact.title))
+    lines.extend(_comment_field(prefix, "심각도:    ", artifact.severity))
+    lines.extend(_comment_field(prefix, "종류:      ", artifact.kind))
+    lines.extend(_comment_field(prefix, "패키지:    ", artifact.package_name))
     if artifact.component:
-        lines.append(f"{prefix}컴포넌트:  {artifact.component}")
+        lines.extend(_comment_field(prefix, "컴포넌트:  ", artifact.component))
     if artifact.description:
         lines.append(f"{prefix}")
-        for ln in artifact.description.splitlines():
-            lines.append(f"{prefix}{ln}")
+        lines.extend(_comment_text(prefix, artifact.description))
     if artifact.expected_evidence:
         lines.append(f"{prefix}")
         lines.append(f"{prefix}예상 결과:")
-        for ln in artifact.expected_evidence.splitlines():
-            lines.append(f"{prefix}  {ln}")
+        lines.extend(_comment_text(prefix, artifact.expected_evidence, indent="  "))
     if artifact.notes:
         lines.append(f"{prefix}")
         lines.append(f"{prefix}비고:")
-        for ln in artifact.notes.splitlines():
-            lines.append(f"{prefix}  {ln}")
+        lines.extend(_comment_text(prefix, artifact.notes, indent="  "))
     if artifact.references:
         lines.append(f"{prefix}")
-        lines.append(f"{prefix}참고: {', '.join(artifact.references)}")
+        lines.extend(_comment_field(prefix, "참고: ", ", ".join(artifact.references)))
     return lines
 
 
@@ -145,6 +158,18 @@ def _render_info(artifact: PoCArtifact) -> str:
 _SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 
+def _md_text(value: object) -> str:
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    return " ".join(text.split("\n")).replace("|", r"\|")
+
+
+def _md_code(value: object) -> str:
+    text = _md_text(value)
+    longest = max((len(m.group(0)) for m in re.finditer(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    return f"{fence}{text}{fence}"
+
+
 def render_index(artifacts: list[PoCArtifact], filenames: list[str]) -> str:
     """Markdown README listing every exported artifact, grouped by finding.
 
@@ -194,17 +219,17 @@ def render_index(artifacts: list[PoCArtifact], filenames: list[str]) -> str:
         # description; downstream PoCs in the same group may have their
         # own per-recipe titles. Use the rule_id + component as the
         # canonical group label so it stays stable.
-        comp_suffix = f" [`{component}`]" if component else ""
-        lines.append(f"### [{sev}] {rule_id}{comp_suffix}")
+        comp_suffix = f" [{_md_code(component)}]" if component else ""
+        lines.append(f"### [{_md_text(sev)}] {_md_text(rule_id)}{comp_suffix}")
         lines.append("")
-        lines.append(f"_{title}_" if title else "")
+        lines.append(f"_{_md_text(title)}_" if title else "")
         lines.append("")
         lines.append("| # | 종류 | 레시피 | 파일 |")
         lines.append("|---|------|--------|------|")
         for idx, a, fn in entries:
             lines.append(
-                f"| {idx} | {a.kind} | {a.title} | "
-                f"[`{fn}`](./{fn}) |"
+                f"| {idx} | {_md_text(a.kind)} | {_md_text(a.title)} | "
+                f"[{_md_code(fn)}](./{_md_text(fn)}) |"
             )
         lines.append("")
 
@@ -233,20 +258,20 @@ def export_pocs(artifacts: list[PoCArtifact], out_dir: str | Path) -> list[Path]
         fn = _filename_for(i, artifact)
         path = out / fn
         if artifact.kind in ("adb", "shell"):
-            path.write_text(render_sh(artifact))
+            path.write_text(render_sh(artifact), encoding="utf-8")
             path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         elif artifact.kind == "frida":
-            path.write_text(_render_frida(artifact))
+            path.write_text(_render_frida(artifact), encoding="utf-8")
         elif artifact.kind == "info":
-            path.write_text(_render_info(artifact))
+            path.write_text(_render_info(artifact), encoding="utf-8")
         else:
             # Unknown kind — fall through to a plain text dump so nothing
             # is silently dropped.
-            path.write_text(_render_info(artifact))
+            path.write_text(_render_info(artifact), encoding="utf-8")
         written.append(path)
         filenames.append(fn)
 
     index_path = out / "README.md"
-    index_path.write_text(render_index(artifacts, filenames))
+    index_path.write_text(render_index(artifacts, filenames), encoding="utf-8")
     written.append(index_path)
     return written
