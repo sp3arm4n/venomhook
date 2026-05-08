@@ -16,6 +16,7 @@ dependencies = []
 [project.optional-dependencies]
 dynamic = ["frida>=17,<18"]
 static = ["lief>=0.14.0", "pefile>=2023.2.7", "capstone>=5.0.0"]
+llm = ["anthropic>=0.39.0"]
 
 [project.scripts]
 venomhook = "venomhook.cli:app"

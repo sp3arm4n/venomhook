@@ -126,10 +126,12 @@ class GetProviderFactoryTest(unittest.TestCase):
         p = get_provider("echo", model="custom-echo")
         self.assertEqual(p.model, "custom-echo")
 
-    def test_anthropic_not_yet_implemented(self) -> None:
-        with self.assertRaises(LLMError) as ctx:
-            get_provider("anthropic")
-        self.assertIn("not implemented", str(ctx.exception).lower())
+    def test_anthropic_factory_returns_provider_no_network(self) -> None:
+        # Construction succeeds without SDK or key — checks happen lazily.
+        from venomhook.llm.provider import AnthropicProvider
+        p = get_provider("anthropic")
+        self.assertIsInstance(p, AnthropicProvider)
+        self.assertEqual(p.name, "anthropic")
 
     def test_openai_not_yet_implemented(self) -> None:
         with self.assertRaises(LLMError):

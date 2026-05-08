@@ -19,6 +19,7 @@ from venomhook.llm.cache import (
     SCHEMA_VERSION,
 )
 from venomhook.llm.provider import (
+    AnthropicProvider,
     EchoProvider,
     LLMError,
     LLMProvider,
@@ -29,6 +30,7 @@ from venomhook.llm.provider import (
 )
 
 __all__ = [
+    "AnthropicProvider",
     "BudgetExhausted",
     "CachedLLMEntry",
     "EchoProvider",
