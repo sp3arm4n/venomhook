@@ -410,8 +410,15 @@ venomhook android-audit \
     --audit-json  ./out_audit/audit.json \
     --poc-json    ./out_audit/pocs.json \
     --poc-bundle-dir ./out_audit/pocs/ \
+    --out-html ./out_audit/audit.html \
     --severity-threshold high
 ```
+
+`audit.html`을 브라우저에서 열면 각 finding이 severity별 색상 카드로
+표시되고, 그 카드 안에 해당 finding을 검증하는 PoC 레시피가 펼쳐볼 수
+있는 형태로 동봉됩니다 — "어떤 PoC가 어떤 취약점을 점검하는가"가 즉시
+시각적으로 매칭됩니다. `--poc-bundle-dir`도 함께 지정하면 각 PoC 카드의
+파일명이 디스크의 실제 `.sh` / `.frida.js`로 클릭 가능한 링크가 됩니다.
 
 출력 채널:
 
@@ -421,7 +428,8 @@ venomhook android-audit \
 | `--report-json` | `AndroidAnalysis.to_dict()` — apk_meta·app_meta·bridges·audit_report·pocs 전체 |
 | `--audit-json`  | `AndroidAuditReport.to_dict()`만 추출 |
 | `--poc-json`    | `PoCArtifact[]` JSON — CI 아카이브·재실행용 |
-| `--poc-bundle-dir` | 디렉터리에 `.sh` / `.frida.js` / `.md` + `README.md` 인덱스 (실행 가능한 형태) |
+| `--poc-bundle-dir` | 디렉터리에 `.sh` / `.frida.js` / `.md` + `README.md` 인덱스 (실행 가능한 형태). README는 finding(룰+component) 단위로 그룹핑됨 |
+| `--out-html`    | 단일 HTML 보고서 — severity 색상 finding 카드 안에 PoC 임베드, components/JNI bridge 표 동봉. 외부 의존 없이 브라우저에서 바로 열림. `--poc-bundle-dir`과 함께 쓰면 각 PoC 카드가 디스크 파일로 링크됨 |
 
 종료 코드:
 

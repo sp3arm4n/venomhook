@@ -523,6 +523,13 @@ def main(argv: list[str] | None = None) -> None:
         "directory along with a README.md index",
     )
     audit_parser.add_argument(
+        "--out-html", type=Path,
+        help="Write a self-contained HTML audit report (severity-colored "
+        "finding cards, embedded PoCs, components / JNI bridge tables). "
+        "When --poc-bundle-dir is also set, each PoC card links to its "
+        "on-disk file relative to the HTML output.",
+    )
+    audit_parser.add_argument(
         "--apktool-path", type=str, help="Override apktool binary path (default: $PATH lookup)",
     )
     audit_parser.add_argument(
@@ -1071,6 +1078,14 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
             written = export_pocs(pocs, args.poc_bundle_dir)
             logging.info("PoC bundle (%d files) written under %s",
                          len(written), args.poc_bundle_dir)
+        if args.out_html:
+            from venomhook.audit_html_report import write_audit_html
+            html_path = write_audit_html(
+                result,
+                args.out_html,
+                poc_bundle_dir=args.poc_bundle_dir,
+            )
+            logging.info("HTML audit report written to %s", html_path)
 
         if (
             args.severity_threshold

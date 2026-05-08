@@ -142,22 +142,73 @@ def _render_info(artifact: PoCArtifact) -> str:
     return "\n".join(parts) + "\n"
 
 
+_SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
 def render_index(artifacts: list[PoCArtifact], filenames: list[str]) -> str:
-    """Markdown README listing each exported artifact in order."""
+    """Markdown README listing every exported artifact, grouped by finding.
+
+    Artifacts that share the same ``(rule_id, component)`` belong to the
+    same parent finding; they are rendered under one heading so the
+    operator can see at a glance which PoCs prove which finding instead
+    of scanning a flat ordered list. Findings are ordered by severity
+    (critical → info), then by rule_id, then by component.
+    """
     lines = [
         "# venomhook PoC bundle",
         "",
         f"_{len(artifacts)} artifact{'s' if len(artifacts) != 1 else ''}_",
         "",
-        "| # | rule | severity | kind | file |",
-        "|---|------|----------|------|------|",
     ]
-    for i, (a, fn) in enumerate(zip(artifacts, filenames), 1):
-        lines.append(
-            f"| {i} | {a.rule_id} | {a.severity} | {a.kind} | "
-            f"[`{fn}`](./{fn}) |"
-        )
+
+    # Group artifacts by (rule_id, component); preserve original index so
+    # the {idx}_ prefix lookup stays correct.
+    groups: dict[tuple[str, str | None], list[tuple[int, PoCArtifact, str]]] = {}
+    for idx, (a, fn) in enumerate(zip(artifacts, filenames), 1):
+        key = (a.rule_id, a.component)
+        groups.setdefault(key, []).append((idx, a, fn))
+
+    def _group_sort_key(item: tuple[tuple[str, str | None], list]) -> tuple:
+        (rule_id, component), entries = item
+        # Severity inherited from the first artifact in the group; PoC
+        # artifacts in a single finding share the same severity.
+        sev = entries[0][1].severity.lower()
+        return (_SEV_ORDER.get(sev, 9), rule_id, component or "")
+
+    if not groups:
+        lines.append("_No artifacts._")
+        return "\n".join(lines) + "\n"
+
+    n_findings = len(groups)
+    lines[2] = (
+        f"_{len(artifacts)} artifact{'s' if len(artifacts) != 1 else ''} "
+        f"across {n_findings} finding{'s' if n_findings != 1 else ''}_"
+    )
+
+    lines.append("## Index")
     lines.append("")
+
+    for (rule_id, component), entries in sorted(groups.items(), key=_group_sort_key):
+        sev = entries[0][1].severity.upper()
+        title = entries[0][1].title
+        # The first artifact's title often duplicates a finding-level
+        # description; downstream PoCs in the same group may have their
+        # own per-recipe titles. Use the rule_id + component as the
+        # canonical group label so it stays stable.
+        comp_suffix = f" [`{component}`]" if component else ""
+        lines.append(f"### [{sev}] {rule_id}{comp_suffix}")
+        lines.append("")
+        lines.append(f"_{title}_" if title else "")
+        lines.append("")
+        lines.append("| # | kind | recipe | file |")
+        lines.append("|---|------|--------|------|")
+        for idx, a, fn in entries:
+            lines.append(
+                f"| {idx} | {a.kind} | {a.title} | "
+                f"[`{fn}`](./{fn}) |"
+            )
+        lines.append("")
+
     lines.append(
         "Each .sh file is self-contained and runnable. Review the header "
         "comment before executing — recipes touch live processes / device "
