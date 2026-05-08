@@ -29,6 +29,15 @@ class LLMTaggingOptions:
     cache: object | None = None  # venomhook.llm.LLMCache or None
 
 
+@dataclass
+class LLMProtoOptions:
+    """Opt-in configuration for the Phase 5 ``--use-llm-proto`` integration."""
+
+    provider: object
+    budget: object
+    cache: object | None = None
+
+
 class StaticPipeline:
     def __init__(
         self,
@@ -37,12 +46,14 @@ class StaticPipeline:
         sig_max_bytes: int = 12,
         ghidra_runner: GhidraRunner | None = None,
         llm_tagging: LLMTaggingOptions | None = None,
+        llm_proto: LLMProtoOptions | None = None,
     ):
         self.top_n = top_n
         self.score_config = score_config or ScoreConfig()
         self.sig_max_bytes = sig_max_bytes
         self.ghidra_runner = ghidra_runner
         self.llm_tagging = llm_tagging
+        self.llm_proto = llm_proto
 
     def run_from_static_meta(
         self, static_meta_path: Path, out_hookspec: Path, report_md: Path | None = None
@@ -64,6 +75,16 @@ class StaticPipeline:
             )
             logger.info(stats.as_summary_line())
         hookspecs = build_hookspecs(endpoints, functions=meta.functions, sig_max_bytes=self.sig_max_bytes)
+        if self.llm_proto is not None:
+            from venomhook.llm.proto_inference import infer_protos
+            proto_stats = infer_protos(
+                hookspecs,
+                meta.functions,
+                provider=self.llm_proto.provider,  # type: ignore[arg-type]
+                budget=self.llm_proto.budget,  # type: ignore[arg-type]
+                cache=self.llm_proto.cache,  # type: ignore[arg-type]
+            )
+            logger.info(proto_stats.as_summary_line())
         HookSpecStore.save(out_hookspec, hookspecs)
         logger.info("wrote HookSpec to %s", out_hookspec)
         if report_md:

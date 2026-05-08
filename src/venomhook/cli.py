@@ -70,16 +70,20 @@ DYNAMIC_DEFAULTS = {
 def _add_llm_flags(parser: argparse.ArgumentParser) -> None:
     """Attach the shared --use-llm-* / --llm-* flag set to a subparser.
 
-    All flags are opt-in; when ``--use-llm-tagging`` (and other future
-    Phase 5 flags) are absent, no LLM module code runs. A subcommand
-    that calls this helper inherits the full flag set so operators see
-    a consistent surface across ``offset-static`` and (future) other
+    All flags are opt-in; when no ``--use-llm-*`` flag is set, no LLM
+    module code runs. A subcommand that calls this helper inherits the
+    full flag set so operators see a consistent surface across all
     LLM-aware subcommands.
     """
     parser.add_argument(
         "--use-llm-tagging",
         action="store_true",
         help="Phase 5 ① — call LLM to add semantic:* tags on top of rule-based scoring",
+    )
+    parser.add_argument(
+        "--use-llm-proto",
+        action="store_true",
+        help="Phase 5 ② — call LLM to fill HookSpec.proto (ret + arg types) for specs the rule layer left empty",
     )
     parser.add_argument(
         "--llm-provider",
@@ -110,21 +114,27 @@ def _add_llm_flags(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _build_llm_tagging_options(args: argparse.Namespace):
-    """Construct an :class:`LLMTaggingOptions` from CLI flags, or return None.
+def _build_llm_runtime(args: argparse.Namespace):
+    """Construct (provider, budget, cache) once per run, shared by every
+    Phase 5 integration point. Returns None when no ``--use-llm-*`` flag
+    is set so the pipeline stays import-clean.
 
-    Returns None when no ``--use-llm-*`` flag was set, so the pipeline
-    skips the LLM stack entirely and stays import-clean.
+    Sharing is deliberate: a single budget cap applies across tagging +
+    proto + future flow/report/recovery, and a single cache file lets
+    every integration point benefit from any other point's hits on the
+    same prompt (in practice they don't collide because metadata role
+    tags differ, but the cache layer remains consistent).
     """
-    if not getattr(args, "use_llm_tagging", False):
+    enabled_flags = [
+        getattr(args, "use_llm_tagging", False),
+        getattr(args, "use_llm_proto", False),
+    ]
+    if not any(enabled_flags):
         return None
 
-    # Lazy imports keep the LLM module out of the import path of users
-    # who haven't enabled any --use-llm-* flag.
     from venomhook.llm.budget import TokenBudget
     from venomhook.llm.cache import LLMCache
     from venomhook.llm.provider import get_provider
-    from venomhook.static_pipeline import LLMTaggingOptions
 
     provider = get_provider(args.llm_provider, model=args.llm_model)
     budget = TokenBudget(cap=args.llm_token_budget)
@@ -138,7 +148,37 @@ def _build_llm_tagging_options(args: argparse.Namespace):
             cache_path = Path(cache_path) / "llm_cache.sqlite3"
         cache = LLMCache(cache_path)
 
-    return LLMTaggingOptions(provider=provider, budget=budget, cache=cache)
+    return provider, budget, cache
+
+
+def _build_llm_options(args: argparse.Namespace):
+    """Build the per-integration-point Options dataclasses once, sharing a
+    single (provider, budget, cache) so the budget cap and cache are
+    enforced across *all* enabled Phase 5 points rather than per-point.
+
+    Returns ``(tagging_options, proto_options)`` tuple. Either element is
+    None when the corresponding ``--use-llm-*`` flag wasn't set.
+    """
+    runtime = _build_llm_runtime(args)
+    if runtime is None:
+        return None, None
+    provider, budget, cache = runtime
+
+    tagging_options = None
+    if getattr(args, "use_llm_tagging", False):
+        from venomhook.static_pipeline import LLMTaggingOptions
+        tagging_options = LLMTaggingOptions(
+            provider=provider, budget=budget, cache=cache
+        )
+
+    proto_options = None
+    if getattr(args, "use_llm_proto", False):
+        from venomhook.static_pipeline import LLMProtoOptions
+        proto_options = LLMProtoOptions(
+            provider=provider, budget=budget, cache=cache
+        )
+
+    return tagging_options, proto_options
 
 
 def app(argv: list[str] | None = None) -> None:
@@ -577,13 +617,14 @@ def cmd_offset_static(args: argparse.Namespace) -> None:
             project_dir=args.ghidra_project_dir,
             project_name=args.ghidra_project_name,
         )
-    llm_tagging = _build_llm_tagging_options(args)
+    llm_tagging, llm_proto = _build_llm_options(args)
     pipeline = StaticPipeline(
         top_n=args.top,
         score_config=score_cfg,
         sig_max_bytes=args.sig_max_bytes,
         ghidra_runner=ghidra_runner,
         llm_tagging=llm_tagging,
+        llm_proto=llm_proto,
     )
     if not args.static_json and not args.binary:
         raise SystemExit("Provide either --static-json or --binary")

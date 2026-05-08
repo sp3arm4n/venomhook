@@ -579,8 +579,44 @@ venomhook offset-static \
 캐시는 `(provider, model, request_hash, schema_version)`으로 keyed —
 같은 endpoint를 재분석하면 0회 호출로 동일 태그를 얻습니다.
 
-② proto 추론 / ③ Java↔Native 흐름 / ④ 런타임 해석 / ⑤ Sig 자가복구는
-후속 PR에서 추가됩니다.
+### ② proto 추론 — `--use-llm-proto`
+
+룰 기반에서 비어있는 (`HookSpec.proto.ret is None and not args`) 스펙에
+대해서만 LLM이 prototype을 채웁니다. 룰이 이미 채운 proto는 우선권
+보존 — 절대 덮어쓰지 않습니다.
+
+```bash
+venomhook offset-static \
+  --static-json ./sample/examples/static_meta.sample.json \
+  --use-llm-proto \
+  --use-llm-tagging \
+  --llm-provider anthropic \
+  --llm-token-budget 30000 \
+  --out ./out/venomhook.json
+```
+
+`--use-llm-tagging`와 함께 쓰면 **하나의 토큰 예산**과 **하나의 캐시
+파일**을 공유합니다 (per-flag 예산이 아니라 run 전체 예산).
+
+LLM에 요구되는 출력 형식 (strict):
+
+```
+ret: jstring
+arg0: JNIEnv *
+arg1: jobject
+arg2: const char *
+```
+
+타입은 짧은 C 스타일 ("int", "void *", "const char *", "size_t",
+"JNIEnv *", "jobject"...). 파서는 line-prefix bullets/dashes/whitespace
+관용적으로 처리하지만 `<>{}` 등 마크다운 잔여물이 들어간 타입은 거부.
+`ret:` 라인이 없으면 모델이 답변을 거부한 것으로 보고 proto 변경 안 함.
+
+폴백은 ①과 동일 — provider unavailable / parse 실패 / 예산 초과는 모두
+조용히 룰 기반 proto (즉 빈 `HookProto`) 그대로 유지.
+
+③ Java↔Native 흐름 / ④ 런타임 해석 / ⑤ Sig 자가복구는 후속 unit에서
+추가됩니다.
 
 ## Binary Metadata Helper
 
@@ -678,6 +714,7 @@ venomhook/
 │       │   ├── budget.py            # TokenBudget + BudgetExhausted
 │       │   ├── cache.py             # SQLite LLM response cache
 │       │   ├── provider.py          # LLMProvider ABC, EchoProvider, AnthropicProvider
+│       │   ├── proto_inference.py   # ② --use-llm-proto (HookSpec.proto)
 │       │   └── tagging.py           # ① --use-llm-tagging (semantic:* tags)
 │       ├── manifest_audit.py
 │       ├── models.py

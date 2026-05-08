@@ -53,27 +53,31 @@ class CliLLMTaggingFlagsTest(unittest.TestCase):
                         f"unexpected semantic tag from echo: {tag}",
                     )
 
-    def test_offset_static_no_llm_flag_skips_module(self) -> None:
-        # Smoke: without --use-llm-tagging, the LLM stack must not be touched.
-        # We patch _build_llm_tagging_options to fail loudly if invoked.
-        with mock.patch(
-            "venomhook.cli._build_llm_tagging_options",
-            side_effect=AssertionError("LLM should not be wired without flag"),
-        ) as patched:
-            with tempfile.TemporaryDirectory() as tmp:
-                out = Path(tmp) / "venomhook.json"
-                argv = [
-                    "offset-static",
-                    "--static-json", str(SAMPLE_STATIC_META),
-                    "--out", str(out),
-                ]
-                # _build_llm_tagging_options is still called (returns None for
-                # opt-out), so we use a different approach: patch it to a
-                # function that asserts the flag is False.
-                patched.side_effect = lambda args: None if not args.use_llm_tagging \
-                    else AssertionError("flag set unexpectedly")
-                main(argv)
-                self.assertTrue(out.exists())
+    def test_offset_static_no_llm_flag_returns_no_options(self) -> None:
+        # Without --use-llm-* flags, _build_llm_options must return (None, None)
+        # — proves the LLM stack stays out of the pipeline path.
+        import argparse
+        from venomhook.cli import _build_llm_options
+        args = argparse.Namespace(
+            use_llm_tagging=False,
+            use_llm_proto=False,
+            llm_provider="anthropic",
+            llm_model=None,
+            llm_token_budget=20000,
+            llm_cache_dir=None,
+            no_llm_cache=False,
+        )
+        self.assertEqual(_build_llm_options(args), (None, None))
+
+        # And the subcommand still runs end-to-end with no LLM flags.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "venomhook.json"
+            main([
+                "offset-static",
+                "--static-json", str(SAMPLE_STATIC_META),
+                "--out", str(out),
+            ])
+            self.assertTrue(out.exists())
 
     def test_no_llm_cache_disables_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
