@@ -12,6 +12,7 @@ is set. Without those flags VenomHook stays 100% deterministic, matching the
 
 from __future__ import annotations
 
+from venomhook.llm.budget import BudgetExhausted, TokenBudget, estimate_tokens
 from venomhook.llm.cache import (
     CachedLLMEntry,
     LLMCache,
@@ -28,6 +29,7 @@ from venomhook.llm.provider import (
 )
 
 __all__ = [
+    "BudgetExhausted",
     "CachedLLMEntry",
     "EchoProvider",
     "LLMCache",
@@ -36,6 +38,8 @@ __all__ = [
     "LLMRequest",
     "LLMResponse",
     "SCHEMA_VERSION",
+    "TokenBudget",
+    "estimate_tokens",
     "get_provider",
     "list_providers",
 ]
