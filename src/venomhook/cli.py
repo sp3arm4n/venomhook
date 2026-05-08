@@ -486,6 +486,7 @@ def main(argv: list[str] | None = None) -> None:
     e2e_parser.add_argument("--run-frida", action="store_true", help="Run frida (otherwise skip)")
     e2e_parser.add_argument("--dry-run", action="store_true", help="Pass --no-pause etc but do not execute (for frida)")
     e2e_parser.add_argument("--summarize-log", action="store_true", help="Summarize frida log if present")
+    _add_llm_flags(e2e_parser, features=("tagging", "proto", "flow", "recovery"))
     e2e_parser.set_defaults(func=cmd_offset_e2e)
 
     audit_parser = subparsers.add_parser(
@@ -874,52 +875,75 @@ def cmd_offset_e2e(args: argparse.Namespace) -> None:
     hook_md = out_dir / "venomhook.md"
     frida_js = out_dir / "venomhook.js"
 
-    static_pipe = StaticPipeline(top_n=args.top, score_config=score_cfg, sig_max_bytes=args.sig_max_bytes, ghidra_runner=ghidra_runner)
-    hooks = static_pipe.run(static_meta=args.static_json, binary=args.binary, out=hook_json, report_md=hook_md, ghidra_runner=ghidra_runner)
-    extra_aliases = getattr(args, "module_alias", None) or []
-    if extra_aliases:
-        for spec in hooks:
-            spec.module_aliases = list(spec.module_aliases) + extra_aliases
-    HookSpecStore.save(hook_db, hooks)
-
-    apply_dynamic_profile(args, profile_data)
-    dyn_pipe = DynamicPipeline(
-        target=args.target,
-        log_format=args.log_format,
-        log_prefix=args.log_prefix,
-        scenario_message=args.scenario_message,
-        auto_start_scenario=args.auto_start_scenario,
-        hexdump_len=args.hexdump_len,
-        string_args=args.string_arg or [],
-        string_ret=args.string_ret,
-        string_len=args.string_len,
-        scan_size=args.scan_size,
-        retry_attach=args.retry_attach,
-    )
-    dyn_pipe.save_script(frida_js, hooks)
-
-    frida_log = args.frida_log or (out_dir / "frida.log")
-    if args.run_frida:
-        cmd_str = run_frida(
-            target=args.target,
-            script=frida_js,
-            frida_path=args.frida_path,
-            attach=False,
-            no_pause=True,
-            extra_args=None,
-            log_file=frida_log,
-            dry_run=args.dry_run,
+    llm_tagging, llm_proto, llm_flow, llm_recovery = _build_llm_options(args)
+    try:
+        static_pipe = StaticPipeline(
+            top_n=args.top,
+            score_config=score_cfg,
+            sig_max_bytes=args.sig_max_bytes,
+            ghidra_runner=ghidra_runner,
+            llm_tagging=llm_tagging,
+            llm_proto=llm_proto,
+            llm_flow=llm_flow,
+            llm_recovery=llm_recovery,
         )
-        logging.info("frida command%s: %s", " (dry-run)" if args.dry_run else "", cmd_str)
-        if args.summarize_log and frida_log.exists() and frida_log.stat().st_size > 0:
-            summary_md = out_dir / "runtime_summary.md"
-            summary_html = out_dir / "runtime_summary.html"
-            summary = summarize_log_file(frida_log)
-            write_markdown_summary(summary, summary_md)
-            write_html_summary(summary, summary_html)
-            logging.info("runtime summaries written to %s, %s", summary_md, summary_html)
-    else:
-        logging.info("frida run skipped (use --run-frida to execute)")
+        hooks = static_pipe.run(
+            static_meta=args.static_json,
+            binary=args.binary,
+            out=hook_json,
+            report_md=hook_md,
+            ghidra_runner=ghidra_runner,
+        )
+        extra_aliases = getattr(args, "module_alias", None) or []
+        if extra_aliases:
+            for spec in hooks:
+                spec.module_aliases = list(spec.module_aliases) + extra_aliases
+        HookSpecStore.save(hook_db, hooks)
+
+        apply_dynamic_profile(args, profile_data)
+        dyn_pipe = DynamicPipeline(
+            target=args.target,
+            log_format=args.log_format,
+            log_prefix=args.log_prefix,
+            scenario_message=args.scenario_message,
+            auto_start_scenario=args.auto_start_scenario,
+            hexdump_len=args.hexdump_len,
+            string_args=args.string_arg or [],
+            string_ret=args.string_ret,
+            string_len=args.string_len,
+            scan_size=args.scan_size,
+            retry_attach=args.retry_attach,
+        )
+        dyn_pipe.save_script(frida_js, hooks)
+
+        frida_log = args.frida_log or (out_dir / "frida.log")
+        if args.run_frida:
+            cmd_str = run_frida(
+                target=args.target,
+                script=frida_js,
+                frida_path=args.frida_path,
+                attach=False,
+                no_pause=True,
+                extra_args=None,
+                log_file=frida_log,
+                dry_run=args.dry_run,
+            )
+            logging.info(
+                "frida command%s: %s",
+                " (dry-run)" if args.dry_run else "",
+                cmd_str,
+            )
+            if args.summarize_log and frida_log.exists() and frida_log.stat().st_size > 0:
+                summary_md = out_dir / "runtime_summary.md"
+                summary_html = out_dir / "runtime_summary.html"
+                summary = summarize_log_file(frida_log)
+                write_markdown_summary(summary, summary_md)
+                write_html_summary(summary, summary_html)
+                logging.info("runtime summaries written to %s, %s", summary_md, summary_html)
+        else:
+            logging.info("frida run skipped (use --run-frida to execute)")
+    finally:
+        _close_llm_option_caches(llm_tagging, llm_proto, llm_flow, llm_recovery)
 
 
 def cmd_android_audit(args: argparse.Namespace) -> None:

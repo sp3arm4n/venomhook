@@ -1,12 +1,30 @@
 venv/
 build/
+dist/
 __pycache__/
 *.py[cod]
 .pytest_cache/
-src/venomhook.egg-info/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# VenomHook generated outputs
+out/
+out_*/
 static/project
 static/META
 reports/
 frida_scripts/
 .log/
+logs/
+.venomhook/
+.venomhook-cache/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# OS/editor noise
 .DS_Store

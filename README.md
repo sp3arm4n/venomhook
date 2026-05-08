@@ -72,6 +72,7 @@ sed -n '1,120p' ./out/venomhook.js
 | 목적 | 명령 |
 | --- | --- |
 | 샘플로 전체 흐름 확인 | `venomhook offset-e2e --static-json ./sample/examples/static_meta.sample.json --target sample.exe --out-dir ./out` |
+| LLM 보조 전체 흐름 | `venomhook offset-e2e --static-json ./sample/examples/static_meta.sample.json --target sample.exe --out-dir ./out --use-llm-tagging --llm-provider anthropic` |
 | HookSpec 생성 | `venomhook offset-static --static-json ./sample/examples/static_meta.sample.json --out ./out/venomhook.json --out-db ./out/venomhook.db` |
 | Frida 스크립트 생성 | `venomhook offset-hook --hookspec ./out/venomhook.json --target sample.exe --out-script ./out/venomhook.js` |
 | APK manifest 빠른 감사 | `venomhook android-audit --apk ./sample/myapp.apk --no-jadx --out-dir ./out_audit --audit-json ./out_audit/audit.json` |
@@ -154,6 +155,19 @@ powershell -ExecutionPolicy Bypass -File .\setup\mkdir.ps1
 ```
 
 ## Core Workflow
+
+가장 단순한 경로는 `offset-e2e`입니다. StaticMeta를 HookSpec JSON/SQLite,
+Markdown 요약, Frida 스크립트까지 한 번에 변환합니다.
+
+```bash
+venomhook offset-e2e \
+  --static-json ./sample/examples/static_meta.sample.json \
+  --target sample.exe \
+  --out-dir ./out
+```
+
+세부 단계를 직접 제어하거나 중간 산출물을 검토하려면 아래처럼 단계별로
+실행합니다.
 
 ### 1. StaticMeta 생성
 
@@ -328,57 +342,44 @@ frida -U -n com.example.app -l ./frida_scripts/myapp.js
 
 ### APK 전체 컨텍스트 분석
 
-일반 사용자는 아래의 `android-audit` CLI를 사용하면 됩니다. 이 섹션은 VenomHook을 Python 라이브러리로 직접 호출할 때 필요한 개발자용 API 예시입니다.
-
-`android_pipeline.analyze_apk`는 APK에서 native library, module metadata, AndroidManifest, Java native methods, JNI bridge를 한 번에 수집합니다.
+APK 전체 컨텍스트는 `android-audit`로 수집합니다. 이 명령은 APK metadata,
+manifest, Java native method, JNI bridge, audit finding, PoC를 하나의
+JSON으로 저장할 수 있습니다.
 
 ```bash
-python -c "
-from venomhook.android_pipeline import analyze_apk
-
-r = analyze_apk('./sample/myapp.apk', './out_android', abi='auto')
-print('ABI:', r.selected_abi)
-print('SO:', r.extracted_so_path)
-print('manifest:', r.app_meta.package_name if r.app_meta else 'not decoded')
-print('java natives:', len(r.java_natives))
-print('matched bridges:', len(r.matched_bridges), '/', len(r.bridges))
-print('warnings:', r.warnings)
-"
+venomhook android-audit \
+  --apk ./sample/myapp.apk \
+  --out-dir ./out_android \
+  --report-json ./out_android/analysis.json \
+  --poc-bundle-dir ./out_android/pocs
 ```
 
-`apktool` 또는 `jadx`가 없으면 해당 단계만 warning으로 남기고 계속 진행합니다. 반드시 필요하게 만들려면:
-
-```python
-analyze_apk("./sample/myapp.apk", "./out_android", fail_on_missing_tools=True)
-```
+`apktool` 또는 `jadx`가 없으면 가능한 단계만 warning으로 남기고 계속
+진행합니다. 도구 누락을 실패로 처리하려면 `--strict-tools`를 추가합니다.
 
 ### AndroidManifest 감사
 
-CLI에서는 `venomhook android-audit`가 이 과정을 자동으로 수행합니다. Python에서 직접 조합할 때는 `apk_decoder`로 디코드한 manifest metadata를 `manifest_audit` 룰 엔진에 넣습니다.
+Manifest만 빠르게 감사하려면 `--no-jadx`를 사용합니다. Java decompile과
+JNI bridge 분석을 생략하므로 APK의 공격 표면을 빠르게 확인할 때 적합합니다.
 
 ```bash
-python -c "
-from venomhook.apk_decoder import decode_apk
-from venomhook.manifest_audit import audit_manifest, format_audit_summary
-
-_, app = decode_apk('./sample/myapp.apk', './out_audit/apktool')
-report = audit_manifest(app)
-print(format_audit_summary(report))
-"
+venomhook android-audit \
+  --apk ./sample/myapp.apk \
+  --no-jadx \
+  --out-dir ./out_audit \
+  --audit-json ./out_audit/audit.json \
+  --poc-json ./out_audit/pocs.json
 ```
 
 CI gate 예시:
 
 ```bash
-python -c "
-import sys
-from venomhook.apk_decoder import decode_apk
-from venomhook.manifest_audit import audit_manifest
-
-_, app = decode_apk('./sample/myapp.apk', './out_audit/apktool')
-report = audit_manifest(app)
-sys.exit(1 if report.has_severity_at_least('high') else 0)
-"
+venomhook android-audit \
+  --apk ./sample/myapp.apk \
+  --no-jadx \
+  --quiet \
+  --severity-threshold high
+echo "exit=$?"   # 2 if high 이상 finding 존재
 ```
 
 현재 manifest audit rule:
@@ -546,6 +547,52 @@ Schema 버전(`SCHEMA_VERSION`)은 `AndroidAnalysis.to_dict()` 형식이 호환�
 않게 변경될 때만 올라갑니다. 같은 APK 해시의 다른 스키마 버전 행은 공존
 가능 — 과거 분석을 보존한 채로 새 분석을 추가할 수 있습니다.
 
+## Developer API Examples
+
+대부분의 사용자는 위 CLI만 사용하면 됩니다. 아래 예시는 VenomHook을 Python
+라이브러리로 직접 조합해야 하는 개발자용입니다.
+
+### APK analysis API
+
+`android_pipeline.analyze_apk`는 APK에서 native library, module metadata,
+AndroidManifest, Java native methods, JNI bridge를 한 번에 수집합니다.
+
+```bash
+python -c "
+from venomhook.android_pipeline import analyze_apk
+
+r = analyze_apk('./sample/myapp.apk', './out_android', abi='auto')
+print('ABI:', r.selected_abi)
+print('SO:', r.extracted_so_path)
+print('manifest:', r.app_meta.package_name if r.app_meta else 'not decoded')
+print('java natives:', len(r.java_natives))
+print('matched bridges:', len(r.matched_bridges), '/', len(r.bridges))
+print('warnings:', r.warnings)
+"
+```
+
+도구 누락을 예외로 처리하려면:
+
+```python
+analyze_apk("./sample/myapp.apk", "./out_android", fail_on_missing_tools=True)
+```
+
+### Manifest audit API
+
+Python에서 직접 조합할 때는 `apk_decoder`로 디코드한 manifest metadata를
+`manifest_audit` 룰 엔진에 넣습니다.
+
+```bash
+python -c "
+from venomhook.apk_decoder import decode_apk
+from venomhook.manifest_audit import audit_manifest, format_audit_summary
+
+_, app = decode_apk('./sample/myapp.apk', './out_audit/apktool')
+report = audit_manifest(app)
+print(format_audit_summary(report))
+"
+```
+
 ## Optional LLM Layer (Phase 5)
 
 자동화 코어는 그대로 두고, LLM은 5개 지정 포인트에서 *옵트인*으로만 호출됩니다.
@@ -556,6 +603,19 @@ Schema 버전(`SCHEMA_VERSION`)은 `AndroidAnalysis.to_dict()` 형식이 호환�
 ```bash
 pip install -e '.[llm]'
 export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+정적 분석 LLM 플래그(`--use-llm-tagging`, `--use-llm-proto`,
+`--use-llm-flow`, `--use-llm-recovery`)는 `offset-static`과 `offset-e2e`
+양쪽에서 사용할 수 있습니다.
+
+```bash
+venomhook offset-e2e \
+  --static-json ./sample/examples/static_meta.sample.json \
+  --target sample.exe \
+  --out-dir ./out \
+  --use-llm-tagging \
+  --llm-provider anthropic
 ```
 
 ### ① 의미 태깅 — `--use-llm-tagging`
