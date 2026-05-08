@@ -74,11 +74,11 @@ class RenderShTests(unittest.TestCase):
     def test_header_includes_metadata(self):
         out = render_sh(_adb_artifact())
         self.assertIn("MANIFEST-001", out)
-        self.assertIn("severity:    high", out)
-        self.assertIn("package:     com.demo", out)
-        self.assertIn("component:   com.demo.MainActivity", out)
+        self.assertIn("심각도:    high", out)
+        self.assertIn("패키지:    com.demo", out)
+        self.assertIn("컴포넌트:  com.demo.MainActivity", out)
         self.assertIn("CWE-489", out)
-        self.assertIn("expected evidence:", out)
+        self.assertIn("예상 결과:", out)
 
     def test_commands_appear_after_header(self):
         out = render_sh(_adb_artifact())
@@ -92,25 +92,73 @@ class RenderShTests(unittest.TestCase):
 
     def test_no_commands_falls_back_to_echo(self):
         out = render_sh(_adb_artifact(commands=[]))
-        self.assertIn("no commands recorded", out)
+        self.assertIn("기록된 명령이 없습니다", out)
 
 
 class RenderIndexTests(unittest.TestCase):
-    def test_table_header_and_rows(self):
+    def test_groups_artifacts_under_finding_headings(self):
+        # Two artifacts -> two findings (different rule_id)
         arts = [_adb_artifact(), _adb_artifact(rule_id="MANIFEST-003",
                                                 title="adb backup",
                                                 severity="medium")]
         names = ["MANIFEST-001-1_a.sh", "MANIFEST-003-2_b.sh"]
         out = render_index(arts, names)
-        self.assertIn("# venomhook PoC bundle", out)
-        self.assertIn("| # | rule | severity | kind | file |", out)
+        self.assertIn("# venomhook PoC 번들", out)
+        # New per-recipe table header
+        self.assertIn("| # | 종류 | 레시피 | 파일 |", out)
+        # Finding headings include severity + rule id
+        self.assertIn("### [HIGH] MANIFEST-001", out)
+        self.assertIn("### [MEDIUM] MANIFEST-003", out)
+        # File links survive
         self.assertIn("MANIFEST-001-1_a.sh", out)
         self.assertIn("MANIFEST-003-2_b.sh", out)
-        self.assertIn("medium", out)
+
+    def test_groups_pocs_for_same_finding_under_one_heading(self):
+        # Same rule_id + same component -> single heading with two rows
+        arts = [
+            _adb_artifact(rule_id="MANIFEST-004", title="invoke",
+                          component="com.x.A"),
+            _adb_artifact(rule_id="MANIFEST-004", title="observe",
+                          component="com.x.A"),
+        ]
+        names = ["MANIFEST-004-1_a.sh", "MANIFEST-004-2_b.sh"]
+        out = render_index(arts, names)
+        # Exactly one heading
+        self.assertEqual(out.count("### [HIGH] MANIFEST-004"), 1)
+        # Both recipes visible in the same group's table
+        self.assertIn("invoke", out)
+        self.assertIn("observe", out)
+
+    def test_severity_ordering_critical_first(self):
+        arts = [
+            _adb_artifact(rule_id="A1", severity="info", title="t"),
+            _adb_artifact(rule_id="A2", severity="critical", title="t"),
+            _adb_artifact(rule_id="A3", severity="medium", title="t"),
+        ]
+        names = ["A1-1_t.sh", "A2-2_t.sh", "A3-3_t.sh"]
+        out = render_index(arts, names)
+        i_crit = out.find("[CRITICAL] A2")
+        i_med = out.find("[MEDIUM] A3")
+        i_info = out.find("[INFO] A1")
+        self.assertTrue(0 <= i_crit < i_med < i_info,
+                        f"expected critical < medium < info, got {i_crit}, {i_med}, {i_info}")
+
+    def test_finding_count_in_subtitle(self):
+        arts = [_adb_artifact(rule_id="A1"), _adb_artifact(rule_id="A2")]
+        names = ["A1-1_t.sh", "A2-2_t.sh"]
+        out = render_index(arts, names)
+        self.assertIn("아티팩트 2개 (취약점 2건 기준)", out)
+
+    def test_component_label_rendered_when_present(self):
+        arts = [_adb_artifact(rule_id="MANIFEST-004",
+                              component="com.x.LoginActivity")]
+        names = ["MANIFEST-004-1_a.sh"]
+        out = render_index(arts, names)
+        self.assertIn("`com.x.LoginActivity`", out)
 
     def test_empty_bundle_still_renders(self):
         out = render_index([], [])
-        self.assertIn("0 artifacts", out)
+        self.assertIn("아티팩트 0개", out)
 
 
 class ExportPocsTests(unittest.TestCase):

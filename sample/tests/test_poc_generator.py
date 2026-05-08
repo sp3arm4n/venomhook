@@ -152,7 +152,7 @@ class DebuggableBuilderTests(unittest.TestCase):
         arts = generate_pocs(meta, audit_manifest(meta))
         jdb = next(a for a in arts if "jdb" in a.title.lower())
         self.assertIn("MainActivity", " ".join(jdb.commands))
-        self.assertIn("Launcher activity not detected", jdb.notes)
+        self.assertIn("런처 액티비티를 찾을 수 없습니다", jdb.notes)
 
 
 class CleartextBuilderTests(unittest.TestCase):
@@ -296,7 +296,7 @@ class ExportedProviderBuilderTests(unittest.TestCase):
         self.assertTrue(any("content query" in c for c in a.commands))
         # No authorities on the component -> placeholder + guidance note.
         self.assertTrue(any("<AUTHORITY>" in c for c in a.commands))
-        self.assertIn("android:authorities was not present", a.notes)
+        self.assertIn("android:authorities가 선언되어 있지 않습니다", a.notes)
 
     def test_query_recipe_uses_real_authority_when_present(self) -> None:
         comp = _comp(
@@ -403,7 +403,7 @@ class CoverageMatrixTests(unittest.TestCase):
 class FormatPocsTextTests(unittest.TestCase):
     def test_empty_bundle(self) -> None:
         out = format_pocs_text([])
-        self.assertIn("no actionable findings", out)
+        self.assertIn("실행 가능한 finding 없음", out)
 
     def test_render_includes_severity_rule_and_commands(self) -> None:
         meta = _meta(debuggable=True)
@@ -411,7 +411,7 @@ class FormatPocsTextTests(unittest.TestCase):
         out = format_pocs_text(arts)
         self.assertIn("[HIGH]", out)
         self.assertIn("MANIFEST-001", out)
-        self.assertIn("kind: adb", out)
+        self.assertIn("종류: adb", out)
         self.assertIn("adb forward", out)
 
 

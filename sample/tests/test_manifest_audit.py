@@ -212,7 +212,7 @@ class TestExportedProvider(unittest.TestCase):
             _comp(type="provider", name="com.x.P", exported=True, permission="com.x.PERM"),
         ]))
         finding = next(f for f in report.findings if f.rule_id == "MANIFEST-005")
-        self.assertIn("permission", finding.detail.lower())
+        self.assertIn("권한", finding.detail)
 
     def test_absent_exported_provider_legacy_target_triggers(self):
         report = audit_manifest(_meta(target_sdk=16, components=[
@@ -402,12 +402,12 @@ class TestFormatAuditSummary(unittest.TestCase):
         report = audit_manifest(_meta(debuggable=True))
         s = format_audit_summary(report)
         self.assertIn("com.x", s)
-        self.assertIn("1 finding", s)
+        self.assertIn("취약점 1건", s)
 
     def test_summary_clean_app(self):
         report = audit_manifest(_meta())
         s = format_audit_summary(report)
-        self.assertIn("(no findings)", s)
+        self.assertIn("(탐지된 취약점 없음)", s)
 
     def test_summary_lists_each_finding(self):
         report = audit_manifest(_meta(

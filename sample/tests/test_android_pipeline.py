@@ -77,7 +77,7 @@ class TestAnalyzeApkRequiredFailures(unittest.TestCase):
                 zf.writestr("AndroidManifest.xml", b"\x00\x00\x00\x00")
             with self.assertRaises(AndroidPipelineError) as ctx:
                 analyze_apk(apk, tdp / "work")
-            self.assertIn("no native libraries", str(ctx.exception))
+            self.assertIn("네이티브 라이브러리가 없습니다", str(ctx.exception))
 
     def test_missing_apk_raises(self):
         with tempfile.TemporaryDirectory() as td:
@@ -94,7 +94,7 @@ class TestAnalyzeApkRequiredFailures(unittest.TestCase):
             ):
                 with self.assertRaises(AndroidPipelineError) as ctx:
                     analyze_apk(apk, tdp / "work", use_apktool=False, use_jadx=False)
-                self.assertIn("binary_meta failed", str(ctx.exception))
+                self.assertIn("binary_meta 추출 실패", str(ctx.exception))
 
 
 class TestAnalyzeApkOptionalTools(unittest.TestCase):

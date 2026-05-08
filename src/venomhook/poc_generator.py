@@ -114,22 +114,26 @@ def _build_debuggable(meta: AndroidAppMeta, finding: ManifestFinding) -> list[Po
         ""
         if launcher and "android.intent.action.MAIN" in launcher.intent_actions
         else (
-            "Launcher activity not detected from manifest; substitute the "
-            "actual activity FQN."
+            "manifest에서 런처 액티비티를 찾을 수 없습니다. 실제 액티비티 FQN으로 "
+            "교체해 사용하세요."
         )
     )
     return [
         PoCArtifact(
             rule_id=finding.rule_id,
-            title="Attach jdb to debuggable process",
+            title="디버깅 가능 프로세스에 jdb 연결",
             severity=finding.severity,
             kind="adb",
             package_name=pkg,
-            component=launcher_name,
+            # MANIFEST-001은 app-level finding (finding.component=None).
+            # 런처 액티비티는 프로세스를 시작하기 위한 수단일 뿐 per-component
+            # target이 아니므로 component 필드는 finding과 동일하게 None을
+            # 유지해야 (rule_id, component) 조인 시 같은 그룹으로 묶입니다.
+            component=finding.component,
             description=(
-                "android:debuggable=true allows attaching jdb / Android Studio "
-                "to the live process for breakpoint, variable inspection, and "
-                "method invocation — bypassing any in-app anti-debug logic."
+                "android:debuggable=true 상태에서는 jdb / Android Studio를 실행 중인 "
+                "프로세스에 연결해 브레이크포인트 설정, 변수 조사, 메서드 호출이 "
+                "가능합니다 — 앱 내부의 변조 방지 로직도 우회됩니다."
             ),
             commands=[
                 _adb_shell(["am", "start", "-D", "-n", f"{pkg}/{launcher_name}"]),
@@ -138,22 +142,22 @@ def _build_debuggable(meta: AndroidAppMeta, finding: ManifestFinding) -> list[Po
                 "jdb -attach localhost:8700 -sourcepath .",
             ],
             expected_evidence=(
-                "jdb prints 'Initializing jdb ...' and a (jdb) prompt; "
-                "'classes' lists application classes."
+                "jdb가 'Initializing jdb ...'와 (jdb) 프롬프트를 출력하고, "
+                "'classes' 명령으로 애플리케이션 클래스 목록이 조회됩니다."
             ),
             notes=launcher_note,
             references=list(finding.references),
         ),
         PoCArtifact(
             rule_id=finding.rule_id,
-            title="Read app-private files via run-as",
+            title="run-as로 앱 비공개 파일 읽기",
             severity=finding.severity,
             kind="adb",
             package_name=pkg,
             description=(
-                "Debuggable apps allow `adb shell run-as <pkg>` from any "
-                "non-root device, exposing /data/data/<pkg>/ contents "
-                "(SharedPreferences, sqlite databases, encryption keys)."
+                "디버깅 가능 앱은 root 권한 없는 단말에서도 `adb shell run-as <pkg>` "
+                "사용을 허용합니다. /data/data/<pkg>/ 하위의 SharedPreferences, "
+                "sqlite 데이터베이스, 암호화 키 등이 모두 노출됩니다."
             ),
             commands=[
                 _adb_shell([
@@ -163,8 +167,8 @@ def _build_debuggable(meta: AndroidAppMeta, finding: ManifestFinding) -> list[Po
                 _adb_shell_cmd(f"run-as {_shell_arg(pkg)} cat shared_prefs/*.xml"),
             ],
             expected_evidence=(
-                "Directory listing of the app's private storage and contents "
-                "of XML preferences — not normally readable without root."
+                "앱의 비공개 저장소 디렉터리 리스팅과 XML 환경설정 내용이 "
+                "출력됩니다 — root 권한 없이는 통상 접근 불가한 데이터입니다."
             ),
             references=list(finding.references),
         ),
@@ -176,33 +180,32 @@ def _build_cleartext(meta: AndroidAppMeta, finding: ManifestFinding) -> list[PoC
     return [
         PoCArtifact(
             rule_id=finding.rule_id,
-            title="Intercept HTTP traffic with mitmproxy",
+            title="mitmproxy로 HTTP 트래픽 가로채기",
             severity=finding.severity,
             kind="shell",
             package_name=pkg,
             description=(
-                "Cleartext traffic permitted means HTTP requests/responses "
-                "can be read and modified by an on-path attacker. A local "
-                "mitmproxy can prove the channel is unencrypted; no app "
-                "modification or root is required when the device routes "
-                "through the proxy."
+                "평문 트래픽이 허용되면 경로상의 공격자가 HTTP 요청/응답을 "
+                "그대로 읽고 변조할 수 있습니다. 단말이 프록시 경로를 통과하도록 "
+                "설정하면 앱 수정이나 루팅 없이도 채널이 평문임을 mitmproxy로 "
+                "직접 입증할 수 있습니다."
             ),
             commands=[
                 "mitmproxy --listen-port 8080 --mode regular",
-                "# On device: Settings > Wi-Fi > <network> > "
-                "Proxy: manual host=<PC IP> port=8080",
+                "# 단말에서: 설정 > Wi-Fi > <네트워크> > "
+                "프록시: 수동 host=<PC IP> port=8080",
                 _adb_shell(["am", "start", "-n", f"{pkg}/.MainActivity"]),
-                "# Watch mitmproxy console for plaintext request/response pairs",
+                "# mitmproxy 콘솔에서 평문 요청/응답 쌍 관찰",
             ],
             expected_evidence=(
-                "mitmproxy lists HTTP requests with full URLs, headers, and "
-                "bodies in the clear (no TLS handshake)."
+                "mitmproxy에 전체 URL, 헤더, 바디가 평문으로 표시됩니다 (TLS "
+                "핸드셰이크 없음)."
             ),
             notes=(
-                "If a Network Security Config is present this rule may still "
-                "fire because of an explicit cleartext-permitted domain — "
-                "inspect res/xml/network_security_config.xml to find the "
-                "specific host(s)."
+                "Network Security Config가 존재해도 cleartext가 허용된 특정 "
+                "도메인이 명시되어 있다면 본 룰이 발동할 수 있습니다. "
+                "res/xml/network_security_config.xml을 확인해 해당 호스트를 "
+                "식별하세요."
             ),
             references=list(finding.references),
         ),
@@ -214,33 +217,33 @@ def _build_allow_backup(meta: AndroidAppMeta, finding: ManifestFinding) -> list[
     return [
         PoCArtifact(
             rule_id=finding.rule_id,
-            title="Extract app data via adb backup",
+            title="adb backup으로 앱 데이터 추출",
             severity=finding.severity,
             kind="adb",
             package_name=pkg,
             description=(
-                "android:allowBackup=true (default <31) lets adb perform a "
-                "full data backup — SharedPreferences, databases, files — "
-                "with only USB debugging access. No root required."
+                "android:allowBackup=true (API 31 미만 기본값) 상태에서는 USB "
+                "디버깅 권한만으로 전체 데이터 백업이 가능합니다 — "
+                "SharedPreferences, 데이터베이스, 파일 모두 포함. root 불필요."
             ),
             commands=[
                 _shell_join([
                     "adb", "backup", "-f", f"{pkg}.ab",
                     "-apk", "-shared", "-all", "-system", pkg,
                 ]),
-                "# User must tap 'Back up my data' on the device prompt",
+                "# 단말 화면의 'Back up my data'(내 데이터 백업) 안내를 탭",
                 f"dd if={_shell_arg(f'{pkg}.ab')} bs=24 skip=1 | "
                 f"openssl zlib -d > {_shell_arg(f'{pkg}.tar')}",
                 _shell_join(["tar", "-xvf", f"{pkg}.tar"]),
             ],
             expected_evidence=(
-                "Tar contains apps/<pkg>/{sp,db,f,r}/ trees with the app's "
-                "private data files."
+                "tar 파일 내부에 apps/<pkg>/{sp,db,f,r}/ 디렉터리 트리와 앱의 "
+                "비공개 데이터 파일들이 포함되어 있습니다."
             ),
             notes=(
-                "If backup yields a 0-byte file the app set fullBackupContent "
-                "to exclude everything — partial protection, not a fix. "
-                "Devices >= API 31 may require an --no-system override."
+                "백업 결과가 0바이트라면 fullBackupContent로 전부 제외된 것 — "
+                "부분적 보호일 뿐 근본 해결책은 아닙니다. API 31+ 단말에서는 "
+                "--no-system 옵션이 필요할 수 있습니다."
             ),
             references=list(finding.references),
         ),
@@ -271,17 +274,17 @@ def _build_exported_no_permission(
     pkg = meta.package_name or "<package>"
     component = _find_component(meta, finding.component)
     if component is None:
-        # Degraded mode — finding came from a meta we can't fully introspect.
+        # 축소 모드 — 메타에서 컴포넌트 정보를 충분히 얻지 못한 경우.
         return [PoCArtifact(
             rule_id=finding.rule_id,
-            title=f"Invoke exported component {finding.component or '<unknown>'}",
+            title=f"외부 노출 컴포넌트 호출: {finding.component or '<미상>'}",
             severity=finding.severity,
             kind="adb",
             package_name=pkg,
             component=finding.component,
             description=(
-                "Component is exported with no permission. Substitute the "
-                "appropriate `am` subcommand based on its type."
+                "권한 없이 외부 노출된 컴포넌트입니다. 컴포넌트 종류에 맞춰 `am` "
+                "서브커맨드(start/startservice/broadcast)를 적절히 교체하세요."
             ),
             commands=[
                 _adb_shell([
@@ -292,33 +295,40 @@ def _build_exported_no_permission(
             references=list(finding.references),
         )]
 
+    type_korean = {
+        "activity": "액티비티",
+        "service": "서비스",
+        "receiver": "리시버",
+        "provider": "프로바이더",
+    }.get(component.type, component.type)
+
     actions = component.intent_actions or [None]
     artifacts: list[PoCArtifact] = []
     for action in actions:
         cmd = _am_command_for(component, pkg, action)
         artifacts.append(PoCArtifact(
             rule_id=finding.rule_id,
-            title=f"Invoke exported {component.type} '{component.name}'"
+            title=f"외부 노출 {type_korean} '{component.name}' 호출"
             + (f" (action={action})" if action else ""),
             severity=finding.severity,
             kind="adb",
             package_name=pkg,
             component=component.name,
             description=(
-                f"Exported {component.type} accepts external intents without "
-                "permission. The recipe sends a direct intent; in real "
-                "scenarios attackers also send extras crafted to reach "
-                "trust-decision sites in onCreate/onReceive."
+                f"외부에 노출된 {type_korean}가 권한 없이 외부 인텐트를 수용합니다. "
+                "본 레시피는 직접 인텐트를 전송합니다 — 실제 공격에서는 "
+                "onCreate/onReceive 안의 신뢰 결정 지점으로 전달되는 extras를 "
+                "조작해 함께 보냅니다."
             ),
             commands=[
                 cmd,
-                "# Append crafted extras to probe parsing logic, e.g.:",
+                "# 파싱 로직을 탐색하려면 extras를 추가, 예:",
                 f"#   {cmd} --es payload \"$(printf 'A%.0s' {{1..1024}})\"",
             ],
             expected_evidence=(
-                "Component starts / receives the intent under the calling "
-                "shell uid (2000) instead of the app uid; logcat shows "
-                "onCreate/onStartCommand/onReceive entries."
+                "컴포넌트가 호출자 shell uid(2000)로 시작/수신됩니다 (앱 uid가 "
+                "아님). logcat에 onCreate/onStartCommand/onReceive 진입 로그가 "
+                "남습니다."
             ),
             references=list(finding.references),
         ))
@@ -345,27 +355,32 @@ def _frida_intent_observer(
     else:  # pragma: no cover — providers go through MANIFEST-005
         body = f"// unsupported component type: {component.type}"
         entry = "?"
+    type_korean = {
+        "activity": "액티비티",
+        "service": "서비스",
+        "receiver": "리시버",
+        "provider": "프로바이더",
+    }.get(component.type, component.type)
     return PoCArtifact(
         rule_id=finding.rule_id,
-        title=f"Observe intents to '{component.name}' via Frida ({entry})",
+        title=f"Frida로 '{component.name}' 인텐트 관찰 ({entry})",
         severity=finding.severity,
         kind="frida",
         package_name=pkg,
         component=component.name,
         description=(
-            f"Hooks {component.type}.{entry} on '{component.name}' and "
-            "prints the incoming Intent action + extras. Pair with the "
-            "ADB recipe to confirm reachability and capture the payload "
-            "the attacker would send."
+            f"'{component.name}'의 {type_korean}.{entry}를 후킹해 들어오는 인텐트의 "
+            "action과 extras를 출력합니다. ADB 레시피와 함께 실행해 도달 가능성과 "
+            "공격자가 보내는 페이로드 형태를 동시에 확인하세요."
         ),
         commands=body.splitlines(),
         expected_evidence=(
-            f"frida console prints '[+] {component.name}.{entry} ...' on "
-            "every external invocation; extras dump shows the parameters "
-            "the calling shell supplied."
+            f"외부에서 호출될 때마다 frida 콘솔에 '[+] {component.name}.{entry} ...'가 "
+            "출력되고, extras 덤프를 통해 호출자가 전달한 매개변수를 확인할 수 "
+            "있습니다."
         ),
         notes=(
-            "Run with: "
+            "실행 방법: "
             + _shell_join([
                 "frida", "-U", "-f", pkg,
                 "-l", "<this-file>.frida.js", "--no-pause",
@@ -454,12 +469,12 @@ def _provider_authority(meta: AndroidAppMeta, finding: ManifestFinding) -> tuple
         suffix = ""
         if len(component.authorities) > 1:
             extras = ", ".join(component.authorities[1:])
-            suffix = f"Additional authorities declared: {extras}."
+            suffix = f"추가로 선언된 authorities: {extras}."
         return primary, suffix
     return (
         "<AUTHORITY>",
-        "android:authorities was not present on this provider; substitute "
-        "the actual authority from the decoded AndroidManifest.xml.",
+        "본 프로바이더에 android:authorities가 선언되어 있지 않습니다. "
+        "디코딩된 AndroidManifest.xml에서 실제 authority를 확인해 교체하세요.",
     )
 
 
@@ -471,15 +486,15 @@ def _build_exported_provider(
     return [
         PoCArtifact(
             rule_id=finding.rule_id,
-            title=f"Query exported provider '{finding.component}'",
+            title=f"외부 노출 프로바이더 '{finding.component}' 조회",
             severity=finding.severity,
             kind="adb",
             package_name=pkg,
             component=finding.component,
             description=(
-                "Exported provider exposes content:// URIs to other apps. "
-                "Without root or special permissions the operator can issue "
-                "query/insert/update/delete via `adb shell content`."
+                "외부 노출된 프로바이더는 content:// URI를 다른 앱에 공개합니다. "
+                "root 권한이나 특수 권한 없이도 `adb shell content`로 "
+                "query/insert/update/delete를 호출할 수 있습니다."
             ),
             commands=[
                 _adb_shell(["content", "query", "--uri", f"content://{authority}/"]),
@@ -489,8 +504,8 @@ def _build_exported_provider(
                 ]),
             ],
             expected_evidence=(
-                "Returned rows from the provider, or 'No result found.' "
-                "(an unauthorized denial would surface SecurityException)."
+                "프로바이더가 반환한 행이 출력되거나 'No result found.'가 표시됩니다. "
+                "(비인가 거부 시에는 SecurityException이 발생합니다.)"
             ),
             notes=notes_suffix,
             references=list(finding.references),
@@ -501,29 +516,29 @@ def _build_exported_provider(
 def _build_grant_uri(meta: AndroidAppMeta, finding: ManifestFinding) -> list[PoCArtifact]:
     pkg = meta.package_name or "<package>"
     authority, notes_suffix = _provider_authority(meta, finding)
-    notes = "Pair with MANIFEST-005 if the provider is also exported."
+    notes = "프로바이더가 외부 노출(MANIFEST-005)도 함께 발생한 경우 결합해 시도."
     if notes_suffix:
         notes = f"{notes} {notes_suffix}"
     return [
         PoCArtifact(
             rule_id=finding.rule_id,
-            title=f"Path-traversal probes against '{finding.component}'",
+            title=f"'{finding.component}' Path-traversal 시도",
             severity=finding.severity,
             kind="adb",
             package_name=pkg,
             component=finding.component,
             description=(
-                "grantUriPermissions=true combined with weak path validation "
-                "lets a caller read files outside the intended directory by "
-                "injecting '..' segments into the URI path."
+                "grantUriPermissions=true와 약한 경로 검증이 결합되면 호출자가 URI "
+                "경로에 '..' 세그먼트를 주입해 의도된 디렉터리 밖의 파일을 읽을 수 "
+                "있습니다."
             ),
             commands=[
-                "# Probe with a normal path first to confirm reachability:",
+                "# 도달 가능성 확인을 위한 정상 경로 시도:",
                 _adb_shell([
                     "content", "query", "--uri",
                     f"content://{authority}/files/test",
                 ]),
-                "# Then probe traversal payloads:",
+                "# Traversal 페이로드 시도:",
                 _adb_shell([
                     "content", "read", "--uri",
                     f"content://{authority}/files/../../../etc/hosts",
@@ -535,9 +550,9 @@ def _build_grant_uri(meta: AndroidAppMeta, finding: ManifestFinding) -> list[PoC
                 ]),
             ],
             expected_evidence=(
-                "File contents from outside the provider's intended root "
-                "(e.g., /etc/hosts or app-private SharedPreferences) — "
-                "indicates missing canonicalization."
+                "프로바이더의 의도된 루트 밖 파일 내용 (예: /etc/hosts, 앱 비공개 "
+                "SharedPreferences)이 반환됩니다 — 정규화(canonicalization) 누락의 "
+                "증거입니다."
             ),
             notes=notes,
             references=list(finding.references),
@@ -583,24 +598,24 @@ def format_pocs_text(artifacts: list[PoCArtifact]) -> str:
     spaces so the bundle can be grepped/sliced without breaking quoting.
     """
     if not artifacts:
-        return "PoC bundle — (no actionable findings)"
+        return "PoC 번들 — (실행 가능한 finding 없음)"
 
-    lines = [f"PoC bundle — {len(artifacts)} artifact{'s' if len(artifacts) != 1 else ''}", ""]
+    lines = [f"PoC 번들 — 아티팩트 {len(artifacts)}개", ""]
     for i, a in enumerate(artifacts, 1):
         comp = f" [{a.component}]" if a.component else ""
         lines.append(f"#{i} [{a.severity.upper()}] {a.rule_id} {a.title}{comp}")
-        lines.append(f"   kind: {a.kind}    package: {a.package_name}")
+        lines.append(f"   종류: {a.kind}    패키지: {a.package_name}")
         if a.description:
             lines.append(f"   {a.description}")
         if a.commands:
-            lines.append("   commands:")
+            lines.append("   명령어:")
             for c in a.commands:
                 lines.append(f"     {c}")
         if a.expected_evidence:
-            lines.append(f"   expected: {a.expected_evidence}")
+            lines.append(f"   예상 결과: {a.expected_evidence}")
         if a.notes:
-            lines.append(f"   notes:    {a.notes}")
+            lines.append(f"   비고:      {a.notes}")
         if a.references:
-            lines.append(f"   refs:     {', '.join(a.references)}")
+            lines.append(f"   참고:      {', '.join(a.references)}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"

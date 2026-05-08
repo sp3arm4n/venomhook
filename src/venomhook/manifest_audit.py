@@ -127,16 +127,17 @@ def _check_debuggable(meta: AndroidAppMeta) -> list[ManifestFinding]:
         return []
     return [ManifestFinding(
         rule_id="MANIFEST-001",
-        title="Debuggable Application",
+        title="디버깅 가능 애플리케이션",
         severity=SEV_HIGH,
         detail=(
-            "Application is marked android:debuggable=true. Anyone with adb access "
-            "can attach a debugger, dump memory, and bypass anti-tamper logic."
+            "애플리케이션에 android:debuggable=true가 설정되어 있습니다. adb 접근 "
+            "권한이 있는 누구나 디버거를 부착해 메모리를 덤프하거나 변조 방지 "
+            "로직을 우회할 수 있습니다."
         ),
         remediation=(
-            "Remove android:debuggable or set it to false in production builds. "
-            "Rely on build variant configuration so debug builds carry the flag and "
-            "release builds don't."
+            "프로덕션 빌드에서는 android:debuggable 속성을 제거하거나 false로 "
+            "설정하세요. 빌드 variant 구성을 통해 debug 빌드만 해당 플래그를 "
+            "갖고 release 빌드에는 적용되지 않도록 하는 것이 권장됩니다."
         ),
         references=["OWASP MASVS-RESILIENCE-1", "CWE-489"],
     )]
@@ -151,8 +152,8 @@ def _check_cleartext_traffic(meta: AndroidAppMeta) -> list[ManifestFinding]:
     if explicit is True:
         triggered = True
         detail = (
-            "android:usesCleartextTraffic=true is set explicitly. HTTP traffic is "
-            "permitted, exposing the app to MITM interception and modification."
+            "android:usesCleartextTraffic=true가 명시적으로 설정되어 있습니다. "
+            "HTTP 평문 트래픽이 허용되어 MITM 가로채기와 변조 위협에 노출됩니다."
         )
     elif (
         explicit is None
@@ -162,21 +163,22 @@ def _check_cleartext_traffic(meta: AndroidAppMeta) -> list[ManifestFinding]:
     ):
         triggered = True
         detail = (
-            f"targetSdk={target} (<28) and neither usesCleartextTraffic nor a "
-            "Network Security Config is specified; the platform default permits HTTP."
+            f"targetSdk={target} (<28)이며 usesCleartextTraffic이나 Network "
+            "Security Config 모두 지정되지 않았습니다. 플랫폼 기본값이 HTTP를 "
+            "허용합니다."
         )
 
     if not triggered:
         return []
     return [ManifestFinding(
         rule_id="MANIFEST-002",
-        title="Cleartext Traffic Permitted",
+        title="평문(HTTP) 트래픽 허용",
         severity=SEV_HIGH,
         detail=detail,
         remediation=(
-            "Set android:usesCleartextTraffic=false and serve all traffic over HTTPS. "
-            "Define a Network Security Config (res/xml/network_security_config.xml) "
-            "for narrow exceptions if absolutely required."
+            "android:usesCleartextTraffic=false로 설정하고 모든 트래픽을 HTTPS로 "
+            "전송하세요. 부득이한 예외가 필요한 경우 Network Security Config "
+            "(res/xml/network_security_config.xml)에 좁게 정의합니다."
         ),
         references=["OWASP MASVS-NETWORK-1", "CWE-319"],
     )]
@@ -187,30 +189,31 @@ def _check_allow_backup(meta: AndroidAppMeta) -> list[ManifestFinding]:
     target = meta.target_sdk
 
     if explicit is False:
-        return []  # explicitly disabled — safe
+        return []  # 명시적 비활성화 — 안전
     if explicit is True:
         detail = (
-            "android:allowBackup=true is set explicitly. App data is included in "
-            "adb backup and cloud backup, exposing SharedPreferences/databases on "
-            "rooted or USB-debug devices."
+            "android:allowBackup=true가 명시적으로 설정되어 있습니다. 앱 데이터가 "
+            "adb backup과 클라우드 백업에 포함되어, 루팅 또는 USB 디버그 환경에서 "
+            "SharedPreferences/데이터베이스가 추출될 수 있습니다."
         )
     elif explicit is None and (target is None or target < TARGET_SDK_ALLOW_BACKUP_DEFAULT_FALSE):
         detail = (
-            f"allowBackup is unset and targetSdk={target if target else 'unspecified'} "
-            f"(<{TARGET_SDK_ALLOW_BACKUP_DEFAULT_FALSE}); the platform default is true."
+            f"allowBackup 속성이 미지정이고 targetSdk={target if target else '미지정'} "
+            f"(<{TARGET_SDK_ALLOW_BACKUP_DEFAULT_FALSE})이라 플랫폼 기본값이 "
+            "true로 적용됩니다."
         )
     else:
         return []
 
     return [ManifestFinding(
         rule_id="MANIFEST-003",
-        title="Allow Backup Enabled",
+        title="앱 백업 허용",
         severity=SEV_MEDIUM,
         detail=detail,
         remediation=(
-            "Set android:allowBackup=false, or define android:fullBackupContent / "
-            "android:dataExtractionRules to exclude sensitive paths (databases, "
-            "credential stores, encryption keys)."
+            "android:allowBackup=false로 설정하거나 android:fullBackupContent / "
+            "android:dataExtractionRules를 정의해 민감 경로(데이터베이스, 자격증명 "
+            "저장소, 암호화 키)를 제외하세요."
         ),
         references=["OWASP MASVS-STORAGE-2", "CWE-922"],
     )]
@@ -226,25 +229,31 @@ def _check_exported_no_permission(meta: AndroidAppMeta) -> list[ManifestFinding]
             continue
         if _is_effectively_exported(c, meta.target_sdk) and c.intent_actions and not c.permission:
             export_state = (
-                "android:exported=true"
+                "android:exported=true로 명시"
                 if c.exported_declared
-                else "implicitly exported because android:exported is absent"
+                else "android:exported 속성 부재로 묵시적 export"
             )
+            type_korean = {
+                "activity": "액티비티",
+                "service": "서비스",
+                "receiver": "리시버",
+                "provider": "프로바이더",
+            }.get(c.type, c.type)
             findings.append(ManifestFinding(
                 rule_id="MANIFEST-004",
-                title=f"Exported {c.type} without permission",
+                title=f"권한 없는 외부 노출 {type_korean}",
                 severity=SEV_HIGH,
                 component=c.name,
                 detail=(
-                    f"{c.type} '{c.name}' is {export_state} with intent-filter "
-                    f"actions {c.intent_actions} and no android:permission. Any installed "
-                    "app can invoke it directly."
+                    f"{type_korean} '{c.name}'이 {export_state} 상태이며 "
+                    f"intent-filter actions {c.intent_actions} 보유, android:permission "
+                    "미설정입니다. 설치된 어떤 앱이든 직접 호출 가능합니다."
                 ),
                 remediation=(
-                    "Add android:permission with at least signature-level protection, "
-                    "or set android:exported=false if external invocation is unintended. "
-                    "On API 31+ the exported attribute MUST be explicit when intent-filter "
-                    "is present."
+                    "최소 signature 수준의 android:permission을 추가하거나, 외부 "
+                    "호출이 의도된 것이 아니라면 android:exported=false로 설정하세요. "
+                    "API 31+에서는 intent-filter가 있을 때 exported 속성을 반드시 "
+                    "명시해야 합니다."
                 ),
                 references=["OWASP MASVS-PLATFORM-1", "CWE-926"],
             ))
@@ -257,31 +266,30 @@ def _check_exported_provider(meta: AndroidAppMeta) -> list[ManifestFinding]:
         if c.type != "provider" or not _is_effectively_exported(c, meta.target_sdk):
             continue
         export_state = (
-            "explicitly exported"
+            "명시적 export"
             if c.exported_declared
-            else "implicitly exported because targetSdk is below 17 or unspecified"
+            else "targetSdk < 17 또는 미지정으로 인한 묵시적 export"
         )
-        # An exported provider WITHOUT permission is critical; with permission,
-        # still high (third-party signing keys can be obtained).
+        # 권한 없는 exported provider는 critical, 권한 있어도 high
+        # (서드파티 signing 키 획득 가능성).
         severity = SEV_HIGH if c.permission else SEV_HIGH
         findings.append(ManifestFinding(
             rule_id="MANIFEST-005",
-            title="Exported content provider",
+            title="외부 노출 Content Provider",
             severity=severity,
             component=c.name,
             detail=(
-                f"Content provider '{c.name}' is {export_state}. Other apps can issue "
-                f"queries / inserts / updates / deletes against it"
+                f"콘텐츠 프로바이더 '{c.name}'이 {export_state} 상태입니다. 다른 "
+                "앱이 query / insert / update / delete를 호출할 수 있습니다"
                 + (
-                    f" (currently guarded by permission '{c.permission}')."
-                    if c.permission else " without authentication."
+                    f" (현재 '{c.permission}' 권한으로 보호됨)."
+                    if c.permission else " (인증 보호 없음)."
                 )
             ),
             remediation=(
-                "Set android:exported=false unless cross-app data sharing is "
-                "intentional. For intentional sharing, use signature-level "
-                "permissions and validate ALL incoming URIs server-side to "
-                "prevent path traversal."
+                "앱 간 데이터 공유가 의도된 것이 아니라면 android:exported=false로 "
+                "설정하세요. 의도된 공유라면 signature 수준 권한을 사용하고, 들어오는 "
+                "모든 URI를 서버 측에서 검증해 path traversal을 차단해야 합니다."
             ),
             references=["OWASP MASVS-PLATFORM-1", "CWE-926"],
         ))
@@ -295,18 +303,18 @@ def _check_provider_grant_uri(meta: AndroidAppMeta) -> list[ManifestFinding]:
             continue
         findings.append(ManifestFinding(
             rule_id="MANIFEST-006",
-            title="Provider with grantUriPermissions",
+            title="grantUriPermissions=true 프로바이더",
             severity=SEV_MEDIUM,
             component=c.name,
             detail=(
-                f"Provider '{c.name}' declares android:grantUriPermissions=true. "
-                "Combined with weak URI validation this enables path traversal "
-                "or unauthorized URI access (CWE-22)."
+                f"프로바이더 '{c.name}'에 android:grantUriPermissions=true가 "
+                "선언되어 있습니다. URI 검증이 약한 경우 path traversal이나 "
+                "비인가 URI 접근으로 이어질 수 있습니다 (CWE-22)."
             ),
             remediation=(
-                "Restrict <grant-uri-permission> to specific path patterns. "
-                "Validate URI authority + path on every incoming call; reject "
-                "URIs containing '..' or absolute external paths."
+                "<grant-uri-permission>을 구체적인 path pattern으로 제한하세요. "
+                "들어오는 모든 호출에서 URI authority와 path를 검증하고, '..' "
+                "또는 외부 절대 경로가 포함된 URI는 거부해야 합니다."
             ),
             references=["OWASP MASVS-PLATFORM-1", "CWE-22"],
         ))
@@ -319,16 +327,17 @@ def _check_dangerous_permissions(meta: AndroidAppMeta) -> list[ManifestFinding]:
         return []
     return [ManifestFinding(
         rule_id="MANIFEST-007",
-        title=f"Dangerous permission surface ({len(risky)} permissions)",
+        title=f"위험 권한 노출 면적 ({len(risky)}개)",
         severity=SEV_INFO,
         detail=(
-            f"App requests {len(risky)} dangerous permission(s): {', '.join(risky)}. "
-            "Each grants access to sensitive user data and must be justified."
+            f"앱이 위험 권한 {len(risky)}개를 요청합니다: {', '.join(risky)}. "
+            "각각 민감한 사용자 데이터에 접근하므로 필요성이 정당화되어야 합니다."
         ),
         remediation=(
-            "Review necessity per permission. Prefer scoped APIs (Storage Access "
-            "Framework, MediaStore, FusedLocationProvider with COARSE) over broader "
-            "ones. Implement runtime permission requests with rationale dialogs."
+            "권한별 필요성을 재검토하세요. 광범위한 권한 대신 scoped API "
+            "(Storage Access Framework, MediaStore, COARSE 위치를 사용하는 "
+            "FusedLocationProvider 등)를 우선 사용하고, 런타임 권한 요청 시 "
+            "사유 설명 다이얼로그를 함께 제공하세요."
         ),
         references=["OWASP MASVS-PRIVACY-1"],
     )]
@@ -339,16 +348,16 @@ def _check_min_sdk(meta: AndroidAppMeta) -> list[ManifestFinding]:
         return []
     return [ManifestFinding(
         rule_id="MANIFEST-008",
-        title="Outdated minSdkVersion",
+        title="구버전 minSdkVersion",
         severity=SEV_MEDIUM,
         detail=(
-            f"minSdkVersion={meta.min_sdk} is below {MIN_RECOMMENDED_MIN_SDK} "
-            f"(Android 6.0). Runtime permissions, SafetyNet attestation, and "
-            f"hardware-backed Keystore are not enforced on these devices."
+            f"minSdkVersion={meta.min_sdk}이 권장 하한 {MIN_RECOMMENDED_MIN_SDK} "
+            "(Android 6.0) 미만입니다. 해당 단말에서는 런타임 권한, SafetyNet "
+            "어테스테이션, 하드웨어 기반 Keystore가 강제되지 않습니다."
         ),
         remediation=(
-            f"Raise minSdkVersion to at least {MIN_RECOMMENDED_MIN_SDK}, ideally 26+. "
-            "Older API levels also lack TLS 1.2 by default."
+            f"minSdkVersion을 최소 {MIN_RECOMMENDED_MIN_SDK} 이상(권장 26+)으로 "
+            "올리세요. 구버전은 TLS 1.2도 기본 지원하지 않습니다."
         ),
         references=["OWASP MASVS-ARCH-9"],
     )]
@@ -359,17 +368,17 @@ def _check_target_sdk(meta: AndroidAppMeta) -> list[ManifestFinding]:
         return []
     return [ManifestFinding(
         rule_id="MANIFEST-009",
-        title="Outdated targetSdkVersion",
+        title="구버전 targetSdkVersion",
         severity=SEV_MEDIUM,
         detail=(
-            f"targetSdkVersion={meta.target_sdk} is below {MIN_RECOMMENDED_TARGET_SDK}. "
-            "App misses recent security/privacy enforcements: scoped storage (29), "
-            "package visibility (30), foreground-service types (31), explicit "
-            "exported attribute (31)."
+            f"targetSdkVersion={meta.target_sdk}이 권장 하한 "
+            f"{MIN_RECOMMENDED_TARGET_SDK} 미만입니다. 최근 보안/프라이버시 "
+            "강제사항(scoped storage(29), package visibility(30), foreground-"
+            "service types(31), exported 속성 명시(31))이 적용되지 않습니다."
         ),
         remediation=(
-            f"Raise targetSdkVersion to a recent Android version "
-            f"(33+ recommended; Google Play requires 33+ for new submissions)."
+            f"targetSdkVersion을 최신 Android 버전(33+ 권장; Google Play 신규 "
+            "제출 요구사항)으로 올리세요."
         ),
         references=["OWASP MASVS-ARCH-9"],
     )]
@@ -417,15 +426,15 @@ def format_audit_summary(report: AndroidAuditReport) -> str:
     counts = report.severity_counts
     total = sum(counts.values())
     lines = [
-        f"AndroidManifest audit — {report.package_name or '<no package>'} "
-        f"({total} finding{'s' if total != 1 else ''})"
+        f"AndroidManifest 감사 — {report.package_name or '<패키지명 없음>'} "
+        f"(취약점 {total}건)"
     ]
     for sev in (SEV_CRITICAL, SEV_HIGH, SEV_MEDIUM, SEV_LOW, SEV_INFO):
         n = counts.get(sev, 0)
         if n:
             lines.append(f"  {sev}: {n}")
     if total == 0:
-        return lines[0] + "\n  (no findings)"
+        return lines[0] + "\n  (탐지된 취약점 없음)"
     lines.append("")
     for f in report.findings:
         component_part = f" [{f.component}]" if f.component else ""

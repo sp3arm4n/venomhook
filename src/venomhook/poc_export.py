@@ -67,32 +67,32 @@ def _filename_for(idx: int, artifact: PoCArtifact) -> str:
 def _comment_block(artifact: PoCArtifact, prefix: str = "# ") -> list[str]:
     """Header comment block shared by sh/frida renderers (different prefixes)."""
     lines = [
-        f"{prefix}venomhook PoC artifact",
-        f"{prefix}rule:        {artifact.rule_id}",
-        f"{prefix}title:       {artifact.title}",
-        f"{prefix}severity:    {artifact.severity}",
-        f"{prefix}kind:        {artifact.kind}",
-        f"{prefix}package:     {artifact.package_name}",
+        f"{prefix}venomhook PoC 아티팩트",
+        f"{prefix}룰:        {artifact.rule_id}",
+        f"{prefix}제목:      {artifact.title}",
+        f"{prefix}심각도:    {artifact.severity}",
+        f"{prefix}종류:      {artifact.kind}",
+        f"{prefix}패키지:    {artifact.package_name}",
     ]
     if artifact.component:
-        lines.append(f"{prefix}component:   {artifact.component}")
+        lines.append(f"{prefix}컴포넌트:  {artifact.component}")
     if artifact.description:
         lines.append(f"{prefix}")
         for ln in artifact.description.splitlines():
             lines.append(f"{prefix}{ln}")
     if artifact.expected_evidence:
         lines.append(f"{prefix}")
-        lines.append(f"{prefix}expected evidence:")
+        lines.append(f"{prefix}예상 결과:")
         for ln in artifact.expected_evidence.splitlines():
             lines.append(f"{prefix}  {ln}")
     if artifact.notes:
         lines.append(f"{prefix}")
-        lines.append(f"{prefix}notes:")
+        lines.append(f"{prefix}비고:")
         for ln in artifact.notes.splitlines():
             lines.append(f"{prefix}  {ln}")
     if artifact.references:
         lines.append(f"{prefix}")
-        lines.append(f"{prefix}references: {', '.join(artifact.references)}")
+        lines.append(f"{prefix}참고: {', '.join(artifact.references)}")
     return lines
 
 
@@ -104,7 +104,7 @@ def render_sh(artifact: PoCArtifact) -> str:
     lines.append("set -u")
     lines.append("")
     if not artifact.commands:
-        lines.append("echo 'no commands recorded for this artifact'")
+        lines.append("echo '본 아티팩트에 기록된 명령이 없습니다'")
     else:
         lines.extend(artifact.commands)
     return "\n".join(lines) + "\n"
@@ -112,11 +112,11 @@ def render_sh(artifact: PoCArtifact) -> str:
 
 def _render_frida(artifact: PoCArtifact) -> str:
     """Render a frida-kind artifact as a .frida.js stub."""
-    lines = ["// venomhook PoC — frida script"]
+    lines = ["// venomhook PoC — Frida 스크립트"]
     lines.extend(_comment_block(artifact, prefix="// "))
     lines.append("")
     if not artifact.commands:
-        lines.append("// (no script body recorded)")
+        lines.append("// (스크립트 본문이 기록되지 않았습니다)")
     else:
         lines.extend(artifact.commands)
     return "\n".join(lines) + "\n"
@@ -125,43 +125,93 @@ def _render_frida(artifact: PoCArtifact) -> str:
 def _render_info(artifact: PoCArtifact) -> str:
     """Render an info-kind artifact as a markdown note (no executable parts)."""
     parts = [f"# {artifact.rule_id} — {artifact.title}", ""]
-    parts.append(f"- **severity:** {artifact.severity}")
-    parts.append(f"- **package:** {artifact.package_name}")
+    parts.append(f"- **심각도:** {artifact.severity}")
+    parts.append(f"- **패키지:** {artifact.package_name}")
     if artifact.component:
-        parts.append(f"- **component:** {artifact.component}")
+        parts.append(f"- **컴포넌트:** {artifact.component}")
     if artifact.references:
-        parts.append(f"- **references:** {', '.join(artifact.references)}")
+        parts.append(f"- **참고:** {', '.join(artifact.references)}")
     if artifact.description:
         parts.extend(["", artifact.description])
     if artifact.commands:
-        parts.extend(["", "## Commands", "", "```", *artifact.commands, "```"])
+        parts.extend(["", "## 명령어", "", "```", *artifact.commands, "```"])
     if artifact.expected_evidence:
-        parts.extend(["", "## Expected evidence", "", artifact.expected_evidence])
+        parts.extend(["", "## 예상 결과", "", artifact.expected_evidence])
     if artifact.notes:
-        parts.extend(["", "## Notes", "", artifact.notes])
+        parts.extend(["", "## 비고", "", artifact.notes])
     return "\n".join(parts) + "\n"
 
 
+_SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
 def render_index(artifacts: list[PoCArtifact], filenames: list[str]) -> str:
-    """Markdown README listing each exported artifact in order."""
+    """Markdown README listing every exported artifact, grouped by finding.
+
+    Artifacts that share the same ``(rule_id, component)`` belong to the
+    same parent finding; they are rendered under one heading so the
+    operator can see at a glance which PoCs prove which finding instead
+    of scanning a flat ordered list. Findings are ordered by severity
+    (critical → info), then by rule_id, then by component.
+    """
     lines = [
-        "# venomhook PoC bundle",
+        "# venomhook PoC 번들",
         "",
-        f"_{len(artifacts)} artifact{'s' if len(artifacts) != 1 else ''}_",
+        f"_아티팩트 {len(artifacts)}개_",
         "",
-        "| # | rule | severity | kind | file |",
-        "|---|------|----------|------|------|",
     ]
-    for i, (a, fn) in enumerate(zip(artifacts, filenames), 1):
-        lines.append(
-            f"| {i} | {a.rule_id} | {a.severity} | {a.kind} | "
-            f"[`{fn}`](./{fn}) |"
-        )
+
+    # Group artifacts by (rule_id, component); preserve original index so
+    # the {idx}_ prefix lookup stays correct.
+    groups: dict[tuple[str, str | None], list[tuple[int, PoCArtifact, str]]] = {}
+    for idx, (a, fn) in enumerate(zip(artifacts, filenames), 1):
+        key = (a.rule_id, a.component)
+        groups.setdefault(key, []).append((idx, a, fn))
+
+    def _group_sort_key(item: tuple[tuple[str, str | None], list]) -> tuple:
+        (rule_id, component), entries = item
+        # Severity inherited from the first artifact in the group; PoC
+        # artifacts in a single finding share the same severity.
+        sev = entries[0][1].severity.lower()
+        return (_SEV_ORDER.get(sev, 9), rule_id, component or "")
+
+    if not groups:
+        lines.append("_아티팩트가 없습니다._")
+        return "\n".join(lines) + "\n"
+
+    n_findings = len(groups)
+    lines[2] = (
+        f"_아티팩트 {len(artifacts)}개 (취약점 {n_findings}건 기준)_"
+    )
+
+    lines.append("## 목차")
     lines.append("")
+
+    for (rule_id, component), entries in sorted(groups.items(), key=_group_sort_key):
+        sev = entries[0][1].severity.upper()
+        title = entries[0][1].title
+        # The first artifact's title often duplicates a finding-level
+        # description; downstream PoCs in the same group may have their
+        # own per-recipe titles. Use the rule_id + component as the
+        # canonical group label so it stays stable.
+        comp_suffix = f" [`{component}`]" if component else ""
+        lines.append(f"### [{sev}] {rule_id}{comp_suffix}")
+        lines.append("")
+        lines.append(f"_{title}_" if title else "")
+        lines.append("")
+        lines.append("| # | 종류 | 레시피 | 파일 |")
+        lines.append("|---|------|--------|------|")
+        for idx, a, fn in entries:
+            lines.append(
+                f"| {idx} | {a.kind} | {a.title} | "
+                f"[`{fn}`](./{fn}) |"
+            )
+        lines.append("")
+
     lines.append(
-        "Each .sh file is self-contained and runnable. Review the header "
-        "comment before executing — recipes touch live processes / device "
-        "storage and require operator consent on a controlled test target."
+        "각 .sh 파일은 자체 포함된 실행 가능 스크립트입니다. 실제 프로세스 / 단말 "
+        "저장소를 건드리므로, 통제된 테스트 대상에서만 운영자의 명시적 동의 하에 "
+        "실행하세요. 실행 전 헤더 주석을 반드시 확인합니다."
     )
     return "\n".join(lines) + "\n"
 
