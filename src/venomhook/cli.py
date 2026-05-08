@@ -86,6 +86,11 @@ def _add_llm_flags(parser: argparse.ArgumentParser) -> None:
         help="Phase 5 ② — call LLM to fill HookSpec.proto (ret + arg types) for specs the rule layer left empty",
     )
     parser.add_argument(
+        "--use-llm-flow",
+        action="store_true",
+        help="Phase 5 ③ — call LLM to write a one-sentence Java↔Native description into HookSpec.description (JNI-named specs only)",
+    )
+    parser.add_argument(
         "--llm-provider",
         type=str,
         default="anthropic",
@@ -128,6 +133,7 @@ def _build_llm_runtime(args: argparse.Namespace):
     enabled_flags = [
         getattr(args, "use_llm_tagging", False),
         getattr(args, "use_llm_proto", False),
+        getattr(args, "use_llm_flow", False),
     ]
     if not any(enabled_flags):
         return None
@@ -156,12 +162,13 @@ def _build_llm_options(args: argparse.Namespace):
     single (provider, budget, cache) so the budget cap and cache are
     enforced across *all* enabled Phase 5 points rather than per-point.
 
-    Returns ``(tagging_options, proto_options)`` tuple. Either element is
-    None when the corresponding ``--use-llm-*`` flag wasn't set.
+    Returns ``(tagging_options, proto_options, flow_options)`` tuple.
+    Each element is None when the corresponding ``--use-llm-*`` flag
+    wasn't set.
     """
     runtime = _build_llm_runtime(args)
     if runtime is None:
-        return None, None
+        return None, None, None
     provider, budget, cache = runtime
 
     tagging_options = None
@@ -178,7 +185,18 @@ def _build_llm_options(args: argparse.Namespace):
             provider=provider, budget=budget, cache=cache
         )
 
-    return tagging_options, proto_options
+    flow_options = None
+    if getattr(args, "use_llm_flow", False):
+        from venomhook.static_pipeline import LLMFlowOptions
+        # bridges=None: the offset-static path doesn't currently feed JNI
+        # bridges into the static pipeline. The flow module falls back to
+        # demangling Java_<class>_<method> from the symbol name, which
+        # gives the LLM a usable class/method label without bridges.
+        flow_options = LLMFlowOptions(
+            provider=provider, budget=budget, cache=cache, bridges=None,
+        )
+
+    return tagging_options, proto_options, flow_options
 
 
 def app(argv: list[str] | None = None) -> None:
@@ -617,7 +635,7 @@ def cmd_offset_static(args: argparse.Namespace) -> None:
             project_dir=args.ghidra_project_dir,
             project_name=args.ghidra_project_name,
         )
-    llm_tagging, llm_proto = _build_llm_options(args)
+    llm_tagging, llm_proto, llm_flow = _build_llm_options(args)
     pipeline = StaticPipeline(
         top_n=args.top,
         score_config=score_cfg,
@@ -625,6 +643,7 @@ def cmd_offset_static(args: argparse.Namespace) -> None:
         ghidra_runner=ghidra_runner,
         llm_tagging=llm_tagging,
         llm_proto=llm_proto,
+        llm_flow=llm_flow,
     )
     if not args.static_json and not args.binary:
         raise SystemExit("Provide either --static-json or --binary")

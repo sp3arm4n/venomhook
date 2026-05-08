@@ -615,8 +615,40 @@ arg2: const char *
 폴백은 ①과 동일 — provider unavailable / parse 실패 / 예산 초과는 모두
 조용히 룰 기반 proto (즉 빈 `HookProto`) 그대로 유지.
 
-③ Java↔Native 흐름 / ④ 런타임 해석 / ⑤ Sig 자가복구는 후속 unit에서
-추가됩니다.
+### ③ Java↔Native 흐름 — `--use-llm-flow`
+
+JNI 함수(이름이 `Java_<class>_<method>` 패턴)에 대해 Java 호출자와
+native 코드를 합쳐 한 문장 설명을 `HookSpec.description`(신설 필드)에
+씁니다. 비-JNI 심볼(rust_main, internal_helper 등)은 자동으로 스킵.
+
+```bash
+venomhook offset-static \
+  --static-json ./out/staticmeta.android.json \
+  --use-llm-flow \
+  --llm-token-budget 30000 \
+  --out ./out/venomhook.json
+```
+
+prompt 입력:
+- 가능하면 `JniBridge` (정확한 Java 클래스 FQN + 선언 시그니처)
+- 없으면 JNI 심볼명을 demangle해 class/method label만 추출 (fallback)
+- native side는 imports/strings (foundation의 trim 정책 그대로)
+
+출력은 단일 문장(<=40 단어). 모델이 metadata가 부족하다고 판단하면
+`SKIP` 한 줄을 출력하고, 파서는 description을 비워둡니다 (false-positive
+방지). 길이 280자 초과는 잘려 ellipsis로 끝납니다.
+
+`HookSpec.description`은 *신설 옵셔널 필드*입니다:
+- 미설정(`None`): `to_dict()` 출력에서 omit (기존 JSON 소비자 호환)
+- 설정됨: `to_dict()` 결과에 `"description": "..."` 포함
+
+`offset-static --apk` 경로는 현재 단계에서 JniBridge를 static
+파이프라인에 직접 전달하지 않습니다 (apktool/jadx 결과는 android-audit
+경로에서 사용). 따라서 `--apk + --use-llm-flow` 조합은 demangle
+fallback로 동작 — class 이름 정확도는 낮지만 description의 가치는 유지.
+정밀 결합은 후속 unit에서.
+
+④ 런타임 해석 / ⑤ Sig 자가복구는 후속 unit에서 추가됩니다.
 
 ## Binary Metadata Helper
 
@@ -714,6 +746,7 @@ venomhook/
 │       │   ├── budget.py            # TokenBudget + BudgetExhausted
 │       │   ├── cache.py             # SQLite LLM response cache
 │       │   ├── provider.py          # LLMProvider ABC, EchoProvider, AnthropicProvider
+│       │   ├── flow_description.py  # ③ --use-llm-flow (HookSpec.description)
 │       │   ├── proto_inference.py   # ② --use-llm-proto (HookSpec.proto)
 │       │   └── tagging.py           # ① --use-llm-tagging (semantic:* tags)
 │       ├── manifest_audit.py

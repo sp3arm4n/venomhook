@@ -28,6 +28,12 @@ from venomhook.llm.provider import (
     get_provider,
     list_providers,
 )
+from venomhook.llm.flow_description import (
+    FlowDescriptionStats,
+    build_flow_request,
+    describe_flows,
+    parse_flow_response,
+)
 from venomhook.llm.proto_inference import (
     ProtoInferenceStats,
     build_proto_request,
@@ -46,6 +52,7 @@ __all__ = [
     "BudgetExhausted",
     "CachedLLMEntry",
     "EchoProvider",
+    "FlowDescriptionStats",
     "LLMCache",
     "LLMError",
     "LLMProvider",
@@ -55,12 +62,15 @@ __all__ = [
     "SCHEMA_VERSION",
     "TaggingStats",
     "TokenBudget",
+    "build_flow_request",
     "build_proto_request",
     "build_tagging_request",
+    "describe_flows",
     "estimate_tokens",
     "get_provider",
     "infer_protos",
     "list_providers",
+    "parse_flow_response",
     "parse_proto_response",
     "parse_tagging_response",
     "tag_endpoints",

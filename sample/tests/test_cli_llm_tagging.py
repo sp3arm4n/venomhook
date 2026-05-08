@@ -61,13 +61,14 @@ class CliLLMTaggingFlagsTest(unittest.TestCase):
         args = argparse.Namespace(
             use_llm_tagging=False,
             use_llm_proto=False,
+            use_llm_flow=False,
             llm_provider="anthropic",
             llm_model=None,
             llm_token_budget=20000,
             llm_cache_dir=None,
             no_llm_cache=False,
         )
-        self.assertEqual(_build_llm_options(args), (None, None))
+        self.assertEqual(_build_llm_options(args), (None, None, None))
 
         # And the subcommand still runs end-to-end with no LLM flags.
         with tempfile.TemporaryDirectory() as tmp:

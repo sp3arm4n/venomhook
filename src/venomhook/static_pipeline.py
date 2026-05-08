@@ -38,6 +38,22 @@ class LLMProtoOptions:
     cache: object | None = None
 
 
+@dataclass
+class LLMFlowOptions:
+    """Opt-in configuration for the Phase 5 ``--use-llm-flow`` integration.
+
+    ``bridges`` (a list of JniBridge) is optional. When supplied it makes
+    the flow description prompt precise (Java class FQN + declared method
+    signature). When None, the module falls back to demangling the JNI
+    symbol name in HookSpec.name.
+    """
+
+    provider: object
+    budget: object
+    cache: object | None = None
+    bridges: object | None = None
+
+
 class StaticPipeline:
     def __init__(
         self,
@@ -47,6 +63,7 @@ class StaticPipeline:
         ghidra_runner: GhidraRunner | None = None,
         llm_tagging: LLMTaggingOptions | None = None,
         llm_proto: LLMProtoOptions | None = None,
+        llm_flow: LLMFlowOptions | None = None,
     ):
         self.top_n = top_n
         self.score_config = score_config or ScoreConfig()
@@ -54,6 +71,7 @@ class StaticPipeline:
         self.ghidra_runner = ghidra_runner
         self.llm_tagging = llm_tagging
         self.llm_proto = llm_proto
+        self.llm_flow = llm_flow
 
     def run_from_static_meta(
         self, static_meta_path: Path, out_hookspec: Path, report_md: Path | None = None
@@ -85,6 +103,17 @@ class StaticPipeline:
                 cache=self.llm_proto.cache,  # type: ignore[arg-type]
             )
             logger.info(proto_stats.as_summary_line())
+        if self.llm_flow is not None:
+            from venomhook.llm.flow_description import describe_flows
+            flow_stats = describe_flows(
+                hookspecs,
+                meta.functions,
+                provider=self.llm_flow.provider,  # type: ignore[arg-type]
+                budget=self.llm_flow.budget,  # type: ignore[arg-type]
+                cache=self.llm_flow.cache,  # type: ignore[arg-type]
+                bridges=self.llm_flow.bridges,  # type: ignore[arg-type]
+            )
+            logger.info(flow_stats.as_summary_line())
         HookSpecStore.save(out_hookspec, hookspecs)
         logger.info("wrote HookSpec to %s", out_hookspec)
         if report_md:
