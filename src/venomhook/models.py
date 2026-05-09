@@ -370,6 +370,89 @@ class JniBridge:
             result["unresolved_arg_types"] = list(self.unresolved_arg_types)
         return result
 @dataclass
+class IntentDataSpec:
+    """A single ``<data>`` element inside an intent-filter.
+
+    Phase 6-3. Captures every URI/MIME attribute Android matches against so
+    PoC builders can construct realistic ``am start -a VIEW -d <uri>``
+    recipes. Each attribute is optional — Android takes the cross product
+    of attributes within one filter, which the PoC builder reconstructs.
+    """
+    scheme: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[str] = None
+    path: Optional[str] = None
+    path_prefix: Optional[str] = None
+    path_pattern: Optional[str] = None
+    path_suffix: Optional[str] = None
+    mime_type: Optional[str] = None
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "IntentDataSpec":
+        return cls(
+            scheme=data.get("scheme"),
+            host=data.get("host"),
+            port=data.get("port"),
+            path=data.get("path"),
+            path_prefix=data.get("path_prefix"),
+            path_pattern=data.get("path_pattern"),
+            path_suffix=data.get("path_suffix"),
+            mime_type=data.get("mime_type"),
+        )
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in (
+            ("scheme", self.scheme),
+            ("host", self.host),
+            ("port", self.port),
+            ("path", self.path),
+            ("path_prefix", self.path_prefix),
+            ("path_pattern", self.path_pattern),
+            ("path_suffix", self.path_suffix),
+            ("mime_type", self.mime_type),
+        ):
+            if value is not None:
+                result[key] = value
+        return result
+
+
+@dataclass
+class IntentFilter:
+    """A single ``<intent-filter>`` declared on a component.
+
+    Preserves the action / category / data grouping that ``AndroidComponent.
+    intent_actions`` (a flat list) loses. PoC builders need this grouping to
+    decide whether a category=BROWSABLE filter is paired with a deeplink
+    scheme (i.e. attacker-reachable from a web page) or whether action.MAIN
+    + LAUNCHER stands alone.
+    """
+    actions: list[str] = field(default_factory=list)
+    categories: list[str] = field(default_factory=list)
+    data: list[IntentDataSpec] = field(default_factory=list)
+    @property
+    def is_browsable(self) -> bool:
+        return "android.intent.category.BROWSABLE" in self.categories
+    @property
+    def is_launcher(self) -> bool:
+        return "android.intent.category.LAUNCHER" in self.categories
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "IntentFilter":
+        return cls(
+            actions=list(data.get("actions", [])),
+            categories=list(data.get("categories", [])),
+            data=[IntentDataSpec.from_dict(d) for d in data.get("data", [])],
+        )
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        if self.actions:
+            result["actions"] = list(self.actions)
+        if self.categories:
+            result["categories"] = list(self.categories)
+        if self.data:
+            result["data"] = [d.to_dict() for d in self.data]
+        return result
+
+
+@dataclass
 class AndroidComponent:
     """An activity / service / receiver / provider declared in AndroidManifest.xml.
     Class names are resolved relative to the application package per Android
@@ -392,6 +475,29 @@ class AndroidComponent:
     # PoC generator (Phase 3) substitutes the first authority into
     # content:// recipes when present; empty for non-provider components.
     authorities: list[str] = field(default_factory=list)
+    # Phase 6-3 — structured intent-filter records (action/category/data
+    # preserved together). intent_actions above remains as a flat compat
+    # accessor; new code should prefer this list.
+    intent_filters: list[IntentFilter] = field(default_factory=list)
+    @property
+    def is_browsable(self) -> bool:
+        """True if any filter on this component carries category.BROWSABLE.
+
+        BROWSABLE means the activity is reachable via a web link (i.e. the
+        OS will route a `https://...` or `<scheme>://...` from a browser /
+        another app's Intent here). Pentest priority: every browsable
+        activity is an external attack surface, regardless of `exported`.
+        """
+        return any(f.is_browsable for f in self.intent_filters)
+    @property
+    def data_schemes(self) -> list[str]:
+        """Sorted, deduplicated set of URI schemes from all filters."""
+        seen: set[str] = set()
+        for f in self.intent_filters:
+            for d in f.data:
+                if d.scheme:
+                    seen.add(d.scheme)
+        return sorted(seen)
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AndroidComponent":
         return cls(
@@ -403,6 +509,7 @@ class AndroidComponent:
             intent_actions=list(data.get("intent_actions", [])),
             grant_uri_permissions=bool(data.get("grant_uri_permissions", False)),
             authorities=list(data.get("authorities", [])),
+            intent_filters=[IntentFilter.from_dict(f) for f in data.get("intent_filters", [])],
         )
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -420,6 +527,8 @@ class AndroidComponent:
             result["grant_uri_permissions"] = True
         if self.authorities:
             result["authorities"] = list(self.authorities)
+        if self.intent_filters:
+            result["intent_filters"] = [f.to_dict() for f in self.intent_filters]
         return result
 @dataclass
 class NetworkSecurityConfigMeta:

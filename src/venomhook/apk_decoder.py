@@ -38,6 +38,8 @@ from xml.etree import ElementTree as ET
 from venomhook.models import (
     AndroidAppMeta,
     AndroidComponent,
+    IntentDataSpec,
+    IntentFilter,
     NetworkSecurityConfigMeta,
 )
 
@@ -409,12 +411,42 @@ def _parse_component(elem: ET.Element, comp_type: str, package: str) -> AndroidC
     # (manifest_audit only fires the rule when type == "provider").
     grant_uri = elem.attrib.get(f"{ANDROID_NS}grantUriPermissions") == "true"
 
+    intent_filters: list[IntentFilter] = []
     intent_actions: list[str] = []
     for ifilter in elem.findall("intent-filter"):
+        f_actions: list[str] = []
         for action in ifilter.findall("action"):
             action_name = action.attrib.get(f"{ANDROID_NS}name")
             if action_name:
+                f_actions.append(action_name)
                 intent_actions.append(action_name)
+        f_categories: list[str] = []
+        for cat in ifilter.findall("category"):
+            cat_name = cat.attrib.get(f"{ANDROID_NS}name")
+            if cat_name:
+                f_categories.append(cat_name)
+        f_data: list[IntentDataSpec] = []
+        for d in ifilter.findall("data"):
+            spec = IntentDataSpec(
+                scheme=d.attrib.get(f"{ANDROID_NS}scheme"),
+                host=d.attrib.get(f"{ANDROID_NS}host"),
+                port=d.attrib.get(f"{ANDROID_NS}port"),
+                path=d.attrib.get(f"{ANDROID_NS}path"),
+                path_prefix=d.attrib.get(f"{ANDROID_NS}pathPrefix"),
+                path_pattern=d.attrib.get(f"{ANDROID_NS}pathPattern"),
+                path_suffix=d.attrib.get(f"{ANDROID_NS}pathSuffix"),
+                mime_type=d.attrib.get(f"{ANDROID_NS}mimeType"),
+            )
+            # Skip <data/> elements with no attributes set at all (occurs in
+            # buggy manifests / placeholder filters).
+            if any(getattr(spec, fld) is not None for fld in (
+                "scheme", "host", "port", "path", "path_prefix",
+                "path_pattern", "path_suffix", "mime_type",
+            )):
+                f_data.append(spec)
+        intent_filters.append(IntentFilter(
+            actions=f_actions, categories=f_categories, data=f_data,
+        ))
 
     # android:authorities is a semicolon-separated list per the platform spec.
     # Only providers actually use this; on other component types the attribute
@@ -433,6 +465,7 @@ def _parse_component(elem: ET.Element, comp_type: str, package: str) -> AndroidC
         intent_actions=intent_actions,
         grant_uri_permissions=grant_uri,
         authorities=authorities,
+        intent_filters=intent_filters,
     )
 
 

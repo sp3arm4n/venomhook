@@ -33,7 +33,12 @@ from venomhook.apk_decoder import (
     parse_android_manifest,
     run_apktool_decode,
 )
-from venomhook.models import AndroidAppMeta, AndroidComponent
+from venomhook.models import (
+    AndroidAppMeta,
+    AndroidComponent,
+    IntentDataSpec,
+    IntentFilter,
+)
 
 
 def _write_executable(path: Path, body: str) -> Path:
@@ -556,6 +561,217 @@ class TestParseAndroidManifest(unittest.TestCase):
             )
             meta = parse_android_manifest(p)
             self.assertEqual(meta.providers[0].authorities, [])
+
+
+# ---------- intent-filter structured parsing (Phase 6-3) ----------
+
+
+class TestIntentFilterParsing(unittest.TestCase):
+    def _parse_first_activity(self, td: Path, manifest_body: str) -> AndroidComponent:
+        m = td / "AndroidManifest.xml"
+        m.write_text(manifest_body, encoding="utf-8")
+        meta = parse_android_manifest(m)
+        return meta.activities[0]
+
+    def test_action_only_filter(self):
+        with tempfile.TemporaryDirectory() as td:
+            act = self._parse_first_activity(Path(td), (
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                'package="com.app">\n'
+                '  <application>\n'
+                '    <activity android:name=".A">\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.MAIN"/>\n'
+                '        <category android:name="android.intent.category.LAUNCHER"/>\n'
+                '      </intent-filter>\n'
+                '    </activity>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            ))
+            self.assertEqual(len(act.intent_filters), 1)
+            f = act.intent_filters[0]
+            self.assertEqual(f.actions, ["android.intent.action.MAIN"])
+            self.assertEqual(f.categories, ["android.intent.category.LAUNCHER"])
+            self.assertEqual(f.data, [])
+            self.assertTrue(f.is_launcher)
+            self.assertFalse(f.is_browsable)
+
+    def test_browsable_deeplink_with_scheme_host_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            act = self._parse_first_activity(Path(td), (
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                'package="com.app">\n'
+                '  <application>\n'
+                '    <activity android:name=".Deep">\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.VIEW"/>\n'
+                '        <category android:name="android.intent.category.DEFAULT"/>\n'
+                '        <category android:name="android.intent.category.BROWSABLE"/>\n'
+                '        <data android:scheme="myapp" android:host="auth" '
+                'android:pathPrefix="/oauth"/>\n'
+                '      </intent-filter>\n'
+                '    </activity>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            ))
+            self.assertEqual(len(act.intent_filters), 1)
+            f = act.intent_filters[0]
+            self.assertTrue(f.is_browsable)
+            self.assertEqual(len(f.data), 1)
+            d = f.data[0]
+            self.assertEqual(d.scheme, "myapp")
+            self.assertEqual(d.host, "auth")
+            self.assertEqual(d.path_prefix, "/oauth")
+            self.assertIsNone(d.path)
+            self.assertEqual(act.data_schemes, ["myapp"])
+            self.assertTrue(act.is_browsable)
+
+    def test_multiple_filters_preserved_separately(self):
+        # Same activity often has LAUNCHER (no data) plus a separate
+        # BROWSABLE filter — flattening loses that pairing.
+        with tempfile.TemporaryDirectory() as td:
+            act = self._parse_first_activity(Path(td), (
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                'package="com.app">\n'
+                '  <application>\n'
+                '    <activity android:name=".A">\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.MAIN"/>\n'
+                '        <category android:name="android.intent.category.LAUNCHER"/>\n'
+                '      </intent-filter>\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.VIEW"/>\n'
+                '        <category android:name="android.intent.category.BROWSABLE"/>\n'
+                '        <data android:scheme="myapp"/>\n'
+                '      </intent-filter>\n'
+                '    </activity>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            ))
+            self.assertEqual(len(act.intent_filters), 2)
+            self.assertTrue(act.intent_filters[0].is_launcher)
+            self.assertFalse(act.intent_filters[0].is_browsable)
+            self.assertEqual(act.intent_filters[0].data, [])
+            self.assertTrue(act.intent_filters[1].is_browsable)
+            self.assertEqual(act.intent_filters[1].data[0].scheme, "myapp")
+
+    def test_data_with_only_mime_type(self):
+        with tempfile.TemporaryDirectory() as td:
+            act = self._parse_first_activity(Path(td), (
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                'package="com.app">\n'
+                '  <application>\n'
+                '    <activity android:name=".A">\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.SEND"/>\n'
+                '        <data android:mimeType="image/*"/>\n'
+                '      </intent-filter>\n'
+                '    </activity>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            ))
+            d = act.intent_filters[0].data[0]
+            self.assertEqual(d.mime_type, "image/*")
+            self.assertIsNone(d.scheme)
+            self.assertEqual(act.data_schemes, [])
+
+    def test_empty_data_element_skipped(self):
+        # Buggy/placeholder <data/> with no attributes is meaningless and
+        # should not pollute the spec list.
+        with tempfile.TemporaryDirectory() as td:
+            act = self._parse_first_activity(Path(td), (
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                'package="com.app">\n'
+                '  <application>\n'
+                '    <activity android:name=".A">\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.SEND"/>\n'
+                '        <data/>\n'
+                '        <data android:scheme="https"/>\n'
+                '      </intent-filter>\n'
+                '    </activity>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            ))
+            self.assertEqual(len(act.intent_filters[0].data), 1)
+            self.assertEqual(act.intent_filters[0].data[0].scheme, "https")
+
+    def test_path_pattern_and_suffix_captured(self):
+        with tempfile.TemporaryDirectory() as td:
+            act = self._parse_first_activity(Path(td), (
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                'package="com.app">\n'
+                '  <application>\n'
+                '    <activity android:name=".A">\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.VIEW"/>\n'
+                '        <data android:scheme="https" android:host="example.com"\n'
+                '              android:pathPattern="/api/.*"\n'
+                '              android:pathSuffix=".html"\n'
+                '              android:port="8443"/>\n'
+                '      </intent-filter>\n'
+                '    </activity>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            ))
+            d = act.intent_filters[0].data[0]
+            self.assertEqual(d.path_pattern, "/api/.*")
+            self.assertEqual(d.path_suffix, ".html")
+            self.assertEqual(d.port, "8443")
+
+    def test_intent_actions_compat_remains_flat(self):
+        # Existing consumers (manifest_audit MANIFEST-004 etc.) read the flat
+        # intent_actions list. Phase 6-3 must not break that contract.
+        with tempfile.TemporaryDirectory() as td:
+            act = self._parse_first_activity(Path(td), (
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                'package="com.app">\n'
+                '  <application>\n'
+                '    <activity android:name=".A">\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.MAIN"/>\n'
+                '      </intent-filter>\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.VIEW"/>\n'
+                '        <action android:name="android.intent.action.SEND"/>\n'
+                '      </intent-filter>\n'
+                '    </activity>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            ))
+            self.assertEqual(act.intent_actions, [
+                "android.intent.action.MAIN",
+                "android.intent.action.VIEW",
+                "android.intent.action.SEND",
+            ])
+
+    def test_to_from_dict_roundtrip(self):
+        # Cache replay loads components via from_dict; structured filters
+        # must survive serialization.
+        c = AndroidComponent(
+            type="activity", name="com.app.A",
+            exported=True, exported_declared=True,
+            intent_actions=["android.intent.action.VIEW"],
+            intent_filters=[IntentFilter(
+                actions=["android.intent.action.VIEW"],
+                categories=["android.intent.category.BROWSABLE"],
+                data=[IntentDataSpec(scheme="https", host="example.com",
+                                     path_prefix="/x")],
+            )],
+        )
+        roundtripped = AndroidComponent.from_dict(c.to_dict())
+        self.assertEqual(len(roundtripped.intent_filters), 1)
+        f = roundtripped.intent_filters[0]
+        self.assertEqual(f.categories, ["android.intent.category.BROWSABLE"])
+        self.assertEqual(f.data[0].scheme, "https")
+        self.assertEqual(f.data[0].path_prefix, "/x")
 
 
 # ---------- network_security_config XML resolution & parsing ----------
