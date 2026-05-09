@@ -24,6 +24,8 @@ from venomhook.models import (
     AndroidAppMeta,
     AndroidAuditReport,
     AndroidComponent,
+    IntentDataSpec,
+    IntentFilter,
     ManifestFinding,
     PoCArtifact,
 )
@@ -280,6 +282,178 @@ class ExportedNoPermissionBuilderTests(unittest.TestCase):
         arts = generate_pocs(meta, report)
         self.assertEqual(len(arts), 1)
         self.assertIn("com.x.Ghost", arts[0].commands[0])
+
+
+# ---------- Phase 6-4 — deeplink PoCs for BROWSABLE activities ----------
+
+
+def _browsable_activity(
+    name: str = "com.x.Deep",
+    *,
+    schemes: tuple[tuple[str, str | None, dict | None], ...] = (),
+) -> AndroidComponent:
+    """Build an exported activity with one BROWSABLE filter per (scheme,host,extras).
+
+    Each tuple is ``(scheme, host, extras_dict)`` where extras_dict can carry
+    path / path_prefix / path_pattern / path_suffix / mime_type. Helps tests
+    declare deeplink shapes concisely without the manifest XML round-trip.
+    """
+    filters: list[IntentFilter] = []
+    for scheme, host, extras in schemes:
+        kwargs = {"scheme": scheme, "host": host}
+        kwargs.update(extras or {})
+        filters.append(IntentFilter(
+            actions=["android.intent.action.VIEW"],
+            categories=[
+                "android.intent.category.DEFAULT",
+                "android.intent.category.BROWSABLE",
+            ],
+            data=[IntentDataSpec(**kwargs)],
+        ))
+    return _comp(
+        type="activity", name=name,
+        exported=True, exported_declared=True,
+        intent_actions=["android.intent.action.VIEW"],
+        intent_filters=filters,
+    )
+
+
+class DeeplinkBuilderTests(unittest.TestCase):
+    def test_no_deeplink_when_filter_lacks_browsable(self) -> None:
+        # LAUNCHER filter with scheme but no BROWSABLE — internal entry,
+        # not externally addressable. Don't emit deeplink PoCs.
+        comp = _comp(
+            type="activity", name="com.x.A",
+            exported=True, exported_declared=True,
+            intent_actions=["android.intent.action.MAIN"],
+            intent_filters=[IntentFilter(
+                actions=["android.intent.action.MAIN"],
+                categories=["android.intent.category.LAUNCHER"],
+                data=[IntentDataSpec(scheme="custom")],
+            )],
+        )
+        meta = _meta(components=[comp], target_sdk=33)
+        arts = generate_pocs(meta, audit_manifest(meta))
+        deeplink = [a for a in arts if a.title.startswith("Deeplink")]
+        self.assertEqual(deeplink, [])
+
+    def test_emits_one_deeplink_poc_per_unique_scheme(self) -> None:
+        comp = _browsable_activity(schemes=(
+            ("myapp", "auth", {"path_prefix": "/oauth"}),
+            ("https", "example.com", {"path_prefix": "/cb"}),
+        ))
+        meta = _meta(components=[comp], target_sdk=33)
+        arts = generate_pocs(meta, audit_manifest(meta))
+        deeplinks = [a for a in arts if a.title.startswith("Deeplink")]
+        self.assertEqual(len(deeplinks), 2)
+        # URI is in commands; verify both are addressable
+        all_cmds = "\n".join(c for a in deeplinks for c in a.commands)
+        self.assertIn("myapp://auth/oauth", all_cmds)
+        self.assertIn("https://example.com/cb", all_cmds)
+
+    def test_deeplink_uses_implicit_intent_no_n_flag(self) -> None:
+        # Pentest model: BROWSABLE = OS resolves the URI. Implicit intent
+        # is the actual attack path, not `am start -n com.x/.A`.
+        comp = _browsable_activity(schemes=(("myapp", "auth", None),))
+        meta = _meta(components=[comp], target_sdk=33)
+        arts = generate_pocs(meta, audit_manifest(meta))
+        deeplinks = [a for a in arts if a.title.startswith("Deeplink")]
+        self.assertEqual(len(deeplinks), 1)
+        primary = deeplinks[0].commands
+        # The first non-comment command should not have -n
+        first_cmd = next(c for c in primary if not c.lstrip().startswith("#"))
+        self.assertNotIn("-n ", first_cmd)
+        self.assertIn("-a android.intent.action.VIEW", first_cmd)
+        self.assertIn("myapp://auth", first_cmd)
+        # Explicit fallback recorded in notes for verification
+        self.assertIn("-n com.x/com.x.Deep", deeplinks[0].notes)
+
+    def test_dedupe_across_filters_with_same_uri_triple(self) -> None:
+        # Real F-Droid manifest declares the same scheme on multiple filters
+        # (case variants, mimetype variants). The dedupe should collapse
+        # identical (scheme,host,path) triples.
+        comp = _comp(
+            type="activity", name="com.x.A",
+            exported=True, exported_declared=True,
+            intent_actions=["android.intent.action.VIEW"],
+            intent_filters=[
+                IntentFilter(
+                    actions=["android.intent.action.VIEW"],
+                    categories=["android.intent.category.BROWSABLE"],
+                    data=[IntentDataSpec(scheme="myapp", host="auth",
+                                         path_prefix="/oauth")],
+                ),
+                IntentFilter(
+                    actions=["android.intent.action.VIEW"],
+                    categories=["android.intent.category.BROWSABLE"],
+                    data=[IntentDataSpec(scheme="myapp", host="auth",
+                                         path_prefix="/oauth")],
+                ),
+            ],
+        )
+        meta = _meta(components=[comp], target_sdk=33)
+        arts = generate_pocs(meta, audit_manifest(meta))
+        deeplinks = [a for a in arts if a.title.startswith("Deeplink")]
+        self.assertEqual(len(deeplinks), 1)
+
+    def test_caps_at_five_specs_per_component(self) -> None:
+        comp = _browsable_activity(schemes=tuple(
+            (f"app{i}", "h", None) for i in range(8)
+        ))
+        meta = _meta(components=[comp], target_sdk=33)
+        arts = generate_pocs(meta, audit_manifest(meta))
+        deeplinks = [a for a in arts if a.title.startswith("Deeplink")]
+        self.assertEqual(len(deeplinks), 5)
+
+    def test_path_pattern_warning_in_notes(self) -> None:
+        comp = _browsable_activity(schemes=(
+            ("https", "example.com", {"path_pattern": "/api/.*"}),
+        ))
+        meta = _meta(components=[comp], target_sdk=33)
+        arts = generate_pocs(meta, audit_manifest(meta))
+        deeplinks = [a for a in arts if a.title.startswith("Deeplink")]
+        self.assertEqual(len(deeplinks), 1)
+        self.assertIn("pathPattern", deeplinks[0].notes)
+        self.assertIn("정규식이 아니므로", deeplinks[0].notes)
+
+    def test_http_scheme_without_host_falls_back_to_example_com(self) -> None:
+        # A bare http:// scheme would yield an unrunnable URI; provide a
+        # placeholder host so the operator gets something to substitute.
+        comp = _browsable_activity(schemes=(("https", None, None),))
+        meta = _meta(components=[comp], target_sdk=33)
+        arts = generate_pocs(meta, audit_manifest(meta))
+        deeplinks = [a for a in arts if a.title.startswith("Deeplink")]
+        self.assertEqual(len(deeplinks), 1)
+        cmds = "\n".join(deeplinks[0].commands)
+        self.assertIn("https://example.com", cmds)
+
+    def test_non_activity_browsable_skipped(self) -> None:
+        # BROWSABLE is conventionally only on activities. If somehow a
+        # service/receiver carried it, we still skip — `am start -a VIEW -d`
+        # wouldn't reach it anyway.
+        comp = _comp(
+            type="service", name="com.x.S",
+            exported=True, exported_declared=True,
+            intent_actions=["android.intent.action.VIEW"],
+            intent_filters=[IntentFilter(
+                actions=["android.intent.action.VIEW"],
+                categories=["android.intent.category.BROWSABLE"],
+                data=[IntentDataSpec(scheme="myapp")],
+            )],
+        )
+        meta = _meta(components=[comp], target_sdk=33)
+        arts = generate_pocs(meta, audit_manifest(meta))
+        deeplinks = [a for a in arts if a.title.startswith("Deeplink")]
+        self.assertEqual(deeplinks, [])
+
+    def test_deeplink_inherits_finding_severity_and_refs(self) -> None:
+        comp = _browsable_activity(schemes=(("myapp", "auth", None),))
+        meta = _meta(components=[comp], target_sdk=33)
+        arts = generate_pocs(meta, audit_manifest(meta))
+        deeplink = next(a for a in arts if a.title.startswith("Deeplink"))
+        self.assertEqual(deeplink.severity, "high")
+        self.assertEqual(deeplink.kind, "adb")
+        self.assertIn("CWE-926", deeplink.references)
 
 
 class ExportedProviderBuilderTests(unittest.TestCase):

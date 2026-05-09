@@ -33,7 +33,12 @@ from venomhook.apk_decoder import (
     parse_android_manifest,
     run_apktool_decode,
 )
-from venomhook.models import AndroidAppMeta, AndroidComponent
+from venomhook.models import (
+    AndroidAppMeta,
+    AndroidComponent,
+    IntentDataSpec,
+    IntentFilter,
+)
 
 
 def _write_executable(path: Path, body: str) -> Path:
@@ -53,6 +58,7 @@ def _manifest_xml(
     extract_native_libs: str | None = None,
     min_sdk: int | None = None,
     target_sdk: int | None = None,
+    network_security_config: str | None = None,
 ) -> str:
     """Build a synthetic AndroidManifest.xml for parser tests.
 
@@ -81,6 +87,8 @@ def _manifest_xml(
         app_attrs.append('android:debuggable="true"')
     if extract_native_libs is not None:
         app_attrs.append(f'android:extractNativeLibs="{extract_native_libs}"')
+    if 'network_security_config' in locals() and network_security_config is not None:
+        app_attrs.append(f'android:networkSecurityConfig="{network_security_config}"')
     lines.append(f'<application {" ".join(app_attrs)}>')
 
     def _component_xml(tag: str, c: dict) -> str:
@@ -295,6 +303,101 @@ class TestParseAndroidManifest(unittest.TestCase):
             self.assertEqual(meta.min_sdk, 23)
             self.assertEqual(meta.target_sdk, 33)
 
+    def test_sdk_falls_back_to_apktool_yml_when_uses_sdk_absent(self):
+        # apktool 2.x emits SDK info under sdkInfo: in apktool.yml instead of
+        # leaving <uses-sdk> in the decoded manifest. Verify the fallback
+        # picks up both values from the sibling YAML.
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            xml = _manifest_xml(package="com.app")  # no <uses-sdk>
+            m = self._write(tdp, xml)
+            (tdp / "apktool.yml").write_text(
+                "!!brut.androlib.meta.MetaInfo\n"
+                "sdkInfo:\n"
+                "  minSdkVersion: 21\n"
+                "  targetSdkVersion: 30\n"
+                "packageInfo:\n"
+                "  forcedPackageId: '127'\n"
+            )
+            meta = parse_android_manifest(m)
+            self.assertEqual(meta.min_sdk, 21)
+            self.assertEqual(meta.target_sdk, 30)
+
+    def test_sdk_manifest_takes_priority_over_apktool_yml(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            xml = _manifest_xml(package="com.app", min_sdk=23, target_sdk=33)
+            m = self._write(tdp, xml)
+            (tdp / "apktool.yml").write_text(
+                "sdkInfo:\n"
+                "  minSdkVersion: 15\n"
+                "  targetSdkVersion: 22\n"
+            )
+            meta = parse_android_manifest(m)
+            self.assertEqual(meta.min_sdk, 23)
+            self.assertEqual(meta.target_sdk, 33)
+
+    def test_sdk_partial_fallback_when_only_one_field_in_manifest(self):
+        # If the manifest declares min but not target, the missing field is
+        # filled from apktool.yml; the present one stays as-is.
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            xml = _manifest_xml(package="com.app", min_sdk=24)  # target_sdk omitted
+            m = self._write(tdp, xml)
+            (tdp / "apktool.yml").write_text(
+                "sdkInfo:\n"
+                "  minSdkVersion: 15\n"
+                "  targetSdkVersion: 31\n"
+            )
+            meta = parse_android_manifest(m)
+            self.assertEqual(meta.min_sdk, 24)
+            self.assertEqual(meta.target_sdk, 31)
+
+    def test_sdk_codename_in_apktool_yml_falls_through_to_none(self):
+        # Preview/codename strings (e.g. 'P', 'Tiramisu') aren't integer
+        # API levels — _safe_int returns None and we keep "unspecified"
+        # semantics rather than guessing.
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            xml = _manifest_xml(package="com.app")
+            m = self._write(tdp, xml)
+            (tdp / "apktool.yml").write_text(
+                "sdkInfo:\n"
+                "  minSdkVersion: 'P'\n"
+                "  targetSdkVersion: 31\n"
+            )
+            meta = parse_android_manifest(m)
+            self.assertIsNone(meta.min_sdk)
+            self.assertEqual(meta.target_sdk, 31)
+
+    def test_sdk_apktool_yml_missing_keeps_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            xml = _manifest_xml(package="com.app")
+            m = self._write(Path(td), xml)
+            meta = parse_android_manifest(m)
+            self.assertIsNone(meta.min_sdk)
+            self.assertIsNone(meta.target_sdk)
+
+    def test_sdk_only_picks_values_inside_sdkInfo_block(self):
+        # A minSdkVersion: line under a *different* top-level section must
+        # not leak into our SDK fields. Guards against the parser becoming
+        # over-eager.
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            xml = _manifest_xml(package="com.app")
+            m = self._write(tdp, xml)
+            (tdp / "apktool.yml").write_text(
+                "unknownSection:\n"
+                "  minSdkVersion: 99\n"
+                "  targetSdkVersion: 99\n"
+                "sdkInfo:\n"
+                "  minSdkVersion: 21\n"
+                "  targetSdkVersion: 30\n"
+            )
+            meta = parse_android_manifest(m)
+            self.assertEqual(meta.min_sdk, 21)
+            self.assertEqual(meta.target_sdk, 30)
+
     def test_services_and_receivers(self):
         with tempfile.TemporaryDirectory() as td:
             xml = _manifest_xml(
@@ -458,6 +561,376 @@ class TestParseAndroidManifest(unittest.TestCase):
             )
             meta = parse_android_manifest(p)
             self.assertEqual(meta.providers[0].authorities, [])
+
+
+# ---------- intent-filter structured parsing (Phase 6-3) ----------
+
+
+class TestIntentFilterParsing(unittest.TestCase):
+    def _parse_first_activity(self, td: Path, manifest_body: str) -> AndroidComponent:
+        m = td / "AndroidManifest.xml"
+        m.write_text(manifest_body, encoding="utf-8")
+        meta = parse_android_manifest(m)
+        return meta.activities[0]
+
+    def test_action_only_filter(self):
+        with tempfile.TemporaryDirectory() as td:
+            act = self._parse_first_activity(Path(td), (
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                'package="com.app">\n'
+                '  <application>\n'
+                '    <activity android:name=".A">\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.MAIN"/>\n'
+                '        <category android:name="android.intent.category.LAUNCHER"/>\n'
+                '      </intent-filter>\n'
+                '    </activity>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            ))
+            self.assertEqual(len(act.intent_filters), 1)
+            f = act.intent_filters[0]
+            self.assertEqual(f.actions, ["android.intent.action.MAIN"])
+            self.assertEqual(f.categories, ["android.intent.category.LAUNCHER"])
+            self.assertEqual(f.data, [])
+            self.assertTrue(f.is_launcher)
+            self.assertFalse(f.is_browsable)
+
+    def test_browsable_deeplink_with_scheme_host_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            act = self._parse_first_activity(Path(td), (
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                'package="com.app">\n'
+                '  <application>\n'
+                '    <activity android:name=".Deep">\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.VIEW"/>\n'
+                '        <category android:name="android.intent.category.DEFAULT"/>\n'
+                '        <category android:name="android.intent.category.BROWSABLE"/>\n'
+                '        <data android:scheme="myapp" android:host="auth" '
+                'android:pathPrefix="/oauth"/>\n'
+                '      </intent-filter>\n'
+                '    </activity>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            ))
+            self.assertEqual(len(act.intent_filters), 1)
+            f = act.intent_filters[0]
+            self.assertTrue(f.is_browsable)
+            self.assertEqual(len(f.data), 1)
+            d = f.data[0]
+            self.assertEqual(d.scheme, "myapp")
+            self.assertEqual(d.host, "auth")
+            self.assertEqual(d.path_prefix, "/oauth")
+            self.assertIsNone(d.path)
+            self.assertEqual(act.data_schemes, ["myapp"])
+            self.assertTrue(act.is_browsable)
+
+    def test_multiple_filters_preserved_separately(self):
+        # Same activity often has LAUNCHER (no data) plus a separate
+        # BROWSABLE filter — flattening loses that pairing.
+        with tempfile.TemporaryDirectory() as td:
+            act = self._parse_first_activity(Path(td), (
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                'package="com.app">\n'
+                '  <application>\n'
+                '    <activity android:name=".A">\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.MAIN"/>\n'
+                '        <category android:name="android.intent.category.LAUNCHER"/>\n'
+                '      </intent-filter>\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.VIEW"/>\n'
+                '        <category android:name="android.intent.category.BROWSABLE"/>\n'
+                '        <data android:scheme="myapp"/>\n'
+                '      </intent-filter>\n'
+                '    </activity>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            ))
+            self.assertEqual(len(act.intent_filters), 2)
+            self.assertTrue(act.intent_filters[0].is_launcher)
+            self.assertFalse(act.intent_filters[0].is_browsable)
+            self.assertEqual(act.intent_filters[0].data, [])
+            self.assertTrue(act.intent_filters[1].is_browsable)
+            self.assertEqual(act.intent_filters[1].data[0].scheme, "myapp")
+
+    def test_data_with_only_mime_type(self):
+        with tempfile.TemporaryDirectory() as td:
+            act = self._parse_first_activity(Path(td), (
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                'package="com.app">\n'
+                '  <application>\n'
+                '    <activity android:name=".A">\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.SEND"/>\n'
+                '        <data android:mimeType="image/*"/>\n'
+                '      </intent-filter>\n'
+                '    </activity>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            ))
+            d = act.intent_filters[0].data[0]
+            self.assertEqual(d.mime_type, "image/*")
+            self.assertIsNone(d.scheme)
+            self.assertEqual(act.data_schemes, [])
+
+    def test_empty_data_element_skipped(self):
+        # Buggy/placeholder <data/> with no attributes is meaningless and
+        # should not pollute the spec list.
+        with tempfile.TemporaryDirectory() as td:
+            act = self._parse_first_activity(Path(td), (
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                'package="com.app">\n'
+                '  <application>\n'
+                '    <activity android:name=".A">\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.SEND"/>\n'
+                '        <data/>\n'
+                '        <data android:scheme="https"/>\n'
+                '      </intent-filter>\n'
+                '    </activity>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            ))
+            self.assertEqual(len(act.intent_filters[0].data), 1)
+            self.assertEqual(act.intent_filters[0].data[0].scheme, "https")
+
+    def test_path_pattern_and_suffix_captured(self):
+        with tempfile.TemporaryDirectory() as td:
+            act = self._parse_first_activity(Path(td), (
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                'package="com.app">\n'
+                '  <application>\n'
+                '    <activity android:name=".A">\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.VIEW"/>\n'
+                '        <data android:scheme="https" android:host="example.com"\n'
+                '              android:pathPattern="/api/.*"\n'
+                '              android:pathSuffix=".html"\n'
+                '              android:port="8443"/>\n'
+                '      </intent-filter>\n'
+                '    </activity>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            ))
+            d = act.intent_filters[0].data[0]
+            self.assertEqual(d.path_pattern, "/api/.*")
+            self.assertEqual(d.path_suffix, ".html")
+            self.assertEqual(d.port, "8443")
+
+    def test_intent_actions_compat_remains_flat(self):
+        # Existing consumers (manifest_audit MANIFEST-004 etc.) read the flat
+        # intent_actions list. Phase 6-3 must not break that contract.
+        with tempfile.TemporaryDirectory() as td:
+            act = self._parse_first_activity(Path(td), (
+                '<?xml version="1.0"?>\n'
+                '<manifest xmlns:android="http://schemas.android.com/apk/res/android" '
+                'package="com.app">\n'
+                '  <application>\n'
+                '    <activity android:name=".A">\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.MAIN"/>\n'
+                '      </intent-filter>\n'
+                '      <intent-filter>\n'
+                '        <action android:name="android.intent.action.VIEW"/>\n'
+                '        <action android:name="android.intent.action.SEND"/>\n'
+                '      </intent-filter>\n'
+                '    </activity>\n'
+                '  </application>\n'
+                '</manifest>\n'
+            ))
+            self.assertEqual(act.intent_actions, [
+                "android.intent.action.MAIN",
+                "android.intent.action.VIEW",
+                "android.intent.action.SEND",
+            ])
+
+    def test_to_from_dict_roundtrip(self):
+        # Cache replay loads components via from_dict; structured filters
+        # must survive serialization.
+        c = AndroidComponent(
+            type="activity", name="com.app.A",
+            exported=True, exported_declared=True,
+            intent_actions=["android.intent.action.VIEW"],
+            intent_filters=[IntentFilter(
+                actions=["android.intent.action.VIEW"],
+                categories=["android.intent.category.BROWSABLE"],
+                data=[IntentDataSpec(scheme="https", host="example.com",
+                                     path_prefix="/x")],
+            )],
+        )
+        roundtripped = AndroidComponent.from_dict(c.to_dict())
+        self.assertEqual(len(roundtripped.intent_filters), 1)
+        f = roundtripped.intent_filters[0]
+        self.assertEqual(f.categories, ["android.intent.category.BROWSABLE"])
+        self.assertEqual(f.data[0].scheme, "https")
+        self.assertEqual(f.data[0].path_prefix, "/x")
+
+
+# ---------- network_security_config XML resolution & parsing ----------
+
+
+def _write_nsc(td: Path, body: str, name: str = "nsc") -> Path:
+    res_xml = td / "res" / "xml"
+    res_xml.mkdir(parents=True, exist_ok=True)
+    nsc_path = res_xml / f"{name}.xml"
+    nsc_path.write_text(body, encoding="utf-8")
+    return nsc_path
+
+
+class TestNetworkSecurityConfigParsing(unittest.TestCase):
+    def _write_manifest(self, td: Path, ref: str | None) -> Path:
+        xml = _manifest_xml(package="com.app", network_security_config=ref)
+        m = td / "AndroidManifest.xml"
+        m.write_text(xml)
+        return m
+
+    def test_no_nsc_attribute_yields_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            m = self._write_manifest(Path(td), None)
+            meta = parse_android_manifest(m)
+            self.assertIsNone(meta.network_security_config)
+            self.assertIsNone(meta.nsc)
+
+    def test_nsc_referenced_but_file_missing_keeps_nsc_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            m = self._write_manifest(Path(td), "@xml/nsc")
+            meta = parse_android_manifest(m)
+            self.assertEqual(meta.network_security_config, "@xml/nsc")
+            self.assertIsNone(meta.nsc)
+
+    def test_base_cleartext_true_is_captured(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            _write_nsc(tdp, (
+                '<?xml version="1.0" encoding="utf-8"?>\n'
+                '<network-security-config>\n'
+                '  <base-config cleartextTrafficPermitted="true"/>\n'
+                '</network-security-config>\n'
+            ))
+            m = self._write_manifest(tdp, "@xml/nsc")
+            meta = parse_android_manifest(m)
+            self.assertIsNotNone(meta.nsc)
+            self.assertTrue(meta.nsc.base_cleartext_permitted)
+            self.assertEqual(meta.nsc.cleartext_domains, [])
+            self.assertFalse(meta.nsc.base_trusts_user_certs)
+
+    def test_base_cleartext_false_is_captured(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            _write_nsc(tdp, (
+                '<?xml version="1.0"?>\n'
+                '<network-security-config>\n'
+                '  <base-config cleartextTrafficPermitted="false"/>\n'
+                '</network-security-config>\n'
+            ))
+            m = self._write_manifest(tdp, "@xml/nsc")
+            meta = parse_android_manifest(m)
+            self.assertIsNotNone(meta.nsc)
+            self.assertFalse(meta.nsc.base_cleartext_permitted)
+
+    def test_domain_cleartext_collected(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            _write_nsc(tdp, (
+                '<?xml version="1.0"?>\n'
+                '<network-security-config>\n'
+                '  <domain-config cleartextTrafficPermitted="true">\n'
+                '    <domain includeSubdomains="true">example.com</domain>\n'
+                '    <domain>legacy.example.org</domain>\n'
+                '  </domain-config>\n'
+                '  <domain-config cleartextTrafficPermitted="false">\n'
+                '    <domain>secure.example.net</domain>\n'
+                '  </domain-config>\n'
+                '</network-security-config>\n'
+            ))
+            m = self._write_manifest(tdp, "@xml/nsc")
+            meta = parse_android_manifest(m)
+            self.assertEqual(
+                meta.nsc.cleartext_domains,
+                ["example.com", "legacy.example.org"],
+            )
+
+    def test_user_cert_trust_in_base_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            _write_nsc(tdp, (
+                '<?xml version="1.0"?>\n'
+                '<network-security-config>\n'
+                '  <base-config>\n'
+                '    <trust-anchors>\n'
+                '      <certificates src="system"/>\n'
+                '      <certificates src="user"/>\n'
+                '    </trust-anchors>\n'
+                '  </base-config>\n'
+                '</network-security-config>\n'
+            ))
+            m = self._write_manifest(tdp, "@xml/nsc")
+            meta = parse_android_manifest(m)
+            self.assertTrue(meta.nsc.base_trusts_user_certs)
+
+    def test_empty_policy_returns_default_record(self):
+        # NSC file present but only inert policy (e.g. pin-set without cleartext
+        # or user-cert trust). Should still yield a record so callers know the
+        # file was resolved — just one with all audit-relevant fields neutral.
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            _write_nsc(tdp, (
+                '<?xml version="1.0"?>\n'
+                '<network-security-config>\n'
+                '  <domain-config>\n'
+                '    <domain>example.com</domain>\n'
+                '    <pin-set><pin digest="SHA-256">aaaa</pin></pin-set>\n'
+                '  </domain-config>\n'
+                '</network-security-config>\n'
+            ))
+            m = self._write_manifest(tdp, "@xml/nsc")
+            meta = parse_android_manifest(m)
+            self.assertIsNotNone(meta.nsc)
+            self.assertIsNone(meta.nsc.base_cleartext_permitted)
+            self.assertEqual(meta.nsc.cleartext_domains, [])
+            self.assertFalse(meta.nsc.base_trusts_user_certs)
+
+    def test_resource_ref_with_namespace_prefix_resolves(self):
+        # apktool sometimes emits the package-qualified form. The resolver
+        # should still find the same xml file.
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            _write_nsc(tdp, (
+                '<?xml version="1.0"?>\n'
+                '<network-security-config>\n'
+                '  <base-config cleartextTrafficPermitted="true"/>\n'
+                '</network-security-config>\n'
+            ))
+            m = self._write_manifest(tdp, "@com.app:xml/nsc")
+            meta = parse_android_manifest(m)
+            self.assertIsNotNone(meta.nsc)
+            self.assertTrue(meta.nsc.base_cleartext_permitted)
+
+    def test_non_xml_resource_ref_not_resolved(self):
+        # @drawable/foo, @string/foo etc. must never be opened as NSC.
+        with tempfile.TemporaryDirectory() as td:
+            m = self._write_manifest(Path(td), "@drawable/foo")
+            meta = parse_android_manifest(m)
+            self.assertEqual(meta.network_security_config, "@drawable/foo")
+            self.assertIsNone(meta.nsc)
+
+    def test_malformed_nsc_xml_yields_none(self):
+        # Defensive: a corrupt NSC must not crash the manifest parse — the
+        # whole pipeline depends on it.
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            _write_nsc(tdp, "<<<not-xml>>>")
+            m = self._write_manifest(tdp, "@xml/nsc")
+            meta = parse_android_manifest(m)
+            self.assertIsNone(meta.nsc)
 
 
 # ---------- run_apktool_decode ----------

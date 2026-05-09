@@ -27,6 +27,7 @@ Pure-Python; depends only on models.{AndroidAppMeta, AndroidComponent}.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -34,7 +35,13 @@ from pathlib import Path
 from typing import Any, Optional
 from xml.etree import ElementTree as ET
 
-from venomhook.models import AndroidAppMeta, AndroidComponent
+from venomhook.models import (
+    AndroidAppMeta,
+    AndroidComponent,
+    IntentDataSpec,
+    IntentFilter,
+    NetworkSecurityConfigMeta,
+)
 
 
 __all__ = [
@@ -248,6 +255,135 @@ def _safe_int(s: Optional[str]) -> Optional[int]:
         return None
 
 
+_APKTOOL_YML_SDK_LINE = re.compile(
+    r"^\s+(minSdkVersion|targetSdkVersion)\s*:\s*['\"]?([^'\"\s#]+)['\"]?\s*(?:#.*)?$"
+)
+
+
+def _parse_apktool_yml_sdk(yml_path: Path) -> tuple[Optional[int], Optional[int]]:
+    """Best-effort extract of min/target SDK from apktool.yml's ``sdkInfo:`` block.
+
+    apktool 2.x moves <uses-sdk> data out of the decoded AndroidManifest.xml
+    into a ``sdkInfo:`` mapping inside ``apktool.yml`` (sibling of the
+    manifest). Without this fallback, every modern APK reports SDK = None,
+    which silently mutes MANIFEST-002/008/009.
+
+    Returns ``(min_sdk, target_sdk)``, either may be None if the file is
+    missing, the section is absent, or the value is a codename string
+    (e.g. ``'P'``) rather than an integer.
+    """
+    if not yml_path.exists():
+        return None, None
+    try:
+        text = yml_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None, None
+
+    in_sdk_section = False
+    min_sdk: Optional[int] = None
+    target_sdk: Optional[int] = None
+    for line in text.splitlines():
+        if not line or line.lstrip().startswith("#"):
+            continue
+        # Top-level key (no leading whitespace) — entry/exit of sdkInfo block.
+        if not line.startswith((" ", "\t")):
+            in_sdk_section = line.split("#", 1)[0].rstrip().rstrip(":").strip() == "sdkInfo"
+            continue
+        if not in_sdk_section:
+            continue
+        m = _APKTOOL_YML_SDK_LINE.match(line)
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2)
+        if key == "minSdkVersion":
+            min_sdk = _safe_int(value)
+        elif key == "targetSdkVersion":
+            target_sdk = _safe_int(value)
+    return min_sdk, target_sdk
+
+
+_RESOURCE_REF_RE = re.compile(r"^@(?:[\w.]+:)?(?P<type>\w+)/(?P<name>\w+)$")
+
+
+def _resolve_resource_xml(manifest_path: Path, ref: Optional[str]) -> Optional[Path]:
+    """Map a manifest resource reference like ``@xml/foo`` to its XML file.
+
+    apktool decodes resources alongside the manifest, so for a manifest at
+    ``apktool_dir/AndroidManifest.xml`` the ``@xml/foo`` reference is at
+    ``apktool_dir/res/xml/foo.xml``. Returns None when the reference doesn't
+    parse, the type isn't an XML resource, or the file is missing.
+    """
+    if not ref:
+        return None
+    m = _RESOURCE_REF_RE.match(ref)
+    if not m or m.group("type") != "xml":
+        return None
+    candidate = manifest_path.parent / "res" / "xml" / f"{m.group('name')}.xml"
+    return candidate if candidate.exists() else None
+
+
+def _parse_network_security_config(xml_path: Path) -> Optional[NetworkSecurityConfigMeta]:
+    """Parse network-security-config XML for cleartext / trust / pin policy.
+
+    Returns None when the file can't be read or parsed. base-config attributes
+    apply to all destinations not covered by a domain-config; domain-config
+    blocks override them per (sub)domain. Pentesters care chiefly about:
+
+      - base-config@cleartextTrafficPermitted=true (overrides API 28+ default)
+      - domain-config@cleartextTrafficPermitted=true (intentional but worth
+        flagging when the domain set is broad)
+      - base-config trusts user certs (enables MITM via user-installed CA)
+    """
+    try:
+        text = xml_path.read_text(encoding="utf-8", errors="replace")
+        root = ET.fromstring(text)
+    except (OSError, ET.ParseError):
+        return None
+
+    base_cleartext: Optional[bool] = None
+    cleartext_domains: list[str] = []
+    base_trusts_user_certs = False
+
+    def _bool_attr(elem: ET.Element, name: str) -> Optional[bool]:
+        val = elem.attrib.get(name)
+        if val == "true":
+            return True
+        if val == "false":
+            return False
+        return None
+
+    base = root.find("base-config")
+    if base is not None:
+        base_cleartext = _bool_attr(base, "cleartextTrafficPermitted")
+        for ta in base.findall("trust-anchors"):
+            for cert in ta.findall("certificates"):
+                if cert.attrib.get("src") == "user":
+                    base_trusts_user_certs = True
+                    break
+
+    for dc in root.findall("domain-config"):
+        if _bool_attr(dc, "cleartextTrafficPermitted") is True:
+            for d in dc.findall("domain"):
+                if d.text:
+                    cleartext_domains.append(d.text.strip())
+
+    if (
+        base_cleartext is None
+        and not cleartext_domains
+        and not base_trusts_user_certs
+    ):
+        # Nothing audit-worthy in the file (e.g. only pin-set or
+        # cleartextTrafficPermitted=false). Still return a record so callers
+        # can distinguish "NSC found but empty policy" from "NSC missing".
+        return NetworkSecurityConfigMeta()
+
+    return NetworkSecurityConfigMeta(
+        base_cleartext_permitted=base_cleartext,
+        cleartext_domains=cleartext_domains,
+        base_trusts_user_certs=base_trusts_user_certs,
+    )
+
+
 def _resolve_class_name(name: Optional[str], package: str) -> Optional[str]:
     """Resolve a component class name relative to the application package.
 
@@ -275,12 +411,42 @@ def _parse_component(elem: ET.Element, comp_type: str, package: str) -> AndroidC
     # (manifest_audit only fires the rule when type == "provider").
     grant_uri = elem.attrib.get(f"{ANDROID_NS}grantUriPermissions") == "true"
 
+    intent_filters: list[IntentFilter] = []
     intent_actions: list[str] = []
     for ifilter in elem.findall("intent-filter"):
+        f_actions: list[str] = []
         for action in ifilter.findall("action"):
             action_name = action.attrib.get(f"{ANDROID_NS}name")
             if action_name:
+                f_actions.append(action_name)
                 intent_actions.append(action_name)
+        f_categories: list[str] = []
+        for cat in ifilter.findall("category"):
+            cat_name = cat.attrib.get(f"{ANDROID_NS}name")
+            if cat_name:
+                f_categories.append(cat_name)
+        f_data: list[IntentDataSpec] = []
+        for d in ifilter.findall("data"):
+            spec = IntentDataSpec(
+                scheme=d.attrib.get(f"{ANDROID_NS}scheme"),
+                host=d.attrib.get(f"{ANDROID_NS}host"),
+                port=d.attrib.get(f"{ANDROID_NS}port"),
+                path=d.attrib.get(f"{ANDROID_NS}path"),
+                path_prefix=d.attrib.get(f"{ANDROID_NS}pathPrefix"),
+                path_pattern=d.attrib.get(f"{ANDROID_NS}pathPattern"),
+                path_suffix=d.attrib.get(f"{ANDROID_NS}pathSuffix"),
+                mime_type=d.attrib.get(f"{ANDROID_NS}mimeType"),
+            )
+            # Skip <data/> elements with no attributes set at all (occurs in
+            # buggy manifests / placeholder filters).
+            if any(getattr(spec, fld) is not None for fld in (
+                "scheme", "host", "port", "path", "path_prefix",
+                "path_pattern", "path_suffix", "mime_type",
+            )):
+                f_data.append(spec)
+        intent_filters.append(IntentFilter(
+            actions=f_actions, categories=f_categories, data=f_data,
+        ))
 
     # android:authorities is a semicolon-separated list per the platform spec.
     # Only providers actually use this; on other component types the attribute
@@ -299,6 +465,7 @@ def _parse_component(elem: ET.Element, comp_type: str, package: str) -> AndroidC
         intent_actions=intent_actions,
         grant_uri_permissions=grant_uri,
         authorities=authorities,
+        intent_filters=intent_filters,
     )
 
 
@@ -364,6 +531,16 @@ def parse_android_manifest(manifest_path: str | Path) -> AndroidAppMeta:
         min_sdk = None
         target_sdk = None
 
+    # apktool 2.x parks SDK info in apktool.yml's `sdkInfo:` block instead of
+    # leaving <uses-sdk> in the decoded manifest. Fall back to the sibling
+    # apktool.yml so MANIFEST-002/008/009 stay live for modern APKs.
+    if min_sdk is None or target_sdk is None:
+        yml_min, yml_target = _parse_apktool_yml_sdk(p.parent / "apktool.yml")
+        if min_sdk is None:
+            min_sdk = yml_min
+        if target_sdk is None:
+            target_sdk = yml_target
+
     application_class: Optional[str] = None
     components: list[AndroidComponent] = []
     debuggable = False
@@ -397,6 +574,11 @@ def parse_android_manifest(manifest_path: str | Path) -> AndroidAppMeta:
             for elem in app.findall(tag):
                 components.append(_parse_component(elem, comp_type, package_name))
 
+    nsc_meta: Optional[NetworkSecurityConfigMeta] = None
+    nsc_xml = _resolve_resource_xml(p, network_security_config)
+    if nsc_xml is not None:
+        nsc_meta = _parse_network_security_config(nsc_xml)
+
     return AndroidAppMeta(
         package_name=package_name,
         application_class=application_class,
@@ -409,6 +591,7 @@ def parse_android_manifest(manifest_path: str | Path) -> AndroidAppMeta:
         uses_cleartext_traffic=uses_cleartext_traffic,
         allow_backup=allow_backup,
         network_security_config=network_security_config,
+        nsc=nsc_meta,
     )
 
 
