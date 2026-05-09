@@ -353,12 +353,264 @@ def _check_webview_javascript(
     return findings
 
 
+# ---------- rule: CODE-003 weak crypto / hash ----------
+
+
+# ``Cipher.getInstance`` invocations whose transformation string maps to a
+# cryptographically weak primitive. The regex captures the quoted argument
+# so the finding can echo it back verbatim. Patterns covered:
+#   - DES / DESede (3DES) — broken / 64-bit block susceptible
+#   - RC4 — broken stream cipher
+#   - AES with ECB mode — leaks plaintext patterns
+#   - AES/CBC/NoPadding — predictable padding oracle when misused
+#   - Blowfish — small block, deprecated
+_CIPHER_WEAK_RE = re.compile(
+    r"""\bCipher\.getInstance\s*\(\s*           # call
+        ['"]                                     # quote
+        (
+            DES(?:ede)?(?:/[^'"]*)?              # DES, DESede, 3DES
+            | RC4
+            | AES/ECB(?:/[^'"]*)?
+            | AES/CBC/NoPadding
+            | Blowfish(?:/[^'"]*)?
+            | RC2(?:/[^'"]*)?
+        )
+        ['"]
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+# Weak hash via MessageDigest.getInstance("MD5"|"SHA-1"|"SHA1"|"MD2")
+_HASH_WEAK_RE = re.compile(
+    r"""\bMessageDigest\.getInstance\s*\(\s*
+        ['"]
+        (MD2|MD4|MD5|SHA-?1)
+        ['"]
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+def _check_weak_crypto(
+    files: list[Path], meta: Optional[AndroidAppMeta], sources_dir: Path
+) -> list[CodeFinding]:
+    findings: list[CodeFinding] = []
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line_no, line in _stripped_lines(text):
+            mc = _CIPHER_WEAK_RE.search(line)
+            if mc:
+                findings.append(CodeFinding(
+                    rule_id="CODE-003",
+                    title="약한 대칭키 알고리즘 / 블록 모드",
+                    severity=SEV_HIGH,
+                    file=path.relative_to(sources_dir).as_posix(),
+                    line_no=line_no,
+                    line_text=line.strip()[:200],
+                    class_fqn=_class_fqn_for(path, sources_dir),
+                    detail=(
+                        f"Cipher.getInstance(\"{mc.group(1)}\")가 호출됩니다. "
+                        "DES/3DES/RC4/AES-ECB는 암호학적으로 깨졌거나 평문 패턴을 "
+                        "노출합니다. AES/CBC/NoPadding은 padding oracle 공격 면을 "
+                        "키우며, Blowfish는 64비트 블록으로 birthday attack에 약합니다."
+                    ),
+                    remediation=(
+                        "AES/GCM/NoPadding (인증 암호화) 또는 ChaCha20-Poly1305로 "
+                        "교체하세요. 키는 안드로이드 Keystore에 저장하고, 같은 (key, IV) "
+                        "쌍이 재사용되지 않도록 IV/nonce를 매 호출마다 무작위 생성하세요."
+                    ),
+                    references=["OWASP MASVS-CRYPTO-1", "CWE-327"],
+                ))
+            mh = _HASH_WEAK_RE.search(line)
+            if mh:
+                findings.append(CodeFinding(
+                    rule_id="CODE-003",
+                    title="약한 해시 알고리즘",
+                    severity=SEV_MEDIUM,
+                    file=path.relative_to(sources_dir).as_posix(),
+                    line_no=line_no,
+                    line_text=line.strip()[:200],
+                    class_fqn=_class_fqn_for(path, sources_dir),
+                    detail=(
+                        f"MessageDigest.getInstance(\"{mh.group(1)}\")가 호출됩니다. "
+                        "MD2/MD4/MD5/SHA-1은 충돌 저항성이 깨져 무결성 보호 / 인증 "
+                        "용도로는 사용할 수 없습니다 (체크섬 용도라도 misuse 위험)."
+                    ),
+                    remediation=(
+                        "SHA-256 이상으로 교체하세요. HMAC이 필요하면 HmacSHA256, "
+                        "패스워드 해싱이라면 PBKDF2 / Argon2 / scrypt를 사용해야 "
+                        "단순 해시 사용은 적절하지 않습니다."
+                    ),
+                    references=["OWASP MASVS-CRYPTO-4", "CWE-327"],
+                ))
+    return findings
+
+
+# ---------- rule: CODE-004 plaintext credential logs ----------
+
+
+# Log.[diewv](TAG, "...token=" + value) — Android logger calls whose
+# argument expression mentions credential-shaped names. Matches the call
+# site, then a separate substring check looks for sensitive names so the
+# regex stays simple.
+_LOG_CALL_RE = re.compile(
+    r"\b(?:android\.util\.)?Log\.(?:d|v|i|w|e|wtf)\s*\("
+)
+_CRED_NAMES_RE = re.compile(
+    r"(?:^|[^A-Za-z0-9_])(password|passwd|pwd|token|secret|api[_-]?key"
+    r"|access[_-]?key|auth(?:orization)?|credential)s?(?:[^A-Za-z0-9_]|$)",
+    re.IGNORECASE,
+)
+
+
+def _check_plaintext_log(
+    files: list[Path], meta: Optional[AndroidAppMeta], sources_dir: Path
+) -> list[CodeFinding]:
+    findings: list[CodeFinding] = []
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line_no, line in _stripped_lines(text):
+            if not _LOG_CALL_RE.search(line):
+                continue
+            cred = _CRED_NAMES_RE.search(line)
+            if not cred:
+                continue
+            findings.append(CodeFinding(
+                rule_id="CODE-004",
+                title="자격증명/토큰 평문 로그",
+                severity=SEV_HIGH,
+                file=path.relative_to(sources_dir).as_posix(),
+                line_no=line_no,
+                line_text=line.strip()[:200],
+                class_fqn=_class_fqn_for(path, sources_dir),
+                detail=(
+                    "android.util.Log 호출의 인자가 자격증명·토큰 류 식별자를 "
+                    "포함합니다. logcat은 같은 단말의 다른 앱(루팅/디버그 가능 "
+                    "기기) 또는 ADB 접근자로부터 읽힐 수 있어 자격증명이 평문으로 "
+                    f"새어나갑니다. 단서: '{cred.group(1)}'."
+                ),
+                remediation=(
+                    "프로덕션 빌드에서는 자격증명/토큰을 절대 로그에 남기지 마세요. "
+                    "임시 디버깅이 필요하면 BuildConfig.DEBUG로 가드하고, 릴리스 "
+                    "빌드에서는 ProGuard 규칙으로 Log.* 호출을 제거(stripping)하세요."
+                ),
+                references=["OWASP MASVS-STORAGE-3", "CWE-532"],
+            ))
+    return findings
+
+
+# ---------- rule: CODE-005 external storage write ----------
+
+
+_EXTERNAL_STORAGE_RE = re.compile(
+    r"\b(?:Environment\.)?getExternalStorageDirectory\s*\("
+    r"|\bgetExternalFilesDir\s*\("
+    r"|\bgetExternalCacheDir\s*\("
+    r"|\bgetExternalStoragePublicDirectory\s*\("
+)
+
+
+def _check_external_storage(
+    files: list[Path], meta: Optional[AndroidAppMeta], sources_dir: Path
+) -> list[CodeFinding]:
+    findings: list[CodeFinding] = []
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line_no, line in _stripped_lines(text):
+            m = _EXTERNAL_STORAGE_RE.search(line)
+            if not m:
+                continue
+            findings.append(CodeFinding(
+                rule_id="CODE-005",
+                title="외부 저장소 경로 사용",
+                severity=SEV_MEDIUM,
+                file=path.relative_to(sources_dir).as_posix(),
+                line_no=line_no,
+                line_text=line.strip()[:200],
+                class_fqn=_class_fqn_for(path, sources_dir),
+                detail=(
+                    "외부 저장소(public/scoped) 경로 API가 호출됩니다. 외부 저장소 "
+                    "경로의 파일은 같은 단말의 다른 앱이 READ/WRITE_EXTERNAL_STORAGE "
+                    "권한으로 읽거나 변조할 수 있고, 사용자가 USB/MTP로 단말을 "
+                    "연결했을 때도 노출됩니다. 민감 데이터(자격증명, 트랜잭션 명세, "
+                    "토큰 캐시)를 여기 쓰면 안 됩니다."
+                ),
+                remediation=(
+                    "민감 데이터는 앱 비공개 저장소(getFilesDir / getCacheDir)나 "
+                    "EncryptedSharedPreferences / EncryptedFile (Jetpack Security)에 "
+                    "저장하세요. 외부 저장소가 필요하다면 사용자가 의식적으로 공유한 "
+                    "콘텐츠(사진, 문서)에만 한정하세요."
+                ),
+                references=["OWASP MASVS-STORAGE-1", "CWE-922"],
+            ))
+    return findings
+
+
+# ---------- rule: CODE-006 MODE_WORLD_READABLE / MODE_WORLD_WRITEABLE ----------
+
+
+_MODE_WORLD_RE = re.compile(
+    r"\b(MODE_WORLD_READABLE|MODE_WORLD_WRITEABLE)\b"
+)
+
+
+def _check_mode_world(
+    files: list[Path], meta: Optional[AndroidAppMeta], sources_dir: Path
+) -> list[CodeFinding]:
+    findings: list[CodeFinding] = []
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line_no, line in _stripped_lines(text):
+            m = _MODE_WORLD_RE.search(line)
+            if not m:
+                continue
+            findings.append(CodeFinding(
+                rule_id="CODE-006",
+                title=f"전역 공유 권한 ({m.group(1)})",
+                severity=SEV_HIGH,
+                file=path.relative_to(sources_dir).as_posix(),
+                line_no=line_no,
+                line_text=line.strip()[:200],
+                class_fqn=_class_fqn_for(path, sources_dir),
+                detail=(
+                    f"{m.group(1)} 모드가 사용됩니다. 이 플래그는 API 17부터 "
+                    "deprecated이고, 실제로는 SecurityException을 던지는 단말이 "
+                    "많지만 — 살아있는 단말에서는 같은 디바이스의 다른 앱이 해당 "
+                    "파일을 자유롭게 읽거나 쓸 수 있습니다."
+                ),
+                remediation=(
+                    "Context.MODE_PRIVATE를 기본값으로 사용하고, 데이터 공유가 "
+                    "필요하면 ContentProvider에 권한을 명시한 인터페이스를 통해 "
+                    "노출하세요. 임시 파일 공유는 FileProvider + grantUriPermissions로 "
+                    "처리해야 합니다."
+                ),
+                references=["OWASP MASVS-STORAGE-2", "CWE-276"],
+            ))
+    return findings
+
+
 # ---------- registry & entry point ----------
 
 
 RULES: list[RuleFn] = [
     _check_hardcoded_http,
     _check_webview_javascript,
+    _check_weak_crypto,
+    _check_plaintext_log,
+    _check_external_storage,
+    _check_mode_world,
 ]
 
 

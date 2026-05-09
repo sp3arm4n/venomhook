@@ -235,6 +235,248 @@ class WebViewJavaScriptRuleTests(unittest.TestCase):
             self.assertEqual(report.findings, [])
 
 
+# ---------- CODE-003 weak crypto / hash ----------
+
+
+class WeakCryptoRuleTests(unittest.TestCase):
+    def test_des_cipher(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/C.java",
+                'Cipher c = Cipher.getInstance("DES/ECB/PKCS5Padding");\n'
+            )
+            report = audit_code(root, _meta())
+            findings = [f for f in report.findings if f.rule_id == "CODE-003"]
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0].severity, "high")
+            self.assertIn("DES", findings[0].detail)
+
+    def test_rc4_cipher(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/C.java",
+                'Cipher c = Cipher.getInstance("RC4");\n'
+            )
+            report = audit_code(root, _meta())
+            self.assertEqual(
+                len([f for f in report.findings if f.rule_id == "CODE-003"]), 1
+            )
+
+    def test_aes_ecb_cipher(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/C.java",
+                'Cipher c = Cipher.getInstance("AES/ECB/PKCS5Padding");\n'
+            )
+            report = audit_code(root, _meta())
+            findings = [f for f in report.findings if f.rule_id == "CODE-003"]
+            self.assertEqual(len(findings), 1)
+            self.assertIn("AES/ECB", findings[0].detail)
+
+    def test_aes_cbc_nopadding_cipher(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/C.java",
+                'Cipher c = Cipher.getInstance("AES/CBC/NoPadding");\n'
+            )
+            report = audit_code(root, _meta())
+            self.assertEqual(
+                len([f for f in report.findings if f.rule_id == "CODE-003"]), 1
+            )
+
+    def test_aes_gcm_does_not_trigger(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/C.java",
+                'Cipher c = Cipher.getInstance("AES/GCM/NoPadding");\n'
+            )
+            report = audit_code(root, _meta())
+            self.assertEqual(
+                [f for f in report.findings if f.rule_id == "CODE-003"], []
+            )
+
+    def test_md5_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/H.java",
+                'MessageDigest m = MessageDigest.getInstance("MD5");\n'
+            )
+            report = audit_code(root, _meta())
+            findings = [f for f in report.findings if f.rule_id == "CODE-003"]
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0].severity, "medium")
+
+    def test_sha1_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/H.java",
+                'MessageDigest m = MessageDigest.getInstance("SHA-1");\n'
+            )
+            report = audit_code(root, _meta())
+            self.assertEqual(
+                len([f for f in report.findings if f.rule_id == "CODE-003"]), 1
+            )
+
+    def test_sha256_does_not_trigger(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/H.java",
+                'MessageDigest m = MessageDigest.getInstance("SHA-256");\n'
+            )
+            report = audit_code(root, _meta())
+            self.assertEqual(
+                [f for f in report.findings if f.rule_id == "CODE-003"], []
+            )
+
+
+# ---------- CODE-004 plaintext credential logs ----------
+
+
+class PlaintextLogRuleTests(unittest.TestCase):
+    def test_logd_with_password(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/L.java",
+                'Log.d("Login:", "user=" + u + ", password=" + p);\n'
+            )
+            report = audit_code(root, _meta())
+            findings = [f for f in report.findings if f.rule_id == "CODE-004"]
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0].severity, "high")
+
+    def test_loge_with_token(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/L.java",
+                'Log.e(TAG, "auth_token=" + token);\n'
+            )
+            report = audit_code(root, _meta())
+            self.assertEqual(
+                len([f for f in report.findings if f.rule_id == "CODE-004"]), 1
+            )
+
+    def test_logw_with_apikey(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/L.java",
+                'Log.w(TAG, "fail with api_key=" + key);\n'
+            )
+            report = audit_code(root, _meta())
+            self.assertEqual(
+                len([f for f in report.findings if f.rule_id == "CODE-004"]), 1
+            )
+
+    def test_log_without_credential_keyword_does_not_trigger(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/L.java",
+                'Log.d(TAG, "user logged in");\n'
+            )
+            report = audit_code(root, _meta())
+            self.assertEqual(
+                [f for f in report.findings if f.rule_id == "CODE-004"], []
+            )
+
+    def test_credential_keyword_outside_log_does_not_trigger(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/L.java",
+                'String password = preferences.getString("password", null);\n'
+            )
+            report = audit_code(root, _meta())
+            self.assertEqual(
+                [f for f in report.findings if f.rule_id == "CODE-004"], []
+            )
+
+    def test_fully_qualified_log_call(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/L.java",
+                'android.util.Log.d(TAG, "secret=" + s);\n'
+            )
+            report = audit_code(root, _meta())
+            self.assertEqual(
+                len([f for f in report.findings if f.rule_id == "CODE-004"]), 1
+            )
+
+
+# ---------- CODE-005 external storage ----------
+
+
+class ExternalStorageRuleTests(unittest.TestCase):
+    def test_get_external_storage_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/S.java",
+                "File f = Environment.getExternalStorageDirectory();\n"
+            )
+            report = audit_code(root, _meta())
+            findings = [f for f in report.findings if f.rule_id == "CODE-005"]
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0].severity, "medium")
+
+    def test_get_external_files_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/S.java",
+                'File f = ctx.getExternalFilesDir(null);\n'
+            )
+            report = audit_code(root, _meta())
+            self.assertEqual(
+                len([f for f in report.findings if f.rule_id == "CODE-005"]), 1
+            )
+
+    def test_internal_storage_does_not_trigger(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/S.java",
+                "File f = ctx.getFilesDir();\n"
+            )
+            report = audit_code(root, _meta())
+            self.assertEqual(
+                [f for f in report.findings if f.rule_id == "CODE-005"], []
+            )
+
+
+# ---------- CODE-006 MODE_WORLD ----------
+
+
+class ModeWorldRuleTests(unittest.TestCase):
+    def test_mode_world_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/M.java",
+                'openFileOutput("creds.txt", Context.MODE_WORLD_READABLE);\n'
+            )
+            report = audit_code(root, _meta())
+            findings = [f for f in report.findings if f.rule_id == "CODE-006"]
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0].severity, "high")
+            self.assertIn("MODE_WORLD_READABLE", findings[0].title)
+
+    def test_mode_world_writeable(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/M.java",
+                'openFileOutput("creds.txt", Context.MODE_WORLD_WRITEABLE);\n'
+            )
+            report = audit_code(root, _meta())
+            self.assertEqual(
+                len([f for f in report.findings if f.rule_id == "CODE-006"]), 1
+            )
+
+    def test_mode_private_does_not_trigger(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            _write_java(root, "com/example/app/M.java",
+                'openFileOutput("safe.txt", Context.MODE_PRIVATE);\n'
+            )
+            report = audit_code(root, _meta())
+            self.assertEqual(
+                [f for f in report.findings if f.rule_id == "CODE-006"], []
+            )
+
+
 # ---------- audit_code aggregate ----------
 
 
