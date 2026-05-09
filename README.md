@@ -161,13 +161,31 @@ venomhook/
 
 ## Credits
 
-Architect: [sp3arm4n](https://github.com/sp3arm4n)  
-Collaborators: [kilkat](https://github.com/kilkat), [Leelsey](https://github.com/leelsey)
+### 🏗️ Architect
 
-Development support: OpenAI Codex, Claude Code
+<a href="https://github.com/sp3arm4n"><img src="https://img.shields.io/badge/GitHub-sp3arm4n-181717?logo=github&logoColor=white&style=for-the-badge" alt="GitHub - sp3arm4n"></a>
+
+### 🤝 Collaborators
+
+<a href="https://github.com/kilkat"><img src="https://img.shields.io/badge/GitHub-kilkat-181717?logo=github&logoColor=white&style=for-the-badge" alt="GitHub - kilkat"></a>
+<a href="https://github.com/leelsey"><img src="https://img.shields.io/badge/GitHub-Leelsey-181717?logo=github&logoColor=white&style=for-the-badge" alt="GitHub - Leelsey"></a>
+
+### 👨‍💻 Development Support
+
+<img src="https://img.shields.io/badge/OpenAI-Codex-0f172a?logo=openai&logoColor=white&style=for-the-badge" alt="OpenAI Codex"> <img src="https://img.shields.io/badge/Anthropic-Claude%20Code-d97757?logo=anthropic&logoColor=white&style=for-the-badge" alt="Anthropic Claude Code badge">
 
 ## License
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 
-Licensed under the **Apache License, Version 2.0**. See the [LICENSE](LICENSE) file for the full text.
+Licensed under the **Apache License, Version 2.0** (the "License"); you may not use this project except in compliance with the License. See the [`LICENSE`](LICENSE) file for the full text.
+
+```
+Copyright 2026 sp3arm4n
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+```
