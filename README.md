@@ -8,15 +8,21 @@
   <a href="https://github.com/sp3arm4n/venomhook/actions/workflows/ci.yml"><img src="https://github.com/sp3arm4n/venomhook/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
 </p>
 
-VenomHook은 네이티브 바이너리와 Android APK를 정적 분석해 후킹 후보 함수를 찾고, offset 기반 HookSpec과 Frida 스크립트를 생성하는 CLI 도구입니다.
+VenomHook은 네이티브 바이너리와 Android APK를 정적 분석해 후킹 후보 함수와 보안 결함을 찾고, offset 기반 HookSpec, 실행 가능한 PoC 레시피, 가독성 있는 HTML 보고서를 생성하는 CLI 도구입니다.
 
 ```text
 Binary/APK -> StaticMeta -> Endpoint scoring -> HookSpec -> Frida script -> Runtime report
 ```
 
-PE, ELF, Mach-O를 같은 데이터 모델로 다루며, Android APK에서는 native library 추출, manifest 감사, Java native method 추출, JNI bridge 분석, PoC 번들 export까지 제공합니다.
+PE, ELF, Mach-O를 같은 데이터 모델로 다룹니다. Android APK 흐름은 다음을 한 번에 수행합니다.
 
-이 도구는 권한이 있는 분석 대상에서 리버스 엔지니어링, 보안 검증, 동적 계측 자동화를 돕기 위한 용도입니다.
+- **Manifest 감사** — 9 룰 (debuggable, cleartext / NSC base-config, allowBackup, exported 컴포넌트 / provider, grantUriPermissions, 위험 권한, 구버전 SDK)
+- **코드 레벨 감사** — jadx 디컴파일 결과 위에서 6 룰 (평문 HTTP, WebView setJavaScriptEnabled / addJavascriptInterface, 약한 Cipher / 해시, 평문 자격증명 로그, 외부 저장소 사용, MODE_WORLD_READABLE/WRITEABLE)
+- **공격면 추출** — deeplink / 데이터 스킴 / 카테고리, intent-filter 구조, JNI bridge correlation, .so 문자열 카테고리화 (URL / 경로 / 쉘 / crypto / 자격증명 단서 / SQL)
+- **PoC 자동 생성** — adb 명령, Frida 후킹, mitmproxy 가로채기, logcat grep 레시피를 .sh / .frida.js / .md 번들로 export
+- **자체 포함 HTML 보고서** — 심각도 색상 카드, 코드 단서 인용, on-disk PoC 링크 — 외부 자산 / JS 의존 없음
+
+이 도구는 권한이 있는 분석 대상에서 리버스 엔지니어링, 보안 검증, 펜테스트, 동적 계측 자동화를 돕기 위한 용도입니다.
 
 ## Quick Start
 
@@ -86,7 +92,9 @@ pip install -e .
 | Frida 스크립트 생성 | `venomhook offset-hook --hookspec ./out/venomhook.json --target sample.exe --out-script ./out/venomhook.js` |
 | 실제 바이너리 Ghidra 분석 | `venomhook offset-static --binary ./path/to/target.exe --ghidra-headless analyzeHeadless --ghidra-script ./ghidra_scripts/export_staticmeta.py --out ./reports/hook/venomhook.json` |
 | APK manifest 빠른 감사 | `venomhook android-audit --apk ./sample/myapp.apk --no-jadx --out-dir ./out_audit --audit-json ./out_audit/audit.json` |
-| 실행 가능한 PoC 번들 생성 | `venomhook android-audit --apk ./sample/myapp.apk --out-dir ./out_audit --poc-bundle-dir ./out_audit/pocs` |
+| APK 전체 감사 (manifest + 코드) + HTML 보고서 + PoC 번들 | `venomhook android-audit --apk ./sample/myapp.apk --out-dir ./out_audit --out-html ./out_audit/audit.html --poc-bundle-dir ./out_audit/pocs` |
+| 코드 감사 결과만 별도 JSON | `venomhook android-audit --apk ./sample/myapp.apk --out-dir ./out_audit --code-audit-json ./out_audit/code_audit.json` |
+| CI 게이트 — high 이상 발견 시 비-0 종료 | `venomhook android-audit --apk ./sample/myapp.apk --out-dir ./out_audit --severity-threshold high --quiet` |
 | Frida 로그 요약 | `venomhook offset-report-runtime --log ./logs/frida.log --out-md ./out/summary.md --out-html ./out/summary.html` |
 
 ## Requirements
@@ -152,9 +160,18 @@ venomhook/
 ├── ghidra_scripts/
 ├── sample/
 │   ├── examples/
-│   └── tests/
+│   └── tests/                 # 747+ 단위 테스트
 ├── setup/
 ├── src/venomhook/
+│   ├── apk_decoder.py         # Manifest + apktool.yml + NSC + intent-filter 파싱
+│   ├── binary_meta.py         # .so 메타 (lief) + .rodata strings 추출
+│   ├── manifest_audit.py      # MANIFEST-001..009 (9 룰)
+│   ├── code_audit.py          # CODE-001..006 (6 룰, jadx 위에서)
+│   ├── native_strings.py      # .so 문자열 8 카테고리 분류
+│   ├── poc_generator.py       # adb / Frida / mitmproxy / logcat PoC 빌더
+│   ├── audit_html_report.py   # 자체 포함 HTML 보고서
+│   ├── android_pipeline.py    # 9-step 파이프라인 통합
+│   └── ...
 ├── ARCHITECTURE.md
 ├── pyproject.toml
 └── README.md
