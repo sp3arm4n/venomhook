@@ -891,7 +891,7 @@ venomhook/
 │       ├── scoring.py
 │       ├── static_pipeline.py
 │       └── store.py
-├── architecture.md
+├── ARCHITECTURE.md
 ├── pyproject.toml
 └── README.md
 ```
