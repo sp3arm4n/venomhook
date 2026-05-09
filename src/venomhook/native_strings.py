@@ -50,7 +50,7 @@ _URL_RE = re.compile(
 _IPV4_RE = re.compile(
     r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d{1,5})?(?:/[\w./~-]*)?$"
 )
-_IPV6_RE = re.compile(r"^\[?[0-9a-fA-F:]{2,}\]?(?::\d{1,5})?$")
+_IPV6_RE = re.compile(r"^(?=.*:)\[?[0-9a-fA-F:]{2,}\]?(?::\d{1,5})?$")
 
 _SENSITIVE_PATH_RE = re.compile(
     r"^/(system|data|sdcard|storage|proc|sbin|vendor|product|apex)(?:/|$)"
@@ -183,7 +183,7 @@ def categorize_strings(strings: list[str]) -> NativeStringHints:
         if _URL_RE.match(s):
             _add("urls", s)
             continue  # URL itself usually isn't simultaneously an IP literal
-        if _IPV4_RE.match(s):
+        if _IPV4_RE.match(s) or _IPV6_RE.match(s):
             _add("ip_endpoints", s)
         if _SENSITIVE_PATH_RE.match(s):
             _add("paths", s)
