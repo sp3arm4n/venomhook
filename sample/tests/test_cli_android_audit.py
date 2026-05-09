@@ -281,6 +281,70 @@ class AndroidAuditCliTests(unittest.TestCase):
                     "--severity-threshold", "high",
                 ])
 
+    def test_severity_gate_includes_code_findings(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = tdp / "mocked.apk"
+
+            from venomhook.android_pipeline import AndroidAnalysis
+            from venomhook.apk_extractor import ApkMeta
+            from venomhook.models import (
+                AndroidAppMeta,
+                AndroidAuditReport,
+                CodeAuditReport,
+                CodeFinding,
+            )
+
+            app_meta = AndroidAppMeta(
+                package_name="com.clean",
+                target_sdk=33,
+                allow_backup=False,
+                uses_cleartext_traffic=False,
+            )
+            analysis = AndroidAnalysis(
+                apk_meta=ApkMeta(
+                    path=str(apk),
+                    name=apk.name,
+                    hash="sha256:mocked",
+                    abis=[],
+                    native_libs={},
+                ),
+                selected_abi=None,
+                extracted_so_path=None,
+                so_meta=None,
+                app_meta=app_meta,
+                audit_report=AndroidAuditReport(
+                    package_name="com.clean",
+                    findings=[],
+                ),
+                code_audit_report=CodeAuditReport(
+                    package_name="com.clean",
+                    files_scanned=1,
+                    findings=[
+                        CodeFinding(
+                            rule_id="CODE-003",
+                            title="weak crypto",
+                            severity="high",
+                            file="com/clean/Crypto.java",
+                            line_no=12,
+                        )
+                    ],
+                ),
+            )
+
+            with mock.patch(
+                "venomhook.cli.analyze_apk", return_value=analysis
+            ), self.assertRaises(SystemExit) as ctx:
+                self._run([
+                    "android-audit",
+                    "--apk", str(apk),
+                    "--out-dir", str(tdp / "work"),
+                    "--quiet",
+                    "--severity-threshold", "high",
+                ])
+
+        self.assertEqual(ctx.exception.code, 2)
+
     def test_missing_apktool_exits_1_when_no_app_meta(self):
         with tempfile.TemporaryDirectory() as td:
             tdp = Path(td)
@@ -413,6 +477,84 @@ class AndroidAuditCliTests(unittest.TestCase):
         self.assertIn("MANIFEST-001", out)
         self.assertIsNotNone(restored.audit_report)
         self.assertGreaterEqual(len(restored.pocs), 1)
+
+    def test_cached_no_jadx_analysis_ignored_when_jadx_requested(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_without_lib(tdp)
+            cache_dir = tdp / "cache"
+            code_path = tdp / "code.json"
+
+            from venomhook.analysis_cache import AnalysisCache
+            from venomhook.android_pipeline import AndroidAnalysis
+            from venomhook.apk_extractor import extract_apk_meta
+            from venomhook.models import (
+                AndroidAppMeta,
+                AndroidAuditReport,
+                CodeAuditReport,
+                CodeFinding,
+            )
+
+            apk_meta = extract_apk_meta(apk)
+            app_meta = AndroidAppMeta(
+                package_name="com.demo",
+                target_sdk=33,
+                allow_backup=False,
+                uses_cleartext_traffic=False,
+            )
+            cached = AndroidAnalysis(
+                apk_meta=apk_meta,
+                selected_abi=None,
+                extracted_so_path=None,
+                so_meta=None,
+                app_meta=app_meta,
+                audit_report=AndroidAuditReport(
+                    package_name="com.demo",
+                    findings=[],
+                ),
+            )
+            fresh = AndroidAnalysis(
+                apk_meta=apk_meta,
+                selected_abi=None,
+                extracted_so_path=None,
+                so_meta=None,
+                app_meta=app_meta,
+                audit_report=AndroidAuditReport(
+                    package_name="com.demo",
+                    findings=[],
+                ),
+                code_audit_report=CodeAuditReport(
+                    package_name="com.demo",
+                    files_scanned=1,
+                    findings=[
+                        CodeFinding(
+                            rule_id="CODE-002",
+                            title="WebView JS",
+                            severity="medium",
+                            file="com/demo/Web.java",
+                        )
+                    ],
+                ),
+            )
+
+            with AnalysisCache(cache_dir / "cache.db") as cache:
+                cache.put(cached)
+
+            with mock.patch(
+                "venomhook.cli.analyze_apk", return_value=fresh
+            ) as analyze_mock:
+                self._run([
+                    "android-audit",
+                    "--apk", str(apk),
+                    "--out-dir", str(tdp / "work"),
+                    "--quiet",
+                    "--cache-dir", str(cache_dir),
+                    "--code-audit-json", str(code_path),
+                ])
+                analyze_mock.assert_called_once()
+
+            payload = json.loads(code_path.read_text())
+            self.assertEqual(payload["findings"][0]["rule_id"], "CODE-002")
 
     def test_cache_dir_writes_after_first_run(self):
         with tempfile.TemporaryDirectory() as td:

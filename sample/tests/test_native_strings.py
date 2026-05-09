@@ -47,6 +47,14 @@ class CategorizeStringsTests(unittest.TestCase):
         ])
         self.assertEqual(len(hints.ip_endpoints), 3)
 
+    def test_ipv6_requires_colon(self) -> None:
+        hints = categorize_strings([
+            "deadbeef",
+            "cafebabe",
+            "2001:db8::1",
+        ])
+        self.assertEqual(hints.ip_endpoints, ["2001:db8::1"])
+
     def test_sensitive_paths(self) -> None:
         hints = categorize_strings([
             "/system/bin/sh",

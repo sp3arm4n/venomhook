@@ -45,8 +45,9 @@ __all__ = [
 
 
 # Bumped whenever AndroidAnalysis.to_dict() changes shape incompatibly.
-# Older entries remain readable but new writes use the current version.
-SCHEMA_VERSION = 1
+# Phase 7 added code_audit_report and native_string_hints; keeping the old
+# version would let pre-Phase-7 cache rows replay without code findings.
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -107,7 +108,11 @@ class AnalysisCache:
         package = analysis.app_meta.package_name if analysis.app_meta else None
         apk_name = analysis.apk_meta.name
         finding_count = (
-            len(analysis.audit_report.findings) if analysis.audit_report else 0
+            (len(analysis.audit_report.findings) if analysis.audit_report else 0)
+            + (
+                len(analysis.code_audit_report.findings)
+                if analysis.code_audit_report else 0
+            )
         )
         payload = json.dumps(analysis.to_dict())
         now = datetime.now(timezone.utc).isoformat()

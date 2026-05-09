@@ -997,6 +997,25 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
     if args.cache_dir:
         cache = AnalysisCache(args.cache_dir / "cache.db")
 
+    def cache_replay_blocker(cached) -> str | None:
+        if cached.app_meta is None:
+            return "no decoded manifest"
+        if args.abi != "auto" and cached.selected_abi != args.abi:
+            return (
+                f"cached ABI is {cached.selected_abi or '<none>'}, "
+                f"requested {args.abi}"
+            )
+        if args.apk_lib:
+            cached_lib = cached.so_meta.name if cached.so_meta else None
+            if cached_lib != args.apk_lib:
+                return (
+                    f"cached library is {cached_lib or '<none>'}, "
+                    f"requested {args.apk_lib}"
+                )
+        if not args.no_jadx and cached.code_audit_report is None:
+            return "missing code audit from jadx sources"
+        return None
+
     try:
         result = None
         cache_update_needed = False
@@ -1010,11 +1029,14 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
                 raise SystemExit(1) from e
             cached = cache.get(apk_meta_probe.hash)
             if cached is not None:
-                if cached.app_meta is None:
+                blocker = cache_replay_blocker(cached)
+                if blocker:
                     logging.warning(
-                        "cache hit for %s has no decoded manifest; "
+                        "cache hit for %s is incomplete for this request "
+                        "(%s); "
                         "ignoring cached analysis",
                         apk_meta_probe.hash,
+                        blocker,
                     )
                 else:
                     logging.info("cache hit for %s — replaying stored analysis",
@@ -1103,12 +1125,20 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
             )
             logging.info("HTML audit report written to %s", html_path)
 
-        if (
-            args.severity_threshold
-            and audit_report.has_severity_at_least(args.severity_threshold)
-        ):
+        code_report = result.code_audit_report
+        gate_triggered = False
+        if args.severity_threshold:
+            gate_triggered = audit_report.has_severity_at_least(
+                args.severity_threshold
+            )
+            if code_report is not None:
+                gate_triggered = gate_triggered or code_report.has_severity_at_least(
+                    args.severity_threshold
+                )
+        if gate_triggered:
             logging.error(
-                "severity gate triggered: at least one finding at or above '%s'",
+                "severity gate triggered: at least one manifest/code finding "
+                "at or above '%s'",
                 args.severity_threshold,
             )
             raise SystemExit(2)
