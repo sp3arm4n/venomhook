@@ -53,6 +53,7 @@ def _manifest_xml(
     extract_native_libs: str | None = None,
     min_sdk: int | None = None,
     target_sdk: int | None = None,
+    network_security_config: str | None = None,
 ) -> str:
     """Build a synthetic AndroidManifest.xml for parser tests.
 
@@ -81,6 +82,8 @@ def _manifest_xml(
         app_attrs.append('android:debuggable="true"')
     if extract_native_libs is not None:
         app_attrs.append(f'android:extractNativeLibs="{extract_native_libs}"')
+    if 'network_security_config' in locals() and network_security_config is not None:
+        app_attrs.append(f'android:networkSecurityConfig="{network_security_config}"')
     lines.append(f'<application {" ".join(app_attrs)}>')
 
     def _component_xml(tag: str, c: dict) -> str:
@@ -553,6 +556,165 @@ class TestParseAndroidManifest(unittest.TestCase):
             )
             meta = parse_android_manifest(p)
             self.assertEqual(meta.providers[0].authorities, [])
+
+
+# ---------- network_security_config XML resolution & parsing ----------
+
+
+def _write_nsc(td: Path, body: str, name: str = "nsc") -> Path:
+    res_xml = td / "res" / "xml"
+    res_xml.mkdir(parents=True, exist_ok=True)
+    nsc_path = res_xml / f"{name}.xml"
+    nsc_path.write_text(body, encoding="utf-8")
+    return nsc_path
+
+
+class TestNetworkSecurityConfigParsing(unittest.TestCase):
+    def _write_manifest(self, td: Path, ref: str | None) -> Path:
+        xml = _manifest_xml(package="com.app", network_security_config=ref)
+        m = td / "AndroidManifest.xml"
+        m.write_text(xml)
+        return m
+
+    def test_no_nsc_attribute_yields_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            m = self._write_manifest(Path(td), None)
+            meta = parse_android_manifest(m)
+            self.assertIsNone(meta.network_security_config)
+            self.assertIsNone(meta.nsc)
+
+    def test_nsc_referenced_but_file_missing_keeps_nsc_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            m = self._write_manifest(Path(td), "@xml/nsc")
+            meta = parse_android_manifest(m)
+            self.assertEqual(meta.network_security_config, "@xml/nsc")
+            self.assertIsNone(meta.nsc)
+
+    def test_base_cleartext_true_is_captured(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            _write_nsc(tdp, (
+                '<?xml version="1.0" encoding="utf-8"?>\n'
+                '<network-security-config>\n'
+                '  <base-config cleartextTrafficPermitted="true"/>\n'
+                '</network-security-config>\n'
+            ))
+            m = self._write_manifest(tdp, "@xml/nsc")
+            meta = parse_android_manifest(m)
+            self.assertIsNotNone(meta.nsc)
+            self.assertTrue(meta.nsc.base_cleartext_permitted)
+            self.assertEqual(meta.nsc.cleartext_domains, [])
+            self.assertFalse(meta.nsc.base_trusts_user_certs)
+
+    def test_base_cleartext_false_is_captured(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            _write_nsc(tdp, (
+                '<?xml version="1.0"?>\n'
+                '<network-security-config>\n'
+                '  <base-config cleartextTrafficPermitted="false"/>\n'
+                '</network-security-config>\n'
+            ))
+            m = self._write_manifest(tdp, "@xml/nsc")
+            meta = parse_android_manifest(m)
+            self.assertIsNotNone(meta.nsc)
+            self.assertFalse(meta.nsc.base_cleartext_permitted)
+
+    def test_domain_cleartext_collected(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            _write_nsc(tdp, (
+                '<?xml version="1.0"?>\n'
+                '<network-security-config>\n'
+                '  <domain-config cleartextTrafficPermitted="true">\n'
+                '    <domain includeSubdomains="true">example.com</domain>\n'
+                '    <domain>legacy.example.org</domain>\n'
+                '  </domain-config>\n'
+                '  <domain-config cleartextTrafficPermitted="false">\n'
+                '    <domain>secure.example.net</domain>\n'
+                '  </domain-config>\n'
+                '</network-security-config>\n'
+            ))
+            m = self._write_manifest(tdp, "@xml/nsc")
+            meta = parse_android_manifest(m)
+            self.assertEqual(
+                meta.nsc.cleartext_domains,
+                ["example.com", "legacy.example.org"],
+            )
+
+    def test_user_cert_trust_in_base_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            _write_nsc(tdp, (
+                '<?xml version="1.0"?>\n'
+                '<network-security-config>\n'
+                '  <base-config>\n'
+                '    <trust-anchors>\n'
+                '      <certificates src="system"/>\n'
+                '      <certificates src="user"/>\n'
+                '    </trust-anchors>\n'
+                '  </base-config>\n'
+                '</network-security-config>\n'
+            ))
+            m = self._write_manifest(tdp, "@xml/nsc")
+            meta = parse_android_manifest(m)
+            self.assertTrue(meta.nsc.base_trusts_user_certs)
+
+    def test_empty_policy_returns_default_record(self):
+        # NSC file present but only inert policy (e.g. pin-set without cleartext
+        # or user-cert trust). Should still yield a record so callers know the
+        # file was resolved — just one with all audit-relevant fields neutral.
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            _write_nsc(tdp, (
+                '<?xml version="1.0"?>\n'
+                '<network-security-config>\n'
+                '  <domain-config>\n'
+                '    <domain>example.com</domain>\n'
+                '    <pin-set><pin digest="SHA-256">aaaa</pin></pin-set>\n'
+                '  </domain-config>\n'
+                '</network-security-config>\n'
+            ))
+            m = self._write_manifest(tdp, "@xml/nsc")
+            meta = parse_android_manifest(m)
+            self.assertIsNotNone(meta.nsc)
+            self.assertIsNone(meta.nsc.base_cleartext_permitted)
+            self.assertEqual(meta.nsc.cleartext_domains, [])
+            self.assertFalse(meta.nsc.base_trusts_user_certs)
+
+    def test_resource_ref_with_namespace_prefix_resolves(self):
+        # apktool sometimes emits the package-qualified form. The resolver
+        # should still find the same xml file.
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            _write_nsc(tdp, (
+                '<?xml version="1.0"?>\n'
+                '<network-security-config>\n'
+                '  <base-config cleartextTrafficPermitted="true"/>\n'
+                '</network-security-config>\n'
+            ))
+            m = self._write_manifest(tdp, "@com.app:xml/nsc")
+            meta = parse_android_manifest(m)
+            self.assertIsNotNone(meta.nsc)
+            self.assertTrue(meta.nsc.base_cleartext_permitted)
+
+    def test_non_xml_resource_ref_not_resolved(self):
+        # @drawable/foo, @string/foo etc. must never be opened as NSC.
+        with tempfile.TemporaryDirectory() as td:
+            m = self._write_manifest(Path(td), "@drawable/foo")
+            meta = parse_android_manifest(m)
+            self.assertEqual(meta.network_security_config, "@drawable/foo")
+            self.assertIsNone(meta.nsc)
+
+    def test_malformed_nsc_xml_yields_none(self):
+        # Defensive: a corrupt NSC must not crash the manifest parse — the
+        # whole pipeline depends on it.
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            _write_nsc(tdp, "<<<not-xml>>>")
+            m = self._write_manifest(tdp, "@xml/nsc")
+            meta = parse_android_manifest(m)
+            self.assertIsNone(meta.nsc)
 
 
 # ---------- run_apktool_decode ----------

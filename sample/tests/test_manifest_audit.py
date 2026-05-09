@@ -30,6 +30,7 @@ from venomhook.models import (
     AndroidAuditReport,
     AndroidComponent,
     ManifestFinding,
+    NetworkSecurityConfigMeta,
 )
 
 
@@ -108,6 +109,98 @@ class TestCleartextTraffic(unittest.TestCase):
             network_security_config="@xml/nsc",
         ))
         self.assertNotIn("MANIFEST-002", _ids(report))
+
+
+# ---------- MANIFEST-002 NSC-aware variants (Phase 6-2) ----------
+
+
+class TestCleartextTrafficNSC(unittest.TestCase):
+    def test_nsc_base_cleartext_true_triggers_high(self):
+        report = audit_manifest(_meta(
+            uses_cleartext_traffic=None,
+            target_sdk=33,                       # modern SDK; safe by default
+            network_security_config="@xml/nsc",
+            nsc=NetworkSecurityConfigMeta(base_cleartext_permitted=True),
+        ))
+        m002 = [f for f in report.findings if f.rule_id == "MANIFEST-002"]
+        self.assertEqual(len(m002), 1)
+        self.assertEqual(m002[0].severity, SEV_HIGH)
+        self.assertIn("base-config", m002[0].title)
+
+    def test_nsc_base_cleartext_false_does_not_trigger(self):
+        report = audit_manifest(_meta(
+            uses_cleartext_traffic=None,
+            target_sdk=21,                       # old, but NSC explicitly says no
+            network_security_config="@xml/nsc",
+            nsc=NetworkSecurityConfigMeta(base_cleartext_permitted=False),
+        ))
+        self.assertNotIn("MANIFEST-002", _ids(report))
+
+    def test_nsc_cleartext_domains_trigger_medium(self):
+        report = audit_manifest(_meta(
+            uses_cleartext_traffic=None,
+            target_sdk=33,
+            network_security_config="@xml/nsc",
+            nsc=NetworkSecurityConfigMeta(
+                base_cleartext_permitted=False,
+                cleartext_domains=["legacy.example.com", "ocsp.example.org"],
+            ),
+        ))
+        m002 = [f for f in report.findings if f.rule_id == "MANIFEST-002"]
+        self.assertEqual(len(m002), 1)
+        self.assertEqual(m002[0].severity, SEV_MEDIUM)
+        self.assertIn("legacy.example.com", m002[0].detail)
+
+    def test_nsc_base_cleartext_and_domains_emit_two_findings(self):
+        # Pentest perspective: an APK can have both — base-config opens
+        # everything AND domain-config redundantly lists hosts. Both should
+        # surface so the report shows the full attack surface.
+        report = audit_manifest(_meta(
+            uses_cleartext_traffic=None,
+            target_sdk=33,
+            network_security_config="@xml/nsc",
+            nsc=NetworkSecurityConfigMeta(
+                base_cleartext_permitted=True,
+                cleartext_domains=["a.test"],
+            ),
+        ))
+        m002 = [f for f in report.findings if f.rule_id == "MANIFEST-002"]
+        self.assertEqual(len(m002), 2)
+        sevs = sorted(f.severity for f in m002)
+        self.assertEqual(sevs, [SEV_HIGH, SEV_MEDIUM])
+
+    def test_explicit_uses_cleartext_and_nsc_both_emit(self):
+        # Belt and suspenders — old usesCleartextTraffic AND a permissive NSC.
+        # Both findings stay so the developer sees both hooks they'd need to
+        # close.
+        report = audit_manifest(_meta(
+            uses_cleartext_traffic=True,
+            target_sdk=33,
+            network_security_config="@xml/nsc",
+            nsc=NetworkSecurityConfigMeta(base_cleartext_permitted=True),
+        ))
+        m002 = [f for f in report.findings if f.rule_id == "MANIFEST-002"]
+        self.assertEqual(len(m002), 2)
+        titles = {f.title for f in m002}
+        self.assertTrue(any("명시적" in t for t in titles))
+        self.assertTrue(any("base-config" in t for t in titles))
+
+    def test_long_domain_list_truncates_in_detail(self):
+        domains = [f"d{i}.example" for i in range(8)]
+        report = audit_manifest(_meta(
+            uses_cleartext_traffic=None,
+            target_sdk=33,
+            network_security_config="@xml/nsc",
+            nsc=NetworkSecurityConfigMeta(
+                base_cleartext_permitted=False,
+                cleartext_domains=domains,
+            ),
+        ))
+        m002 = [f for f in report.findings if f.rule_id == "MANIFEST-002"]
+        self.assertEqual(len(m002), 1)
+        # Title carries total count; detail truncates after first 5
+        self.assertIn("(8개)", m002[0].title)
+        self.assertIn("외 3개 더", m002[0].detail)
 
 
 # ---------- MANIFEST-003 Allow Backup ----------

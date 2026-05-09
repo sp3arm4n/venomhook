@@ -422,6 +422,36 @@ class AndroidComponent:
             result["authorities"] = list(self.authorities)
         return result
 @dataclass
+class NetworkSecurityConfigMeta:
+    """Resolved contents of the network-security-config XML resource.
+
+    The manifest only references the resource by name ("@xml/nsc"); the
+    actual cleartext / trust / pin policy lives in res/xml/<nsc>.xml. This
+    record captures the subset that drives audit rules (Phase 6-2).
+    base_cleartext_permitted is None when no <base-config> is present.
+    """
+    base_cleartext_permitted: Optional[bool] = None
+    cleartext_domains: list[str] = field(default_factory=list)
+    base_trusts_user_certs: bool = False
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "NetworkSecurityConfigMeta":
+        return cls(
+            base_cleartext_permitted=data.get("base_cleartext_permitted"),
+            cleartext_domains=list(data.get("cleartext_domains", [])),
+            base_trusts_user_certs=bool(data.get("base_trusts_user_certs", False)),
+        )
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        if self.base_cleartext_permitted is not None:
+            result["base_cleartext_permitted"] = self.base_cleartext_permitted
+        if self.cleartext_domains:
+            result["cleartext_domains"] = list(self.cleartext_domains)
+        if self.base_trusts_user_certs:
+            result["base_trusts_user_certs"] = True
+        return result
+
+
+@dataclass
 class AndroidAppMeta:
     """Decoded Android application metadata extracted from AndroidManifest.xml.
     Produced by `apk_decoder.parse_android_manifest`. Consumed by the Android
@@ -442,6 +472,10 @@ class AndroidAppMeta:
     uses_cleartext_traffic: Optional[bool] = None  # default: targetSdk<28 → true
     allow_backup: Optional[bool] = None              # default: targetSdk<31 → true
     network_security_config: Optional[str] = None  # resource ref like "@xml/nsc"
+    # Phase 6-2: parsed NSC body. Populated only when the resource was found
+    # alongside the manifest (apktool dir layout). None = "no NSC referenced
+    # OR not resolved" — audit rules treat None as "no policy override".
+    nsc: Optional["NetworkSecurityConfigMeta"] = None
     @property
     def activities(self) -> list[AndroidComponent]:
         return [c for c in self.components if c.type == "activity"]
@@ -459,6 +493,7 @@ class AndroidAppMeta:
         return [c for c in self.components if c.exported]
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AndroidAppMeta":
+        nsc_data = data.get("nsc")
         return cls(
             package_name=data.get("package_name", ""),
             application_class=data.get("application_class"),
@@ -471,6 +506,7 @@ class AndroidAppMeta:
             uses_cleartext_traffic=data.get("uses_cleartext_traffic"),
             allow_backup=data.get("allow_backup"),
             network_security_config=data.get("network_security_config"),
+            nsc=NetworkSecurityConfigMeta.from_dict(nsc_data) if nsc_data else None,
         )
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -493,6 +529,10 @@ class AndroidAppMeta:
             result["allow_backup"] = self.allow_backup
         if self.network_security_config is not None:
             result["network_security_config"] = self.network_security_config
+        if self.nsc is not None:
+            nsc_dict = self.nsc.to_dict()
+            if nsc_dict:
+                result["nsc"] = nsc_dict
         return result
 
 

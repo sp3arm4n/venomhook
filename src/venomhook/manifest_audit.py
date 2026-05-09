@@ -143,45 +143,97 @@ def _check_debuggable(meta: AndroidAppMeta) -> list[ManifestFinding]:
     )]
 
 
+_M002_REMEDIATION = (
+    "android:usesCleartextTraffic=false로 설정하고 모든 트래픽을 HTTPS로 "
+    "전송하세요. 부득이한 예외가 필요한 경우 Network Security Config "
+    "(res/xml/network_security_config.xml)에 좁게 정의합니다."
+)
+_M002_REFERENCES = ["OWASP MASVS-NETWORK-1", "CWE-319"]
+
+
 def _check_cleartext_traffic(meta: AndroidAppMeta) -> list[ManifestFinding]:
+    findings: list[ManifestFinding] = []
     explicit = meta.uses_cleartext_traffic
     target = meta.target_sdk
-    triggered = False
-    detail = ""
+    nsc = meta.nsc
 
     if explicit is True:
-        triggered = True
-        detail = (
-            "android:usesCleartextTraffic=true가 명시적으로 설정되어 있습니다. "
-            "HTTP 평문 트래픽이 허용되어 MITM 가로채기와 변조 위협에 노출됩니다."
+        findings.append(ManifestFinding(
+            rule_id="MANIFEST-002",
+            title="평문(HTTP) 트래픽 허용 — 명시적 플래그",
+            severity=SEV_HIGH,
+            detail=(
+                "android:usesCleartextTraffic=true가 명시적으로 설정되어 있습니다. "
+                "HTTP 평문 트래픽이 허용되어 MITM 가로채기와 변조 위협에 노출됩니다."
+            ),
+            remediation=_M002_REMEDIATION,
+            references=list(_M002_REFERENCES),
+        ))
+
+    if nsc is not None and nsc.base_cleartext_permitted is True:
+        findings.append(ManifestFinding(
+            rule_id="MANIFEST-002",
+            title="평문(HTTP) 트래픽 허용 — NSC base-config",
+            severity=SEV_HIGH,
+            detail=(
+                "Network Security Config의 <base-config>에 "
+                "cleartextTrafficPermitted=true가 설정되어 있습니다. API 28+ "
+                "기본값(거부)을 명시적으로 뒤집어 도메인 설정으로 좁히지 않은 "
+                "모든 호스트에 대해 HTTP 통신을 허용합니다."
+            ),
+            remediation=_M002_REMEDIATION,
+            references=list(_M002_REFERENCES),
+        ))
+
+    if nsc is not None and nsc.cleartext_domains:
+        domains_preview = ", ".join(nsc.cleartext_domains[:5])
+        more = (
+            f" (외 {len(nsc.cleartext_domains) - 5}개 더)"
+            if len(nsc.cleartext_domains) > 5 else ""
         )
-    elif (
-        explicit is None
+        findings.append(ManifestFinding(
+            rule_id="MANIFEST-002",
+            title=f"평문(HTTP) 트래픽 허용 — 도메인 한정 ({len(nsc.cleartext_domains)}개)",
+            severity=SEV_MEDIUM,
+            detail=(
+                "Network Security Config가 특정 도메인에 한해 "
+                f"cleartextTrafficPermitted=true를 선언합니다: {domains_preview}{more}. "
+                "의도된 예외일 수 있으나, 해당 도메인 트래픽은 MITM에 노출되며 "
+                "DNS 스푸핑이나 단말 프록시 환경에서 그대로 가로채집니다."
+            ),
+            remediation=(
+                "각 도메인의 HTTP 사용 사유를 재확인하고, HTTPS 전환 가능 여부를 "
+                "검토하세요. 불가피하다면 가능한 좁은 path/subdomain으로 한정하고, "
+                "민감 데이터가 해당 채널을 통과하지 않도록 코드 경로를 분리하세요."
+            ),
+            references=list(_M002_REFERENCES),
+        ))
+
+    # Implicit branch: only fire when no policy at all is declared. A
+    # network_security_config reference (parsed or not) signals the
+    # developer took responsibility and is audited via the NSC branches
+    # above; don't double-flag here.
+    if (
+        not findings
+        and explicit is None
         and target is not None
         and target < TARGET_SDK_CLEARTEXT_DEFAULT_FALSE
         and meta.network_security_config is None
     ):
-        triggered = True
-        detail = (
-            f"targetSdk={target} (<28)이며 usesCleartextTraffic이나 Network "
-            "Security Config 모두 지정되지 않았습니다. 플랫폼 기본값이 HTTP를 "
-            "허용합니다."
-        )
+        findings.append(ManifestFinding(
+            rule_id="MANIFEST-002",
+            title="평문(HTTP) 트래픽 허용 — 묵시적 기본값",
+            severity=SEV_HIGH,
+            detail=(
+                f"targetSdk={target} (<28)이며 usesCleartextTraffic이나 Network "
+                "Security Config 모두 지정되지 않았습니다. 플랫폼 기본값이 HTTP를 "
+                "허용합니다."
+            ),
+            remediation=_M002_REMEDIATION,
+            references=list(_M002_REFERENCES),
+        ))
 
-    if not triggered:
-        return []
-    return [ManifestFinding(
-        rule_id="MANIFEST-002",
-        title="평문(HTTP) 트래픽 허용",
-        severity=SEV_HIGH,
-        detail=detail,
-        remediation=(
-            "android:usesCleartextTraffic=false로 설정하고 모든 트래픽을 HTTPS로 "
-            "전송하세요. 부득이한 예외가 필요한 경우 Network Security Config "
-            "(res/xml/network_security_config.xml)에 좁게 정의합니다."
-        ),
-        references=["OWASP MASVS-NETWORK-1", "CWE-319"],
-    )]
+    return findings
 
 
 def _check_allow_backup(meta: AndroidAppMeta) -> list[ManifestFinding]:
