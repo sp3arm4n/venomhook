@@ -68,7 +68,8 @@ from venomhook.models import (
     JniBridge,
     PoCArtifact,
 )
-from venomhook.poc_generator import generate_pocs
+from venomhook.native_strings import NativeStringHints, categorize_strings
+from venomhook.poc_generator import generate_code_pocs, generate_pocs
 
 
 __all__ = [
@@ -110,6 +111,10 @@ class AndroidAnalysis:
     # Phase 7 — code-level static audit findings over jadx Java sources.
     # None when jadx was skipped or didn't produce a sources directory.
     code_audit_report: Optional[CodeAuditReport] = None
+    # Phase 7-3 — pentest-relevant strings harvested from the .so. None
+    # when no native lib was analysed; otherwise present even with all-
+    # empty buckets so the report shape stays stable.
+    native_string_hints: Optional[NativeStringHints] = None
 
     @property
     def matched_bridges(self) -> list[JniBridge]:
@@ -137,6 +142,7 @@ class AndroidAnalysis:
         app_meta_data = data.get("app_meta")
         audit_data = data.get("audit_report")
         code_audit_data = data.get("code_audit_report")
+        nsh_data = data.get("native_string_hints")
         return cls(
             apk_meta=_ApkMeta.from_dict(data["apk_meta"]),
             selected_abi=data.get("selected_abi"),
@@ -154,6 +160,10 @@ class AndroidAnalysis:
                 CodeAuditReport.from_dict(code_audit_data)
                 if code_audit_data else None
             ),
+            native_string_hints=(
+                NativeStringHints.from_dict(nsh_data)
+                if nsh_data is not None else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -170,6 +180,10 @@ class AndroidAnalysis:
             "code_audit_report": (
                 self.code_audit_report.to_dict()
                 if self.code_audit_report else None
+            ),
+            "native_string_hints": (
+                self.native_string_hints.to_dict()
+                if self.native_string_hints else None
             ),
             "warnings": list(self.warnings),
         }
@@ -335,15 +349,29 @@ def analyze_apk(
         audit_report = audit_manifest(app_meta)
         pocs = generate_pocs(app_meta, audit_report)
 
-    # ----- Step 8: code-level static audit over jadx sources (Phase 7) -----
+    # ----- Step 8: code-level static audit over jadx sources (Phase 7-1/2/4) -----
     # Runs only when jadx produced sources. Pure text-pattern scan; failure
-    # to read individual files is tolerated inside audit_code itself.
+    # to read individual files is tolerated inside audit_code itself. Code
+    # PoCs are appended to the same `pocs` bundle so HTML / export layers
+    # don't need to special-case them.
     code_audit_report: Optional[CodeAuditReport] = None
     if jadx_sources_dir is not None:
         try:
             code_audit_report = audit_code(jadx_sources_dir, app_meta)
+            if code_audit_report and app_meta is not None:
+                pocs.extend(generate_code_pocs(app_meta, code_audit_report))
         except OSError as e:
             warnings.append(f"코드 감사 실패 (계속 진행): {e}")
+
+    # ----- Step 9: categorize native-library strings (Phase 7-3) -----
+    # so_meta.strings is harvested by binary_meta from .rodata-style sections.
+    # Categorizing here turns raw bytes into pentest-actionable hints
+    # (URLs the .so calls home to, sensitive paths, embedded shell commands,
+    # crypto algorithm names, secret-shaped tokens). None when no .so was
+    # analyzed.
+    native_string_hints: Optional[NativeStringHints] = None
+    if so_meta is not None:
+        native_string_hints = categorize_strings(list(so_meta.strings))
 
     return AndroidAnalysis(
         apk_meta=apk_meta,
@@ -357,4 +385,5 @@ def analyze_apk(
         audit_report=audit_report,
         pocs=pocs,
         code_audit_report=code_audit_report,
+        native_string_hints=native_string_hints,
     )

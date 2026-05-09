@@ -26,6 +26,7 @@ from venomhook.binary_meta import (
     BinaryMeta,
     BinaryMetaError,
     SectionMeta,
+    _extract_strings_from_bytes,
     extract_binary_meta,
 )
 from venomhook.models import BinaryInfo
@@ -203,6 +204,90 @@ class BinaryInfoOsFieldTests(unittest.TestCase):
         restored = BinaryInfo.from_dict(d)
         self.assertEqual(restored.os, "android")
         self.assertEqual(restored.arch, "arm64")
+
+
+# ---------- Phase 7-3 string extraction (no lief required) ----------
+
+
+class ExtractStringsFromBytesTests(unittest.TestCase):
+    def test_finds_runs_separated_by_nul(self) -> None:
+        data = b"hello\x00world\x00\x01garbage\x02ok\x00"
+        out = _extract_strings_from_bytes(data, min_len=4)
+        self.assertIn("hello", out)
+        self.assertIn("world", out)
+        self.assertIn("garbage", out)
+        # "ok" is too short for min_len=4
+        self.assertNotIn("ok", out)
+
+    def test_min_len_filters_short_runs(self) -> None:
+        data = b"abc\x00abcd\x00abcde\x00"
+        out = _extract_strings_from_bytes(data, min_len=5)
+        self.assertEqual(out, ["abcde"])
+
+    def test_max_len_truncates_long_runs(self) -> None:
+        # A run longer than max_len is split, not skipped
+        data = ("X" * 600).encode() + b"\x00"
+        out = _extract_strings_from_bytes(data, min_len=4, max_len=256)
+        # Two chunks: 256 + 256 + 88 (above min_len 4)
+        self.assertEqual(len(out), 3)
+        self.assertEqual(len(out[0]), 256)
+
+    def test_non_ascii_is_a_separator(self) -> None:
+        # Bytes 0x80+ act as terminators (we only keep printable ASCII).
+        data = b"hello\xc3\xa9world"
+        out = _extract_strings_from_bytes(data, min_len=4)
+        self.assertIn("hello", out)
+        self.assertIn("world", out)
+
+    def test_empty_input(self) -> None:
+        self.assertEqual(_extract_strings_from_bytes(b""), [])
+
+
+@unittest.skipUnless(_HAS_LIEF, "lief not installed")
+@unittest.skipUnless(SYS_LS.exists(), "/bin/ls not present")
+class BinaryMetaStringsExtractionTests(unittest.TestCase):
+    """Verify .strings populates from a real binary's read-only sections."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.meta = extract_binary_meta(SYS_LS)
+
+    def test_strings_field_populated(self) -> None:
+        self.assertIsInstance(self.meta.strings, list)
+        # /bin/ls always has identifiable strings (e.g. usage messages,
+        # error labels). Even on minimal builds we expect a few hundred.
+        self.assertGreater(len(self.meta.strings), 50)
+
+    def test_strings_are_unique_and_sorted(self) -> None:
+        # Implementation guarantee: dedupe + sort.
+        self.assertEqual(self.meta.strings, sorted(set(self.meta.strings)))
+
+    def test_strings_round_trip_via_to_dict(self) -> None:
+        d = self.meta.to_dict()
+        self.assertIn("strings", d)
+        restored = BinaryMeta.from_dict(d)
+        self.assertEqual(restored.strings, self.meta.strings)
+
+
+class BinaryMetaStringsRoundtripTests(unittest.TestCase):
+    """Strings field round-trips even without lief."""
+
+    def test_strings_preserved(self) -> None:
+        bm = BinaryMeta(
+            name="x.so", path="/x.so", hash="sha256:0", format="ELF",
+            arch="arm64", os_hint="android", image_base=0, aslr=True,
+            strings=["alpha", "beta", "gamma"],
+        )
+        restored = BinaryMeta.from_dict(bm.to_dict())
+        self.assertEqual(restored.strings, ["alpha", "beta", "gamma"])
+
+    def test_strings_default_empty_list(self) -> None:
+        bm = BinaryMeta.from_dict({
+            "name": "x.so", "path": "/x.so", "hash": "sha256:0",
+            "format": "ELF", "arch": "arm64", "os_hint": "android",
+            "image_base": "0x0", "aslr": True,
+        })
+        self.assertEqual(bm.strings, [])
 
 
 if __name__ == "__main__":

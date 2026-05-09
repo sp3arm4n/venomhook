@@ -92,6 +92,10 @@ class BinaryMeta:
     imports: list[str] = field(default_factory=list)  # flat function symbol names (imported)
     exports: list[str] = field(default_factory=list)  # flat function symbol names (exported)
     libraries: list[str] = field(default_factory=list)  # imported DLL/.so names
+    # Phase 7-3: ASCII string literals harvested from read-only data sections
+    # (.rodata / .rdata / __cstring). Deduped, capped, sorted. Empty when
+    # extraction failed or yielded nothing audit-worthy.
+    strings: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "BinaryMeta":
@@ -108,6 +112,7 @@ class BinaryMeta:
             imports=list(data.get("imports", [])),
             exports=list(data.get("exports", [])),
             libraries=list(data.get("libraries", [])),
+            strings=list(data.get("strings", [])),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -124,6 +129,7 @@ class BinaryMeta:
             "imports": list(self.imports),
             "exports": list(self.exports),
             "libraries": list(self.libraries),
+            "strings": list(self.strings),
         }
 
 
@@ -240,6 +246,94 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: fp.read(8192), b""):
             h.update(chunk)
     return f"sha256:{h.hexdigest()}"
+
+
+# ---------- Phase 7-3 string extraction ----------
+
+
+# Section-name prefixes worth scanning for string literals, per format.
+# Mach-O uses double-underscore conventions, ELF/PE use the ".name" prefix
+# style. We accept *prefixes* so suffixed variants (.rodata.cst, .rodata.str1)
+# are picked up too.
+_STRING_SECTION_PREFIXES: dict[str, tuple[str, ...]] = {
+    "ELF": (".rodata", ".data.rel.ro", ".text.str"),
+    "PE": (".rdata", ".data"),
+    "MACHO": ("__cstring", "__const", "__objc_methname", "__objc_classname",
+              "__cfstring", "__ustring"),
+}
+
+# Per-binary cap: a 30 MB .so can yield 100k+ strings. Pentest workflow only
+# needs the top-tier audit targets; native_strings.categorize_strings
+# downstream filters further. 5_000 is a comfortable upper bound that
+# preserves all interesting hits without blowing up serialized JSON.
+_STRING_LIMIT = 5000
+_STRING_MIN_LEN = 4
+_STRING_MAX_LEN = 256  # truncate single absurdly long strings (e.g. concatenated tables)
+
+
+def _extract_strings_from_bytes(
+    data: bytes,
+    *,
+    min_len: int = _STRING_MIN_LEN,
+    max_len: int = _STRING_MAX_LEN,
+) -> list[str]:
+    """Yield printable-ASCII runs of ``min_len`` chars or more.
+
+    Excludes whitespace-only lines and trims runs longer than ``max_len``
+    so a single packed table doesn't dominate the output.
+    """
+    out: list[str] = []
+    cur: bytearray = bytearray()
+    for b in data:
+        if 0x20 <= b < 0x7F:
+            cur.append(b)
+            if len(cur) >= max_len:
+                out.append(cur.decode("ascii", errors="replace"))
+                cur = bytearray()
+        else:
+            if len(cur) >= min_len:
+                out.append(cur.decode("ascii", errors="replace"))
+            cur = bytearray()
+    if len(cur) >= min_len:
+        out.append(cur.decode("ascii", errors="replace"))
+    return out
+
+
+def _extract_strings(binary, format_name: str) -> list[str]:
+    """Walk read-only data sections and harvest ASCII strings.
+
+    Returns deduplicated, sorted strings up to ``_STRING_LIMIT``. On any
+    failure (lief API change, malformed section, Unicode trouble) returns
+    an empty list rather than aborting the whole extraction — strings are
+    advisory.
+    """
+    prefixes = _STRING_SECTION_PREFIXES.get(format_name)
+    if not prefixes:
+        return []
+
+    seen: set[str] = set()
+    try:
+        for sec in binary.sections:
+            try:
+                name = str(sec.name)
+            except Exception:
+                continue
+            if not any(name == p or name.startswith(p) for p in prefixes):
+                continue
+            try:
+                content = bytes(sec.content) if sec.content is not None else b""
+            except Exception:
+                continue
+            if not content:
+                continue
+            for s in _extract_strings_from_bytes(content):
+                if s.strip() and s not in seen:
+                    seen.add(s)
+                    if len(seen) >= _STRING_LIMIT:
+                        return sorted(seen)
+    except Exception:
+        return sorted(seen)
+    return sorted(seen)
 
 
 def extract_binary_meta(path: str | Path) -> BinaryMeta:
@@ -368,6 +462,8 @@ def extract_binary_meta(path: str | Path) -> BinaryMeta:
 
     os_hint = _detect_os_hint(format_name, imports, arch)
 
+    strings = _extract_strings(binary, format_name)
+
     return BinaryMeta(
         name=p.name,
         path=str(p),
@@ -381,4 +477,5 @@ def extract_binary_meta(path: str | Path) -> BinaryMeta:
         imports=imports,
         exports=exports,
         libraries=libraries,
+        strings=strings,
     )
