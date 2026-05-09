@@ -24,14 +24,18 @@ from venomhook.models import (
     AndroidAppMeta,
     AndroidAuditReport,
     AndroidComponent,
+    CodeAuditReport,
+    CodeFinding,
     IntentDataSpec,
     IntentFilter,
     ManifestFinding,
     PoCArtifact,
 )
 from venomhook.poc_generator import (
+    PER_CODE_RULE_BUILDERS,
     PER_RULE_BUILDERS,
     format_pocs_text,
+    generate_code_pocs,
     generate_pocs,
 )
 
@@ -454,6 +458,103 @@ class DeeplinkBuilderTests(unittest.TestCase):
         self.assertEqual(deeplink.severity, "high")
         self.assertEqual(deeplink.kind, "adb")
         self.assertIn("CWE-926", deeplink.references)
+
+
+# ---------- Phase 7-4 — code-finding PoCs ----------
+
+
+def _code_finding(rule_id: str, **overrides) -> CodeFinding:
+    base = dict(
+        rule_id=rule_id,
+        title="t",
+        severity="high",
+        file="com/x/A.java",
+        line_no=10,
+        line_text="…",
+        class_fqn="com.x.A",
+        detail="d",
+        remediation="r",
+        references=["OWASP MASVS-CODE-2"],
+    )
+    base.update(overrides)
+    return CodeFinding(**base)
+
+
+class CodeWebViewBuilderTests(unittest.TestCase):
+    def test_emits_frida_observer_with_class_and_evidence(self) -> None:
+        f = _code_finding("CODE-002", class_fqn="com.x.WebActivity")
+        report = CodeAuditReport(package_name="com.x", findings=[f])
+        arts = generate_code_pocs(_meta(), report)
+        self.assertEqual(len(arts), 1)
+        a = arts[0]
+        self.assertEqual(a.kind, "frida")
+        self.assertEqual(a.rule_id, "CODE-002")
+        self.assertEqual(a.component, "com.x.WebActivity")
+        body = "\n".join(a.commands)
+        self.assertIn("setJavaScriptEnabled", body)
+        self.assertIn("addJavascriptInterface", body)
+        self.assertIn("loadUrl", body)
+
+    def test_class_fqn_falls_back_when_missing(self) -> None:
+        f = _code_finding("CODE-002", class_fqn="")
+        report = CodeAuditReport(package_name="com.x", findings=[f])
+        arts = generate_code_pocs(_meta(), report)
+        self.assertEqual(len(arts), 1)
+        self.assertIn("<unknown class>", arts[0].title)
+
+
+class CodeWeakCryptoBuilderTests(unittest.TestCase):
+    def test_emits_cipher_observer(self) -> None:
+        f = _code_finding("CODE-003", class_fqn="com.x.Crypto")
+        report = CodeAuditReport(package_name="com.x", findings=[f])
+        arts = generate_code_pocs(_meta(), report)
+        self.assertEqual(len(arts), 1)
+        a = arts[0]
+        self.assertEqual(a.kind, "frida")
+        body = "\n".join(a.commands)
+        self.assertIn("javax.crypto.Cipher", body)
+        self.assertIn("SecretKeySpec", body)
+        self.assertIn("doFinal", body)
+        self.assertIn("MessageDigest", body)
+
+
+class CodeCredentialLogBuilderTests(unittest.TestCase):
+    def test_emits_logcat_recipe(self) -> None:
+        f = _code_finding("CODE-004",
+                          class_fqn="com.x.Login",
+                          line_text='Log.d(TAG, "password=" + p);')
+        report = CodeAuditReport(package_name="com.x", findings=[f])
+        arts = generate_code_pocs(_meta(), report)
+        self.assertEqual(len(arts), 1)
+        a = arts[0]
+        self.assertEqual(a.kind, "adb")
+        cmds = "\n".join(a.commands)
+        self.assertIn("logcat -c", cmds)
+        self.assertIn("logcat -v time", cmds)
+        self.assertIn("password", cmds.lower())
+        # The static evidence line is preserved in notes
+        self.assertIn("password", a.notes)
+
+
+class GenerateCodePocsAggregateTests(unittest.TestCase):
+    def test_skips_rules_without_builder(self) -> None:
+        # CODE-001 / 005 / 006 intentionally have no builder.
+        report = CodeAuditReport(
+            package_name="com.x",
+            findings=[
+                _code_finding("CODE-001"),
+                _code_finding("CODE-005"),
+                _code_finding("CODE-006"),
+                _code_finding("CODE-002", class_fqn="com.x.W"),
+            ],
+        )
+        arts = generate_code_pocs(_meta(), report)
+        self.assertEqual([a.rule_id for a in arts], ["CODE-002"])
+
+    def test_empty_report_emits_nothing(self) -> None:
+        arts = generate_code_pocs(_meta(),
+                                   CodeAuditReport(package_name="com.x"))
+        self.assertEqual(arts, [])
 
 
 class ExportedProviderBuilderTests(unittest.TestCase):

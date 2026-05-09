@@ -38,10 +38,13 @@ from venomhook.android_pipeline import AndroidAnalysis
 from venomhook.models import (
     AndroidAuditReport,
     AndroidComponent,
+    CodeAuditReport,
+    CodeFinding,
     JniBridge,
     ManifestFinding,
     PoCArtifact,
 )
+from venomhook.native_strings import NativeStringHints
 
 
 __all__ = [
@@ -395,6 +398,154 @@ def _render_finding_card(
     )
 
 
+def _code_sev_sort_key(finding: CodeFinding) -> tuple[int, str, str, int]:
+    return (
+        _SEVERITY_ORDER.get(finding.severity.lower(), 9),
+        finding.rule_id,
+        finding.file,
+        finding.line_no,
+    )
+
+
+def _render_code_finding_card(
+    finding: CodeFinding,
+    pocs: list[_PocLink],
+) -> str:
+    sev_cls = _severity_class(finding.severity)
+    sev_label = escape(_SEVERITY_LABEL_KO.get(finding.severity.lower(), finding.severity).upper())
+    rule_id = escape(finding.rule_id)
+    title = escape(finding.title)
+    location = ""
+    if finding.file:
+        loc = f"{finding.file}:{finding.line_no}" if finding.line_no else finding.file
+        location = f'<span class="component">{escape(loc)}</span>'
+    body_parts: list[str] = []
+    if finding.detail:
+        body_parts.append(f'<div class="description">{escape(finding.detail)}</div>')
+    if finding.line_text:
+        body_parts.append(
+            '<div class="description"><strong>코드 단서:</strong> '
+            f'<code>{escape(finding.line_text[:240])}</code></div>'
+        )
+    if finding.remediation:
+        body_parts.append(
+            '<div class="description"><strong>대응 방안:</strong> '
+            f'{escape(finding.remediation)}</div>'
+        )
+    desc = "".join(body_parts)
+    refs = (
+        '<div class="meta">'
+        + " ".join(f'<span>{escape(r)}</span>' for r in finding.references)
+        + "</div>"
+        if finding.references else ""
+    )
+    poc_section = ""
+    if pocs:
+        items = "".join(_render_poc(p) for p in pocs)
+        poc_section = (
+            f'<div class="pocs">'
+            f'<h4>개념 증명(PoC) {len(pocs)}건</h4>'
+            f'{items}'
+            f"</div>"
+        )
+    return (
+        f'<article class="finding {sev_cls}">'
+        f'<header>'
+        f'<span class="sev-tag">{sev_label}</span>'
+        f'<span class="rule-id">{rule_id}</span>'
+        f'<h3>{title}</h3>'
+        f'{location}'
+        f"</header>"
+        f"{desc}"
+        f"{refs}"
+        f"{poc_section}"
+        f"</article>"
+    )
+
+
+def _render_code_findings_section(
+    report: CodeAuditReport,
+    poc_index: dict,
+) -> str:
+    """Render the Phase 7 code-audit section. Returns "" when no findings."""
+    if not report or not report.findings:
+        return ""
+    sorted_findings = sorted(report.findings, key=_code_sev_sort_key)
+    cards: list[str] = []
+    for f in sorted_findings:
+        # Code finding "component" for PoC matching is the class FQN.
+        key = (f.rule_id, f.class_fqn or None)
+        cards.append(_render_code_finding_card(f, poc_index.get(key, [])))
+
+    counts = report.severity_counts
+    sev_chips: list[str] = []
+    for sev in ("critical", "high", "medium", "low", "info"):
+        n = counts.get(sev, 0)
+        if not n:
+            continue
+        label = _SEVERITY_LABEL_KO.get(sev, sev)
+        sev_chips.append(
+            f'<span class="sev-chip sev-{sev}">'
+            f'<span class="count">{n}</span> {escape(label)}</span>'
+        )
+    sev_chips.append(
+        f'<span class="sev-chip"><span class="count">{len(report.findings)}</span> 합계</span>'
+    )
+    sev_bar = f'<div class="severity-bar">{" ".join(sev_chips)}</div>'
+    return (
+        '<section class="findings-section">'
+        f'<h2>코드 감사 ({len(report.findings)}건 / 스캔 {report.files_scanned}개 파일)</h2>'
+        f'{sev_bar}'
+        + "".join(cards)
+        + "</section>"
+    )
+
+
+def _render_native_strings_section(hints: NativeStringHints) -> str:
+    """Render the Phase 7-3 native string-hints section. Returns "" when empty."""
+    if hints is None or hints.is_empty:
+        return ""
+
+    def _list_block(label: str, items: list[str]) -> str:
+        if not items:
+            return ""
+        # Cap visible items in HTML even if data has up to 50; review can
+        # consult JSON if needed.
+        head = items[:20]
+        more = (
+            f'<div style="color: var(--text-muted); font-size: 0.82em;">'
+            f'…외 {len(items) - len(head)}개 더 (전체는 JSON 보고서 참고)</div>'
+            if len(items) > len(head) else ""
+        )
+        rows = "".join(
+            f'<li><code>{escape(s[:200])}</code></li>' for s in head
+        )
+        return (
+            '<div class="finding sev-info" style="margin-bottom: 12px;">'
+            f'<header><h3>{escape(label)} ({len(items)}건)</h3></header>'
+            f'<ul style="margin: 8px 0 0 20px;">{rows}</ul>'
+            f'{more}'
+            "</div>"
+        )
+
+    blocks = [
+        _list_block("URL 임베디드", hints.urls),
+        _list_block("IP 리터럴", hints.ip_endpoints),
+        _list_block("민감 경로", hints.paths),
+        _list_block("쉘/실행 단서", hints.shell_commands),
+        _list_block("Crypto 알고리즘 단서", hints.crypto),
+        _list_block("자격증명 키 힌트", hints.secret_hints),
+        _list_block("SQL 단편", hints.sql),
+        _list_block("디버그 / 자산 경로", hints.debug),
+    ]
+    return (
+        '<section class="findings-section">'
+        f'<h2>네이티브 라이브러리 문자열 단서 ({hints.total}건)</h2>'
+        + "".join(blocks)
+        + "</section>"
+    )
+
+
 def _render_components_table(components: list[AndroidComponent]) -> str:
     if not components:
         return ""
@@ -540,6 +691,18 @@ def render_audit_html(
         + "</section>"
     )
 
+    code_findings_section = ""
+    if analysis.code_audit_report:
+        code_findings_section = _render_code_findings_section(
+            analysis.code_audit_report, poc_index
+        )
+
+    native_strings_section = ""
+    if analysis.native_string_hints is not None:
+        native_strings_section = _render_native_strings_section(
+            analysis.native_string_hints
+        )
+
     components_section = ""
     if analysis.app_meta and analysis.app_meta.components:
         components_section = (
@@ -578,6 +741,8 @@ def render_audit_html(
         "</header>"
         f"{warnings_html}"
         f"{findings_section}"
+        f"{code_findings_section}"
+        f"{native_strings_section}"
         f"{components_section}"
         f"{bridges_section}"
         '<footer>VenomHook이 생성한 자체 포함 보고서 · 모든 브라우저에서 바로 열림 · JavaScript / 외부 자산 불필요</footer>'

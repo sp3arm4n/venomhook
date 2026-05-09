@@ -42,6 +42,8 @@ from venomhook.models import (
     AndroidAppMeta,
     AndroidAuditReport,
     AndroidComponent,
+    CodeAuditReport,
+    CodeFinding,
     ManifestFinding,
     PoCArtifact,
 )
@@ -49,8 +51,10 @@ from venomhook.models import (
 
 __all__ = [
     "generate_pocs",
+    "generate_code_pocs",
     "format_pocs_text",
     "PER_RULE_BUILDERS",
+    "PER_CODE_RULE_BUILDERS",
 ]
 
 
@@ -696,6 +700,249 @@ def _build_grant_uri(meta: AndroidAppMeta, finding: ManifestFinding) -> list[PoC
             references=list(finding.references),
         ),
     ]
+
+
+# ---------- code-finding PoC builders (Phase 7-4) ----------
+
+
+def _build_code_webview_js(
+    meta: AndroidAppMeta, finding: CodeFinding
+) -> list[PoCArtifact]:
+    """Frida observer for WebView JS-enable / addJavascriptInterface call sites.
+
+    Pentest goal: confirm the static finding actually fires at runtime,
+    capture the URL being loaded into the JS-enabled WebView, and (when
+    addJavascriptInterface is involved) enumerate the exposed Java class
+    so its methods can be probed.
+    """
+    pkg = meta.package_name or "<package>"
+    klass = finding.class_fqn or "<unknown class>"
+    body = _FRIDA_WEBVIEW_TEMPLATE.format(
+        klass=_js_string(klass),
+        evidence=_js_string(f"{finding.file}:{finding.line_no}"),
+    )
+    return [PoCArtifact(
+        rule_id=finding.rule_id,
+        title=f"WebView 사용 후킹: {klass}",
+        severity=finding.severity,
+        kind="frida",
+        package_name=pkg,
+        component=klass,
+        description=(
+            f"코드 정적 분석에서 '{finding.file}:{finding.line_no}'에 "
+            "setJavaScriptEnabled(true) 또는 addJavascriptInterface 호출이 "
+            "감지되었습니다. 본 Frida 스크립트는 WebView 객체 메서드를 후킹해 "
+            "1) JS 실행이 실제로 활성화되는 시점, 2) 로드되는 URL, "
+            "3) 노출된 Java 인터페이스 인스턴스를 런타임에 캡처합니다."
+        ),
+        commands=body.splitlines(),
+        expected_evidence=(
+            "외부 URL 로드 시 frida 콘솔에 '[+] loadUrl: <URL>'이 찍히고, "
+            "신뢰할 수 없는 origin이 JS 컨텍스트에 들어오는지 즉시 확인됩니다. "
+            "addJavascriptInterface 호출이 있으면 노출된 Java 객체의 클래스명이 "
+            "함께 출력되어 메서드 enumeration의 시작점이 됩니다."
+        ),
+        notes=(
+            "실행: " + _shell_join([
+                "frida", "-U", "-f", pkg,
+                "-l", "<this-file>.frida.js", "--no-pause",
+            ])
+        ),
+        references=list(finding.references),
+    )]
+
+
+def _build_code_weak_crypto(
+    meta: AndroidAppMeta, finding: CodeFinding
+) -> list[PoCArtifact]:
+    """Frida hook on Cipher.getInstance / init / doFinal to extract keys & IVs."""
+    pkg = meta.package_name or "<package>"
+    klass = finding.class_fqn or "<unknown class>"
+    body = _FRIDA_CIPHER_TEMPLATE.format(
+        evidence=_js_string(f"{finding.file}:{finding.line_no} ({klass})"),
+    )
+    return [PoCArtifact(
+        rule_id=finding.rule_id,
+        title=f"약한 Cipher 런타임 후킹 ({klass})",
+        severity=finding.severity,
+        kind="frida",
+        package_name=pkg,
+        component=klass,
+        description=(
+            f"'{finding.file}:{finding.line_no}'에서 약한 Cipher/MessageDigest "
+            "구성이 정적으로 검출되었습니다. 본 Frida 스크립트는 Cipher 클래스 "
+            "전체를 후킹해 transformation 문자열, init 시 전달된 키 바이트, "
+            "doFinal 입출력을 콘솔에 덤프합니다 — 키가 정말 하드코딩인지, "
+            "어떤 데이터에 적용되는지 즉시 확인됩니다."
+        ),
+        commands=body.splitlines(),
+        expected_evidence=(
+            "'[Cipher] getInstance(\"...\")' 와 '[Cipher] init key=<hex> "
+            "iv=<hex>' 라인이 찍히고, 그 뒤 doFinal 입출력 hex가 따라옵니다. "
+            "키 hex가 매 실행마다 동일하면 하드코딩 강한 증거입니다."
+        ),
+        notes=(
+            "실행: " + _shell_join([
+                "frida", "-U", "-f", pkg,
+                "-l", "<this-file>.frida.js", "--no-pause",
+            ])
+        ),
+        references=list(finding.references),
+    )]
+
+
+def _build_code_credential_log(
+    meta: AndroidAppMeta, finding: CodeFinding
+) -> list[PoCArtifact]:
+    """ADB logcat tail + grep recipe for credential-shaped strings."""
+    pkg = meta.package_name or "<package>"
+    klass = finding.class_fqn or "<unknown class>"
+    return [PoCArtifact(
+        rule_id=finding.rule_id,
+        title=f"logcat 평문 자격증명 검증 ({klass})",
+        severity=finding.severity,
+        kind="adb",
+        package_name=pkg,
+        component=klass,
+        description=(
+            f"'{finding.file}:{finding.line_no}'에 자격증명을 포함한 Log 호출이 "
+            "있습니다. 본 레시피는 단말 logcat을 실시간으로 후킹된 키워드로 필터링해 "
+            "사용자가 로그인/요청을 수행할 때 평문 자격증명이 logcat에 떨어지는지 "
+            "직접 확인합니다."
+        ),
+        commands=[
+            "# 1) 단말에 USB로 연결된 상태에서 별도 터미널에서 실행",
+            _adb_shell([
+                "logcat", "-c",
+            ]),
+            "# 2) 로그 buffer 비운 뒤 실시간 grep — 앱을 켜고 로그인을 시도",
+            "adb logcat -v time '*:V' | "
+            "grep -E -i 'password|passwd|token|secret|api[_-]?key|auth'",
+        ],
+        expected_evidence=(
+            "사용자가 로그인이나 인증 요청을 트리거하는 순간 위 grep에 "
+            "username/password 쌍 또는 access_token 값이 평문으로 떨어집니다. "
+            "검출되면 동일 단말의 다른 앱(루팅/디버그 가능 환경) 또는 ADB "
+            "접근자 누구나 자격증명을 가져갈 수 있다는 뜻입니다."
+        ),
+        notes=(
+            f"단서 코드: {finding.line_text[:120]}"
+        ),
+        references=list(finding.references),
+    )]
+
+
+_FRIDA_WEBVIEW_TEMPLATE = """\
+// Phase 7-4 — WebView JS / interface observer
+// evidence: {evidence}
+Java.perform(() => {{
+  const WV = Java.use("android.webkit.WebView");
+  const Settings = Java.use("android.webkit.WebSettings");
+  const Klass = "WebView";
+
+  // Catch JS toggling
+  Settings.setJavaScriptEnabled.overload('boolean').implementation = function (b) {{
+    console.log("[+] " + Klass + ".setJavaScriptEnabled(" + b + ")");
+    return this.setJavaScriptEnabled(b);
+  }};
+
+  // URL loads
+  WV.loadUrl.overload('java.lang.String').implementation = function (url) {{
+    console.log("[+] loadUrl: " + url);
+    return this.loadUrl(url);
+  }};
+  WV.loadUrl.overload('java.lang.String', 'java.util.Map').implementation = function (url, hdr) {{
+    console.log("[+] loadUrl(headers): " + url);
+    return this.loadUrl(url, hdr);
+  }};
+
+  // Bridge exposure
+  WV.addJavascriptInterface.implementation = function (obj, name) {{
+    const cls = obj ? obj.getClass().getName() : "<null>";
+    console.log("[+] addJavascriptInterface name=\\"" + name + "\\" cls=" + cls);
+    return this.addJavascriptInterface(obj, name);
+  }};
+}});"""
+
+
+_FRIDA_CIPHER_TEMPLATE = """\
+// Phase 7-4 — Cipher / MessageDigest tap
+// evidence: {evidence}
+Java.perform(() => {{
+  function _hex(bytes) {{
+    if (bytes === null || bytes === undefined) return "<null>";
+    let s = "";
+    for (let i = 0; i < bytes.length; i++) {{
+      const b = (bytes[i] + 256) % 256;
+      s += (b < 16 ? "0" : "") + b.toString(16);
+    }}
+    return s;
+  }}
+
+  const Cipher = Java.use("javax.crypto.Cipher");
+  Cipher.getInstance.overload('java.lang.String').implementation = function (t) {{
+    console.log("[Cipher] getInstance(\\"" + t + "\\")");
+    return this.getInstance(t);
+  }};
+
+  // Key/IV via SecretKeySpec / IvParameterSpec
+  const SKS = Java.use("javax.crypto.spec.SecretKeySpec");
+  SKS.$init.overload('[B', 'java.lang.String').implementation = function (raw, alg) {{
+    console.log("[Cipher] SecretKeySpec alg=" + alg + " key=" + _hex(raw));
+    return this.$init(raw, alg);
+  }};
+  const IPS = Java.use("javax.crypto.spec.IvParameterSpec");
+  IPS.$init.overload('[B').implementation = function (iv) {{
+    console.log("[Cipher] IvParameterSpec iv=" + _hex(iv));
+    return this.$init(iv);
+  }};
+
+  // Plaintext / ciphertext at the boundaries
+  Cipher.doFinal.overload('[B').implementation = function (input) {{
+    const out = this.doFinal(input);
+    console.log("[Cipher] doFinal in="  + _hex(input));
+    console.log("[Cipher] doFinal out=" + _hex(out));
+    return out;
+  }};
+
+  // Hash side
+  const MD = Java.use("java.security.MessageDigest");
+  MD.getInstance.overload('java.lang.String').implementation = function (alg) {{
+    console.log("[MD] getInstance(\\"" + alg + "\\")");
+    return this.getInstance(alg);
+  }};
+}});"""
+
+
+# Map CODE-XXX rule_id -> PoC builder. Rules without a builder
+# (CODE-001 hardcoded http; CODE-005 external storage; CODE-006
+# MODE_WORLD) overlap MANIFEST-002 mitmproxy / are static-only and
+# skip dynamic confirmation.
+PER_CODE_RULE_BUILDERS: dict[
+    str, Callable[[AndroidAppMeta, CodeFinding], list[PoCArtifact]]
+] = {
+    "CODE-002": _build_code_webview_js,
+    "CODE-003": _build_code_weak_crypto,
+    "CODE-004": _build_code_credential_log,
+}
+
+
+def generate_code_pocs(
+    meta: AndroidAppMeta, report: CodeAuditReport
+) -> list[PoCArtifact]:
+    """Build PoC artifacts for code-level findings with a registered builder.
+
+    Findings whose rule_id has no builder are skipped silently. Output
+    order follows ``report.findings`` so PoCs sit next to their source
+    finding in the bundle index.
+    """
+    artifacts: list[PoCArtifact] = []
+    for f in report.findings:
+        builder = PER_CODE_RULE_BUILDERS.get(f.rule_id)
+        if builder is None:
+            continue
+        artifacts.extend(builder(meta, f))
+    return artifacts
 
 
 # ---------- registry & entry point ----------

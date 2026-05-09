@@ -514,6 +514,12 @@ def main(argv: list[str] | None = None) -> None:
         help="Write only the AndroidAuditReport JSON to this path",
     )
     audit_parser.add_argument(
+        "--code-audit-json", type=Path,
+        help="Write only the CodeAuditReport JSON to this path (Phase 7 — "
+        "code-level findings from jadx-decompiled Java sources). Empty "
+        "when jadx didn't run or produced no app-package files.",
+    )
+    audit_parser.add_argument(
         "--poc-json", type=Path,
         help="Write the PoC artifact list as JSON to this path",
     )
@@ -1071,6 +1077,16 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
         if args.audit_json:
             write_json(args.audit_json, audit_report.to_dict())
             logging.info("AndroidAuditReport written to %s", args.audit_json)
+        if args.code_audit_json:
+            code_audit = result.code_audit_report
+            payload = code_audit.to_dict() if code_audit else {
+                "package_name": result.app_meta.package_name if result.app_meta else "",
+                "findings": [],
+                "files_scanned": 0,
+                "severity_counts": {},
+            }
+            write_json(args.code_audit_json, payload)
+            logging.info("CodeAuditReport written to %s", args.code_audit_json)
         if args.poc_json:
             write_json(args.poc_json, [p.to_dict() for p in pocs])
             logging.info("PoC artifacts written to %s", args.poc_json)
