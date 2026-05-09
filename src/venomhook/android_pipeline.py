@@ -57,11 +57,13 @@ from venomhook.jadx_runner import (
     JadxNotFoundError,
     decompile_apk,
 )
+from venomhook.code_audit import audit_code
 from venomhook.jni_bridge import build_bridges, correlate_symbols
 from venomhook.manifest_audit import audit_manifest
 from venomhook.models import (
     AndroidAppMeta,
     AndroidAuditReport,
+    CodeAuditReport,
     JavaNativeMethod,
     JniBridge,
     PoCArtifact,
@@ -105,6 +107,9 @@ class AndroidAnalysis:
     # Both are derived from app_meta — None / empty when apktool was absent.
     audit_report: Optional[AndroidAuditReport] = None
     pocs: list[PoCArtifact] = field(default_factory=list)
+    # Phase 7 — code-level static audit findings over jadx Java sources.
+    # None when jadx was skipped or didn't produce a sources directory.
+    code_audit_report: Optional[CodeAuditReport] = None
 
     @property
     def matched_bridges(self) -> list[JniBridge]:
@@ -131,6 +136,7 @@ class AndroidAnalysis:
         so_meta_data = data.get("so_meta")
         app_meta_data = data.get("app_meta")
         audit_data = data.get("audit_report")
+        code_audit_data = data.get("code_audit_report")
         return cls(
             apk_meta=_ApkMeta.from_dict(data["apk_meta"]),
             selected_abi=data.get("selected_abi"),
@@ -144,6 +150,10 @@ class AndroidAnalysis:
             warnings=list(data.get("warnings", [])),
             audit_report=AndroidAuditReport.from_dict(audit_data) if audit_data else None,
             pocs=[PoCArtifact.from_dict(p) for p in data.get("pocs", [])],
+            code_audit_report=(
+                CodeAuditReport.from_dict(code_audit_data)
+                if code_audit_data else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -157,6 +167,10 @@ class AndroidAnalysis:
             "bridges": [b.to_dict() for b in self.bridges],
             "audit_report": self.audit_report.to_dict() if self.audit_report else None,
             "pocs": [p.to_dict() for p in self.pocs],
+            "code_audit_report": (
+                self.code_audit_report.to_dict()
+                if self.code_audit_report else None
+            ),
             "warnings": list(self.warnings),
         }
 
@@ -284,10 +298,22 @@ def analyze_apk(
 
     # ----- Step 5: jadx decompile + native method extract (optional) -----
     java_natives: list[JavaNativeMethod] = []
+    jadx_sources_dir: Optional[Path] = None
     if use_jadx:
         jadx_out = work / "jadx"
         try:
-            _, java_natives = decompile_apk(apk, jadx_out, config=jadx_config)
+            jadx_result, java_natives = decompile_apk(
+                apk, jadx_out, config=jadx_config
+            )
+            # jadx writes Java sources under <output_dir>/sources by default;
+            # remember the path for Step 8 (code audit). Tolerate alternate
+            # layouts by falling back to the output_dir itself if sources/
+            # is missing.
+            sources_candidate = Path(jadx_result.output_dir) / "sources"
+            jadx_sources_dir = (
+                sources_candidate if sources_candidate.is_dir()
+                else Path(jadx_result.output_dir)
+            )
         except JadxNotFoundError as e:
             msg = f"jadx를 사용할 수 없습니다 — Java 디컴파일을 건너뜁니다: {e}"
             if fail_on_missing_tools:
@@ -309,6 +335,16 @@ def analyze_apk(
         audit_report = audit_manifest(app_meta)
         pocs = generate_pocs(app_meta, audit_report)
 
+    # ----- Step 8: code-level static audit over jadx sources (Phase 7) -----
+    # Runs only when jadx produced sources. Pure text-pattern scan; failure
+    # to read individual files is tolerated inside audit_code itself.
+    code_audit_report: Optional[CodeAuditReport] = None
+    if jadx_sources_dir is not None:
+        try:
+            code_audit_report = audit_code(jadx_sources_dir, app_meta)
+        except OSError as e:
+            warnings.append(f"코드 감사 실패 (계속 진행): {e}")
+
     return AndroidAnalysis(
         apk_meta=apk_meta,
         selected_abi=selected_abi,
@@ -320,4 +356,5 @@ def analyze_apk(
         warnings=warnings,
         audit_report=audit_report,
         pocs=pocs,
+        code_audit_report=code_audit_report,
     )

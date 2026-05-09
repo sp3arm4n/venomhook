@@ -749,6 +749,126 @@ class AndroidAuditReport:
 
 
 @dataclass
+class CodeFinding:
+    """A single code-level rule violation found in jadx-decompiled Java sources.
+
+    Phase 7. Counterpart to ManifestFinding for static patterns inside
+    code (hardcoded HTTP, weak Cipher mode, WebView JS enable, etc.).
+    `file` is the path relative to the jadx output root so the operator
+    can navigate without knowing the absolute analysis dir; `line_no`
+    and `line_text` together let a report renderer cite evidence.
+    `class_fqn` is filled when the rule can recover the enclosing class
+    (typically by mapping ``foo/bar/Baz.java`` -> ``foo.bar.Baz``); empty
+    string when the file lives outside any package directory.
+    """
+
+    rule_id: str
+    title: str
+    severity: str
+    file: str
+    line_no: int = 0
+    line_text: str = ""
+    class_fqn: str = ""
+    detail: str = ""
+    remediation: str = ""
+    references: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CodeFinding":
+        return cls(
+            rule_id=data["rule_id"],
+            title=data["title"],
+            severity=data.get("severity", "info"),
+            file=data.get("file", ""),
+            line_no=int(data.get("line_no", 0)),
+            line_text=data.get("line_text", ""),
+            class_fqn=data.get("class_fqn", ""),
+            detail=data.get("detail", ""),
+            remediation=data.get("remediation", ""),
+            references=list(data.get("references", [])),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "rule_id": self.rule_id,
+            "title": self.title,
+            "severity": self.severity,
+            "file": self.file,
+        }
+        if self.line_no:
+            result["line_no"] = self.line_no
+        if self.line_text:
+            result["line_text"] = self.line_text
+        if self.class_fqn:
+            result["class_fqn"] = self.class_fqn
+        if self.detail:
+            result["detail"] = self.detail
+        if self.remediation:
+            result["remediation"] = self.remediation
+        if self.references:
+            result["references"] = list(self.references)
+        return result
+
+
+@dataclass
+class CodeAuditReport:
+    """Aggregated code_audit findings for an APK's decompiled Java sources.
+
+    Mirrors AndroidAuditReport: severity bucketing + CI gate helper.
+    ``files_scanned`` lets reports show the audit's denominator
+    (e.g. "47 findings across 312 .java files") so the operator knows
+    whether a quiet result reflects a clean app or a small scan.
+    """
+
+    package_name: str
+    findings: list[CodeFinding] = field(default_factory=list)
+    files_scanned: int = 0
+
+    _SEVERITY_ORDER: tuple[str, ...] = field(
+        default=("critical", "high", "medium", "low", "info"),
+        init=False,
+        repr=False,
+    )
+
+    @property
+    def by_severity(self) -> dict[str, list[CodeFinding]]:
+        result: dict[str, list[CodeFinding]] = {}
+        for f in self.findings:
+            result.setdefault(f.severity, []).append(f)
+        return result
+
+    @property
+    def severity_counts(self) -> dict[str, int]:
+        return {sev: len(items) for sev, items in self.by_severity.items()}
+
+    def has_severity_at_least(self, threshold: str) -> bool:
+        order = self._SEVERITY_ORDER
+        if threshold not in order:
+            return False
+        cutoff = order.index(threshold)
+        for f in self.findings:
+            if f.severity in order and order.index(f.severity) <= cutoff:
+                return True
+        return False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CodeAuditReport":
+        return cls(
+            package_name=data.get("package_name", ""),
+            findings=[CodeFinding.from_dict(f) for f in data.get("findings", [])],
+            files_scanned=int(data.get("files_scanned", 0)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "package_name": self.package_name,
+            "findings": [f.to_dict() for f in self.findings],
+            "files_scanned": self.files_scanned,
+            "severity_counts": self.severity_counts,
+        }
+
+
+@dataclass
 class PoCArtifact:
     """A single proof-of-concept recipe derived from a ManifestFinding.
 
