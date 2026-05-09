@@ -1,4 +1,4 @@
-# Architecture
+# VenomHook Architecture
 
 ## 1. 전체 구조도 (Offset-based Native Hook Automation Platform)
 

@@ -29,6 +29,28 @@ logs/
 # Manually-dropped APK test inputs (large binaries; tests use synthetic fixtures)
 sample/*.apk
 sample/apk/
+sample/*.exe
+sample/bin/
 
 # OS/editor noise
 .DS_Store
+
+# Claude Cowork — 개인 worktree (스킬은 .claude/skills/ 에 commit)
+.claude/worktrees/
+
+# codex-handoff 핸드오프 산출물 (워크스페이스 임시)
+outputs/
+
+# Claude Cowork — 개인 메모 (commit 금지)
+CLAUDE.local.md
+
+# 시크릿/자격증명 — 보안 컨설팅 산출물에 실수로 유입 방지
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+.netrc
+secrets/
+credentials/
