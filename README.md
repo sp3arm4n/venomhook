@@ -108,6 +108,8 @@ export VENOMHOOK_APKTOOL=/path/to/apktool
 export VENOMHOOK_JADX=/path/to/jadx
 ```
 
+VenomHook은 `jadx-gui`가 아니라 `jadx`/`jadx-cli` 같은 CLI wrapper를 실행합니다. Windows에서 jadx를 GUI로만 사용 중이라면 Java/JNI 분석은 `--no-jadx`로 건너뛰거나, Wiki의 [Installation](https://github.com/sp3arm4n/venomhook/wiki/Installation) 안내에 따라 `jadx.bat`/`jadx-cli.bat` 경로를 지정하세요.
+
 Ghidra helper:
 
 ```bash
