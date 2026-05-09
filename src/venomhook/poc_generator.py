@@ -332,7 +332,145 @@ def _build_exported_no_permission(
             ),
             references=list(finding.references),
         ))
+    artifacts.extend(_deeplink_pocs(component, pkg, finding))
     artifacts.append(_frida_intent_observer(component, pkg, finding))
+    return artifacts
+
+
+_DEEPLINK_PATH_PATTERN_NOTE = (
+    "해당 deeplink는 pathPattern을 사용합니다 — Android 매칭 규칙에서 "
+    "'.'은 리터럴, '*'은 직전 문자 0회 이상, '\\\\'은 이스케이프입니다. "
+    "정규식이 아니므로 실제 매칭 경로로 치환해 시도하세요."
+)
+
+
+def _deeplink_uri(scheme: str, host: str | None, path_hint: str | None) -> str:
+    """Build a single deeplink URI from filter attributes.
+
+    Path hints from pathPrefix/pathPattern/pathSuffix go in verbatim; the
+    operator can edit before running. Hosts default to ``example.com`` when
+    a scheme like ``http``/``https`` would otherwise be ambiguous.
+    """
+    uri = f"{scheme}://"
+    if host:
+        uri += host
+    elif scheme.lower() in ("http", "https"):
+        uri += "example.com"
+    if path_hint:
+        if host or scheme.lower() in ("http", "https"):
+            if not path_hint.startswith("/"):
+                uri += "/"
+            uri += path_hint
+        else:
+            # No host — append the hint after the scheme separator
+            uri += path_hint
+    return uri
+
+
+def _deeplink_specs_for(component: AndroidComponent) -> list[tuple[str, str | None, str | None, bool]]:
+    """Collect (scheme, host, path_hint, is_pattern) triples from filters.
+
+    Only filters carrying category.BROWSABLE contribute — those are the ones
+    Android will route to from a web link or another app's implicit intent.
+    Same triple emitted twice on different filters dedupes. Returns at most
+    five entries (per component) so a manifest with dozens of cosmetic
+    casing variants doesn't bloat the bundle.
+    """
+    out: list[tuple[str, str | None, str | None, bool]] = []
+    seen: set[tuple[str, str | None, str | None]] = set()
+    for f in component.intent_filters:
+        if not f.is_browsable:
+            continue
+        for d in f.data:
+            if not d.scheme:
+                continue
+            is_pattern = d.path_pattern is not None
+            path_hint = (
+                d.path
+                or d.path_prefix
+                or d.path_pattern
+                or d.path_suffix
+            )
+            key = (d.scheme, d.host, path_hint)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((d.scheme, d.host, path_hint, is_pattern))
+            if len(out) >= 5:
+                return out
+    return out
+
+
+def _deeplink_pocs(
+    component: AndroidComponent, pkg: str, finding: ManifestFinding
+) -> list[PoCArtifact]:
+    """Implicit-intent deeplink PoCs for a BROWSABLE-exported activity.
+
+    Pentest model: BROWSABLE means the OS will route an external scheme
+    (e.g. ``myapp://``) from a browser or another app. The PoC fires an
+    *implicit* intent with no ``-n`` so the resolver picks the real entry
+    point — exactly what an attacker landing the user on a malicious page
+    would trigger. Each scheme/host/path combination becomes one .sh.
+    """
+    if component.type != "activity":
+        return []
+    specs = _deeplink_specs_for(component)
+    if not specs:
+        return []
+    artifacts: list[PoCArtifact] = []
+    for scheme, host, path_hint, is_pattern in specs:
+        uri = _deeplink_uri(scheme, host, path_hint)
+        cmd = _adb_shell([
+            "am", "start", "-W",
+            "-a", "android.intent.action.VIEW",
+            "-d", uri,
+        ])
+        explicit_cmd = _adb_shell([
+            "am", "start", "-W",
+            "-a", "android.intent.action.VIEW",
+            "-d", uri,
+            "-n", f"{pkg}/{component.name}",
+        ])
+        notes_lines = [
+            "암묵 인텐트(-n 미지정)는 실제 공격 모델 — 브라우저나 다른 앱이 "
+            "해당 URI를 던졌을 때 OS가 라우팅하는 것과 동일한 경로입니다.",
+            f"명시 호출: {explicit_cmd}",
+        ]
+        if is_pattern:
+            notes_lines.append(_DEEPLINK_PATH_PATTERN_NOTE)
+        artifacts.append(PoCArtifact(
+            rule_id=finding.rule_id,
+            title=(
+                f"Deeplink 진입: {scheme}://"
+                + (host or "")
+                + (f"{path_hint if path_hint and path_hint.startswith('/') else (' ' + path_hint if path_hint else '')}" if path_hint else "")
+            ).strip(),
+            severity=finding.severity,
+            kind="adb",
+            package_name=pkg,
+            component=component.name,
+            description=(
+                f"BROWSABLE 카테고리가 붙어 있어 외부 페이지/앱이 implicit intent로 "
+                f"이 액티비티를 직접 호출할 수 있습니다. URI 내 호스트·path를 "
+                "조작하면 활성 액티비티가 신뢰하는 입력으로 들어와 (예: WebView "
+                "loadUrl, OAuth code 처리, 인증 토큰 수신) authorization bypass / "
+                "deeplink injection 이 발생할 수 있습니다."
+            ),
+            commands=[
+                "# 암묵 인텐트 — OS 라우팅 (실제 공격 모델)",
+                cmd,
+                "# extras를 붙여 추가 페이로드 시도, 예:",
+                f"#   {cmd} --es token \"PAYLOAD\"",
+            ],
+            expected_evidence=(
+                "logcat에 액티비티 onCreate가 찍히고, 액티비티가 URI를 처리하는 "
+                "(WebView 로딩, 토큰 파싱, 화면 전환 등) 동작이 확인됩니다. "
+                "deeplink가 다른 액티비티로 redirect하면 그 흐름도 따라가 "
+                "신뢰 경계를 식별하세요."
+            ),
+            notes="\n".join(notes_lines),
+            references=list(finding.references),
+        ))
     return artifacts
 
 
