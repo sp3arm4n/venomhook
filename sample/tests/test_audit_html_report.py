@@ -32,11 +32,14 @@ from venomhook.models import (
     AndroidAppMeta,
     AndroidAuditReport,
     AndroidComponent,
+    CodeAuditReport,
+    CodeFinding,
     JavaNativeMethod,
     JniBridge,
     ManifestFinding,
     PoCArtifact,
 )
+from venomhook.native_strings import NativeStringHints
 
 
 def _stub_apk(hash_: str = "sha256:deadbeefcafef00d") -> ApkMeta:
@@ -327,6 +330,125 @@ class BridgesSectionTest(unittest.TestCase):
     def test_bridges_section_omitted_when_empty(self) -> None:
         html = render_audit_html(_stub_analysis())
         self.assertNotIn("JNI 브리지", html)
+
+
+# ---------- Phase 7-5 — code findings + native strings ----------
+
+
+def _analysis_with_code_findings(
+    *, code_findings: list[CodeFinding] | None = None,
+    code_pocs: list[PoCArtifact] | None = None,
+    hints: NativeStringHints | None = None,
+) -> AndroidAnalysis:
+    base = _stub_analysis(with_pocs=False)
+    base.code_audit_report = CodeAuditReport(
+        package_name="com.demo.bank",
+        findings=list(code_findings or []),
+        files_scanned=12,
+    )
+    base.native_string_hints = hints
+    if code_pocs:
+        base.pocs = list(base.pocs) + list(code_pocs)
+    return base
+
+
+class CodeFindingsSectionTest(unittest.TestCase):
+    def test_section_omitted_when_no_code_findings(self) -> None:
+        html = render_audit_html(_stub_analysis())
+        self.assertNotIn("코드 감사", html)
+
+    def test_section_renders_with_files_scanned_count(self) -> None:
+        analysis = _analysis_with_code_findings(code_findings=[
+            CodeFinding(
+                rule_id="CODE-001", title="평문 HTTP",
+                severity="high", file="com/x/A.java", line_no=12,
+                line_text='String url = "http://api/x";',
+                class_fqn="com.x.A",
+                detail="d", remediation="r",
+                references=["CWE-319"],
+            ),
+        ])
+        html = render_audit_html(analysis)
+        self.assertIn("코드 감사", html)
+        self.assertIn("스캔 12개 파일", html)
+        self.assertIn("com/x/A.java:12", html)
+        self.assertIn("CWE-319", html)
+        # The literal evidence line is rendered inside a <code> block
+        self.assertIn("<code>", html)
+
+    def test_code_findings_ordered_critical_to_info(self) -> None:
+        analysis = _analysis_with_code_findings(code_findings=[
+            CodeFinding(rule_id="CODE-005", title="ext storage",
+                        severity="medium", file="a.java"),
+            CodeFinding(rule_id="CODE-003", title="weak crypto",
+                        severity="high", file="b.java"),
+            CodeFinding(rule_id="CODE-007", title="info",
+                        severity="info", file="c.java"),
+        ])
+        html = render_audit_html(analysis)
+        i_high = html.find("weak crypto")
+        i_medium = html.find("ext storage")
+        i_info = html.find("CODE-007")
+        self.assertGreater(i_medium, i_high)
+        self.assertGreater(i_info, i_medium)
+
+    def test_code_pocs_embedded_via_class_fqn(self) -> None:
+        finding = CodeFinding(
+            rule_id="CODE-002", title="WebView JS",
+            severity="medium", file="com/x/W.java", line_no=25,
+            class_fqn="com.x.W",
+        )
+        # PoC for the same (rule_id, class_fqn) — should embed inside the card
+        poc = PoCArtifact(
+            rule_id="CODE-002", title="Frida WebView observer",
+            severity="medium", kind="frida",
+            package_name="com.demo.bank",
+            component="com.x.W",
+            commands=["Java.perform(() => { /* hook */ });"],
+        )
+        analysis = _analysis_with_code_findings(
+            code_findings=[finding],
+            code_pocs=[poc],
+        )
+        html = render_audit_html(analysis)
+        self.assertIn("Frida WebView observer", html)
+        # The PoC count badge appears inside the card
+        self.assertIn("개념 증명(PoC) 1건", html)
+
+
+class NativeStringsSectionTest(unittest.TestCase):
+    def test_section_omitted_when_hints_none(self) -> None:
+        analysis = _stub_analysis()
+        analysis.native_string_hints = None
+        html = render_audit_html(analysis)
+        self.assertNotIn("네이티브 라이브러리 문자열 단서", html)
+
+    def test_section_omitted_when_hints_empty(self) -> None:
+        analysis = _analysis_with_code_findings(hints=NativeStringHints())
+        html = render_audit_html(analysis)
+        self.assertNotIn("네이티브 라이브러리 문자열 단서", html)
+
+    def test_section_renders_buckets_with_counts(self) -> None:
+        analysis = _analysis_with_code_findings(hints=NativeStringHints(
+            urls=["https://api.example.com/x", "http://10.1.2.3/cb"],
+            crypto=["AES/CBC", "MD5"],
+            paths=["/system/bin/sh"],
+        ))
+        html = render_audit_html(analysis)
+        self.assertIn("네이티브 라이브러리 문자열 단서", html)
+        self.assertIn("URL 임베디드 (2건)", html)
+        self.assertIn("Crypto 알고리즘 단서 (2건)", html)
+        self.assertIn("민감 경로 (1건)", html)
+        self.assertIn("https://api.example.com/x", html)
+
+    def test_long_bucket_truncates_with_more_indicator(self) -> None:
+        # 25 items -> 20 visible + "외 5개 더" indicator
+        analysis = _analysis_with_code_findings(hints=NativeStringHints(
+            urls=[f"https://h{i}.example/" for i in range(25)],
+        ))
+        html = render_audit_html(analysis)
+        self.assertIn("URL 임베디드 (25건)", html)
+        self.assertIn("외 5개 더", html)
 
 
 if __name__ == "__main__":
