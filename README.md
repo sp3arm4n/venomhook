@@ -124,6 +124,7 @@ chmod +x ./setup/env.sh
 | 주제 | 링크 |
 | --- | --- |
 | 전체 문서 홈 | [Wiki Home](https://github.com/sp3arm4n/venomhook/wiki) |
+| 첫 사용 전 환경 점검 | [Environment Checklist](https://github.com/sp3arm4n/venomhook/wiki/Environment-Checklist) |
 | 설치와 외부 도구 설정 | [Installation](https://github.com/sp3arm4n/venomhook/wiki/Installation) |
 | 네이티브 바이너리 분석 흐름 | [Core Workflow](https://github.com/sp3arm4n/venomhook/wiki/Core-Workflow) |
 | Android APK 분석 흐름 | [Android Workflow](https://github.com/sp3arm4n/venomhook/wiki/Android-Workflow) |
