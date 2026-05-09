@@ -295,6 +295,101 @@ class TestParseAndroidManifest(unittest.TestCase):
             self.assertEqual(meta.min_sdk, 23)
             self.assertEqual(meta.target_sdk, 33)
 
+    def test_sdk_falls_back_to_apktool_yml_when_uses_sdk_absent(self):
+        # apktool 2.x emits SDK info under sdkInfo: in apktool.yml instead of
+        # leaving <uses-sdk> in the decoded manifest. Verify the fallback
+        # picks up both values from the sibling YAML.
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            xml = _manifest_xml(package="com.app")  # no <uses-sdk>
+            m = self._write(tdp, xml)
+            (tdp / "apktool.yml").write_text(
+                "!!brut.androlib.meta.MetaInfo\n"
+                "sdkInfo:\n"
+                "  minSdkVersion: 21\n"
+                "  targetSdkVersion: 30\n"
+                "packageInfo:\n"
+                "  forcedPackageId: '127'\n"
+            )
+            meta = parse_android_manifest(m)
+            self.assertEqual(meta.min_sdk, 21)
+            self.assertEqual(meta.target_sdk, 30)
+
+    def test_sdk_manifest_takes_priority_over_apktool_yml(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            xml = _manifest_xml(package="com.app", min_sdk=23, target_sdk=33)
+            m = self._write(tdp, xml)
+            (tdp / "apktool.yml").write_text(
+                "sdkInfo:\n"
+                "  minSdkVersion: 15\n"
+                "  targetSdkVersion: 22\n"
+            )
+            meta = parse_android_manifest(m)
+            self.assertEqual(meta.min_sdk, 23)
+            self.assertEqual(meta.target_sdk, 33)
+
+    def test_sdk_partial_fallback_when_only_one_field_in_manifest(self):
+        # If the manifest declares min but not target, the missing field is
+        # filled from apktool.yml; the present one stays as-is.
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            xml = _manifest_xml(package="com.app", min_sdk=24)  # target_sdk omitted
+            m = self._write(tdp, xml)
+            (tdp / "apktool.yml").write_text(
+                "sdkInfo:\n"
+                "  minSdkVersion: 15\n"
+                "  targetSdkVersion: 31\n"
+            )
+            meta = parse_android_manifest(m)
+            self.assertEqual(meta.min_sdk, 24)
+            self.assertEqual(meta.target_sdk, 31)
+
+    def test_sdk_codename_in_apktool_yml_falls_through_to_none(self):
+        # Preview/codename strings (e.g. 'P', 'Tiramisu') aren't integer
+        # API levels — _safe_int returns None and we keep "unspecified"
+        # semantics rather than guessing.
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            xml = _manifest_xml(package="com.app")
+            m = self._write(tdp, xml)
+            (tdp / "apktool.yml").write_text(
+                "sdkInfo:\n"
+                "  minSdkVersion: 'P'\n"
+                "  targetSdkVersion: 31\n"
+            )
+            meta = parse_android_manifest(m)
+            self.assertIsNone(meta.min_sdk)
+            self.assertEqual(meta.target_sdk, 31)
+
+    def test_sdk_apktool_yml_missing_keeps_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            xml = _manifest_xml(package="com.app")
+            m = self._write(Path(td), xml)
+            meta = parse_android_manifest(m)
+            self.assertIsNone(meta.min_sdk)
+            self.assertIsNone(meta.target_sdk)
+
+    def test_sdk_only_picks_values_inside_sdkInfo_block(self):
+        # A minSdkVersion: line under a *different* top-level section must
+        # not leak into our SDK fields. Guards against the parser becoming
+        # over-eager.
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            xml = _manifest_xml(package="com.app")
+            m = self._write(tdp, xml)
+            (tdp / "apktool.yml").write_text(
+                "unknownSection:\n"
+                "  minSdkVersion: 99\n"
+                "  targetSdkVersion: 99\n"
+                "sdkInfo:\n"
+                "  minSdkVersion: 21\n"
+                "  targetSdkVersion: 30\n"
+            )
+            meta = parse_android_manifest(m)
+            self.assertEqual(meta.min_sdk, 21)
+            self.assertEqual(meta.target_sdk, 30)
+
     def test_services_and_receivers(self):
         with tempfile.TemporaryDirectory() as td:
             xml = _manifest_xml(

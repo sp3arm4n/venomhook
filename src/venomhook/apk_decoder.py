@@ -27,6 +27,7 @@ Pure-Python; depends only on models.{AndroidAppMeta, AndroidComponent}.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -248,6 +249,53 @@ def _safe_int(s: Optional[str]) -> Optional[int]:
         return None
 
 
+_APKTOOL_YML_SDK_LINE = re.compile(
+    r"^\s+(minSdkVersion|targetSdkVersion)\s*:\s*['\"]?([^'\"\s#]+)['\"]?\s*(?:#.*)?$"
+)
+
+
+def _parse_apktool_yml_sdk(yml_path: Path) -> tuple[Optional[int], Optional[int]]:
+    """Best-effort extract of min/target SDK from apktool.yml's ``sdkInfo:`` block.
+
+    apktool 2.x moves <uses-sdk> data out of the decoded AndroidManifest.xml
+    into a ``sdkInfo:`` mapping inside ``apktool.yml`` (sibling of the
+    manifest). Without this fallback, every modern APK reports SDK = None,
+    which silently mutes MANIFEST-002/008/009.
+
+    Returns ``(min_sdk, target_sdk)``, either may be None if the file is
+    missing, the section is absent, or the value is a codename string
+    (e.g. ``'P'``) rather than an integer.
+    """
+    if not yml_path.exists():
+        return None, None
+    try:
+        text = yml_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None, None
+
+    in_sdk_section = False
+    min_sdk: Optional[int] = None
+    target_sdk: Optional[int] = None
+    for line in text.splitlines():
+        if not line or line.lstrip().startswith("#"):
+            continue
+        # Top-level key (no leading whitespace) — entry/exit of sdkInfo block.
+        if not line.startswith((" ", "\t")):
+            in_sdk_section = line.split("#", 1)[0].rstrip().rstrip(":").strip() == "sdkInfo"
+            continue
+        if not in_sdk_section:
+            continue
+        m = _APKTOOL_YML_SDK_LINE.match(line)
+        if not m:
+            continue
+        key, value = m.group(1), m.group(2)
+        if key == "minSdkVersion":
+            min_sdk = _safe_int(value)
+        elif key == "targetSdkVersion":
+            target_sdk = _safe_int(value)
+    return min_sdk, target_sdk
+
+
 def _resolve_class_name(name: Optional[str], package: str) -> Optional[str]:
     """Resolve a component class name relative to the application package.
 
@@ -363,6 +411,16 @@ def parse_android_manifest(manifest_path: str | Path) -> AndroidAppMeta:
     else:
         min_sdk = None
         target_sdk = None
+
+    # apktool 2.x parks SDK info in apktool.yml's `sdkInfo:` block instead of
+    # leaving <uses-sdk> in the decoded manifest. Fall back to the sibling
+    # apktool.yml so MANIFEST-002/008/009 stay live for modern APKs.
+    if min_sdk is None or target_sdk is None:
+        yml_min, yml_target = _parse_apktool_yml_sdk(p.parent / "apktool.yml")
+        if min_sdk is None:
+            min_sdk = yml_min
+        if target_sdk is None:
+            target_sdk = yml_target
 
     application_class: Optional[str] = None
     components: list[AndroidComponent] = []
