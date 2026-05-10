@@ -464,6 +464,44 @@ class TestAnalyzeApkMultiLib(unittest.TestCase):
                 f"expected warning mentioning libzbroken.so, got {result.warnings!r}",
             )
 
+    def test_first_lief_failure_still_analyzes_later_libs(self):
+        """A broken lex-first .so must not hide valid libraries in all mode."""
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(
+                tdp,
+                {"arm64-v8a": ["libaaa_broken.so", "libcrypto.so"]},
+            )
+            from venomhook.binary_meta import BinaryMetaError
+
+            def _meta_per_path(path):
+                name = Path(path).name
+                if name == "libaaa_broken.so":
+                    raise BinaryMetaError(f"synthetic parse failure for {name}")
+                if name == "libcrypto.so":
+                    return _stub_binary_meta(str(path), ["JNI_OnLoad"])
+                raise AssertionError(path)
+
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                side_effect=_meta_per_path,
+            ):
+                result = analyze_apk(
+                    apk,
+                    tdp / "work",
+                    use_apktool=False,
+                    use_jadx=False,
+                    analyze_all_libs=True,
+                )
+
+            self.assertIsNotNone(result.so_meta)
+            self.assertEqual(result.so_meta.name, "libcrypto.so")
+            self.assertEqual(result.additional_so_metas, [])
+            self.assertTrue(
+                any("libaaa_broken.so" in w for w in result.warnings),
+                f"expected warning mentioning libaaa_broken.so, got {result.warnings!r}",
+            )
+
 
 class TestAnalyzeApkAbiSelection(unittest.TestCase):
     def test_explicit_abi(self):

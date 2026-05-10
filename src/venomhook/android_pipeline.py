@@ -360,7 +360,35 @@ def analyze_apk(
                 )
 
         # ----- Step 3: BinaryMeta of the .so (REQUIRED for JNI correlation) -----
-        if so_path is not None:
+        if analyze_all_libs and extracted_paths:
+            parsed: list[tuple[Path, BinaryMeta]] = []
+            failures: list[str] = []
+            for candidate_path in extracted_paths:
+                try:
+                    parsed.append((candidate_path, extract_binary_meta(candidate_path)))
+                except BinaryMetaError as e:
+                    failures.append(
+                        f"{candidate_path}에 대한 binary_meta 추출 실패 "
+                        f"(계속 진행): {e}"
+                    )
+
+            if parsed:
+                # Pick the first successfully parsed library as the legacy
+                # primary. A corrupt lexicographic first .so must not prevent
+                # --apk-lib all from analysing the remaining valid libraries.
+                so_path, so_meta = parsed[0]
+                for extra_path, extra_meta in parsed[1:]:
+                    additional_so_metas.append(extra_meta)
+                    additional_so_paths.append(str(extra_path))
+                warnings.extend(failures)
+            else:
+                msg = "; ".join(failures) or (
+                    f"{apk}의 {selected_abi} ABI에서 분석 가능한 .so가 없습니다"
+                )
+                if require_native:
+                    raise AndroidPipelineError(msg)
+                warnings.append(f"{msg} — 네이티브 분석을 건너뜁니다")
+        elif so_path is not None:
             try:
                 so_meta = extract_binary_meta(so_path)
             except BinaryMetaError as e:
@@ -368,23 +396,6 @@ def analyze_apk(
                 if require_native:
                     raise AndroidPipelineError(msg) from e
                 warnings.append(f"{msg} — 네이티브 분석을 건너뜁니다")
-
-            if analyze_all_libs and so_meta is not None:
-                # Run lief on each remaining .so. A failure on a non-primary
-                # library is recorded as a warning and the rest of the
-                # analysis continues — losing one library's exports degrades
-                # JNI correlation but does not invalidate the report.
-                for extra_path in extracted_paths[1:]:
-                    try:
-                        extra_meta = extract_binary_meta(extra_path)
-                    except BinaryMetaError as e:
-                        warnings.append(
-                            f"{extra_path}에 대한 binary_meta 추출 실패 "
-                            f"(계속 진행): {e}"
-                        )
-                        continue
-                    additional_so_metas.append(extra_meta)
-                    additional_so_paths.append(str(extra_path))
 
     # ----- Step 4: AndroidManifest decode (optional) -----
     app_meta: Optional[AndroidAppMeta] = None
