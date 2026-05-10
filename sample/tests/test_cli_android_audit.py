@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import stat
 import sys
 import tempfile
@@ -22,6 +23,9 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _subproc_stub import make_stub_executable
 
 from venomhook.binary_meta import BinaryMeta
 from venomhook.cli import main
@@ -59,25 +63,15 @@ def _stub_binary_meta(path: str) -> BinaryMeta:
 def _apktool_stub(tmp: Path, manifest_xml: str) -> Path:
     """Stub apktool that drops a fixed AndroidManifest.xml into -o <out>.
 
-    Built as a flat string (no textwrap.dedent) because the embedded
-    manifest_xml has col-0 lines that defeat dedent's common-prefix logic
-    and would leave the shebang indented.
+    Cross-platform: backed by `_subproc_stub.make_stub_executable` so the
+    same fixture works on POSIX (shebang Python script) and Windows
+    (.cmd shim).
     """
-    body = (
-        "#!/bin/sh\n"
-        "while [ $# -gt 0 ]; do\n"
-        "    case \"$1\" in\n"
-        "        -o) shift; OUT=\"$1\"; shift; ;;\n"
-        "        *) shift; ;;\n"
-        "    esac\n"
-        "done\n"
-        "mkdir -p \"$OUT\"\n"
-        "cat > \"$OUT/AndroidManifest.xml\" <<'EOF'\n"
-        f"{manifest_xml}"
-        "EOF\n"
-        "exit 0\n"
+    return make_stub_executable(
+        tmp / "stub-apktool",
+        out_flag="-o",
+        files={"AndroidManifest.xml": manifest_xml},
     )
-    return _executable(tmp / "stub-apktool.sh", body)
 
 
 # Minimal manifest variants used across tests.
@@ -231,11 +225,15 @@ class AndroidAuditCliTests(unittest.TestCase):
             self.assertTrue((bundle_dir / "README.md").exists())
             sh_files = sorted(bundle_dir.glob("MANIFEST-001-*.sh"))
             self.assertEqual(len(sh_files), 2)  # jdb + run-as
-            # Scripts must be executable.
-            mode = sh_files[0].stat().st_mode
-            self.assertTrue(mode & stat.S_IXUSR)
+            if os.name != "nt":
+                # NTFS has no POSIX exec bit; chmod is skipped on Windows.
+                mode = sh_files[0].stat().st_mode
+                self.assertTrue(mode & stat.S_IXUSR)
             # Body must include both shebang and at least one adb command.
-            body = sh_files[0].read_text()
+            # Bundle is always written as utf-8 by poc_export; pin the
+            # encoding so this test doesn't crash under cp949/cp1252 on
+            # Windows when the body contains non-ASCII commentary.
+            body = sh_files[0].read_text(encoding="utf-8")
             self.assertTrue(body.startswith("#!/bin/sh\n"))
             self.assertIn("adb ", body)
 

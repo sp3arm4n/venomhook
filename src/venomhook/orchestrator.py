@@ -52,10 +52,16 @@ def run_frida(
 
     stdout_pipe = subprocess.PIPE if log_file else None
     stderr_pipe = subprocess.STDOUT if log_file else None
-    proc = subprocess.run(cmd, stdout=stdout_pipe, stderr=stderr_pipe, text=True)
+    # Pin UTF-8 for both decoding of frida's child output and for writing
+    # the captured log: the target process can emit non-ASCII strings, and
+    # the system default codec is cp949/cp1252 on Korean/Western Windows.
+    proc = subprocess.run(
+        cmd, stdout=stdout_pipe, stderr=stderr_pipe, text=True,
+        encoding="utf-8", errors="replace",
+    )
     if log_file and proc.stdout:
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        log_file.write_text(proc.stdout)
+        log_file.write_text(proc.stdout, encoding="utf-8")
     if proc.returncode != 0:
         raise RuntimeError(f"frida exited with code {proc.returncode}")
     return cmd_str

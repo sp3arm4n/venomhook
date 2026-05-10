@@ -126,7 +126,10 @@ def find_jadx(env_var: str = JADX_ENV_VAR) -> str:
     explicit = os.environ.get(env_var)
     if explicit:
         path = Path(explicit)
-        if path.is_file() and os.access(explicit, os.X_OK):
+        # X_OK is unreliable on Windows (exec bit isn't part of NTFS perms),
+        # so trust is_file() and let the actual subprocess.run surface a real
+        # PermissionError/ENOEXEC if the user pointed at something unrunnable.
+        if path.is_file() and (os.name == "nt" or os.access(explicit, os.X_OK)):
             return explicit
         raise JadxNotFoundError(
             f"{env_var}={explicit!r} is set but does not point to an executable file"
@@ -194,6 +197,10 @@ def run_jadx(
             check=False,
             capture_output=True,
             text=True,
+            # Pin UTF-8 so jadx's i18n diagnostics don't crash decoding
+            # under Windows cp949/cp1252 or non-UTF-8 POSIX locales.
+            encoding="utf-8",
+            errors="replace",
             timeout=cfg.timeout_sec,
         )
     except subprocess.TimeoutExpired as e:

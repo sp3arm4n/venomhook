@@ -25,6 +25,9 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _subproc_stub import make_stub_executable
 
 from venomhook.android_pipeline import (
     AndroidAnalysis,
@@ -622,46 +625,30 @@ class TestAnalyzeApkWithStubbedTools(unittest.TestCase):
             tdp = Path(td)
             apk = _make_apk_with_lib(tdp, {"arm64-v8a": ["libcore.so"]})
 
-            apktool_stub = _executable(
-                tdp / "stub-apktool.sh",
-                textwrap.dedent("""\
-                    #!/bin/sh
-                    while [ $# -gt 0 ]; do
-                        case "$1" in
-                            -o) shift; OUT="$1"; shift; ;;
-                            *) shift; ;;
-                        esac
-                    done
-                    mkdir -p "$OUT"
-                    cat > "$OUT/AndroidManifest.xml" <<'EOF'
-                    <?xml version="1.0"?>
-                    <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.demo">
-                        <application/>
-                    </manifest>
-                    EOF
-                    exit 0
-                """),
+            apktool_stub = make_stub_executable(
+                tdp / "stub-apktool",
+                out_flag="-o",
+                files={
+                    "AndroidManifest.xml": (
+                        '<?xml version="1.0"?>\n'
+                        '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.demo">\n'
+                        "    <application/>\n"
+                        "</manifest>\n"
+                    )
+                },
             )
 
-            jadx_stub = _executable(
-                tdp / "stub-jadx.sh",
-                textwrap.dedent("""\
-                    #!/bin/sh
-                    while [ $# -gt 0 ]; do
-                        case "$1" in
-                            -d) shift; OUT="$1"; shift; ;;
-                            *) shift; ;;
-                        esac
-                    done
-                    mkdir -p "$OUT/sources/com/demo"
-                    cat > "$OUT/sources/com/demo/Main.java" <<'EOF'
-                    package com.demo;
-                    public class Main {
-                        public native String getVersion();
-                    }
-                    EOF
-                    exit 0
-                """),
+            jadx_stub = make_stub_executable(
+                tdp / "stub-jadx",
+                out_flag="-d",
+                files={
+                    "sources/com/demo/Main.java": (
+                        "package com.demo;\n"
+                        "public class Main {\n"
+                        "    public native String getVersion();\n"
+                        "}\n"
+                    )
+                },
             )
 
             with mock.patch(
@@ -722,25 +709,17 @@ class TestAnalyzeApkAuditAndPocsIntegration(unittest.TestCase):
 
             # Stub apktool produces a manifest with debuggable=true →
             # MANIFEST-001 fires → poc_generator emits jdb + run-as recipes.
-            apktool_stub = _executable(
-                tdp / "stub-apktool.sh",
-                textwrap.dedent("""\
-                    #!/bin/sh
-                    while [ $# -gt 0 ]; do
-                        case "$1" in
-                            -o) shift; OUT="$1"; shift; ;;
-                            *) shift; ;;
-                        esac
-                    done
-                    mkdir -p "$OUT"
-                    cat > "$OUT/AndroidManifest.xml" <<'EOF'
-                    <?xml version="1.0"?>
-                    <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.demo">
-                        <application android:debuggable="true"/>
-                    </manifest>
-                    EOF
-                    exit 0
-                """),
+            apktool_stub = make_stub_executable(
+                tdp / "stub-apktool",
+                out_flag="-o",
+                files={
+                    "AndroidManifest.xml": (
+                        '<?xml version="1.0"?>\n'
+                        '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.demo">\n'
+                        '    <application android:debuggable="true"/>\n'
+                        '</manifest>\n'
+                    )
+                },
             )
 
             with mock.patch(
@@ -771,26 +750,18 @@ class TestAnalyzeApkAuditAndPocsIntegration(unittest.TestCase):
 
             # Manifest with no findings: target_sdk=33, debuggable absent,
             # no exported components, no cleartext, no allowBackup.
-            apktool_stub = _executable(
-                tdp / "stub-apktool.sh",
-                textwrap.dedent("""\
-                    #!/bin/sh
-                    while [ $# -gt 0 ]; do
-                        case "$1" in
-                            -o) shift; OUT="$1"; shift; ;;
-                            *) shift; ;;
-                        esac
-                    done
-                    mkdir -p "$OUT"
-                    cat > "$OUT/AndroidManifest.xml" <<'EOF'
-                    <?xml version="1.0"?>
-                    <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.clean">
-                        <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="33"/>
-                        <application android:allowBackup="false" android:usesCleartextTraffic="false"/>
-                    </manifest>
-                    EOF
-                    exit 0
-                """),
+            apktool_stub = make_stub_executable(
+                tdp / "stub-apktool",
+                out_flag="-o",
+                files={
+                    "AndroidManifest.xml": (
+                        '<?xml version="1.0"?>\n'
+                        '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.clean">\n'
+                        '    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="33"/>\n'
+                        '    <application android:allowBackup="false" android:usesCleartextTraffic="false"/>\n'
+                        '</manifest>\n'
+                    )
+                },
             )
             with mock.patch(
                 "venomhook.android_pipeline.extract_binary_meta",
@@ -810,25 +781,17 @@ class TestAnalyzeApkAuditAndPocsIntegration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             tdp = Path(td)
             apk = _make_apk_with_lib(tdp, {"arm64-v8a": ["libcore.so"]})
-            apktool_stub = _executable(
-                tdp / "stub-apktool.sh",
-                textwrap.dedent("""\
-                    #!/bin/sh
-                    while [ $# -gt 0 ]; do
-                        case "$1" in
-                            -o) shift; OUT="$1"; shift; ;;
-                            *) shift; ;;
-                        esac
-                    done
-                    mkdir -p "$OUT"
-                    cat > "$OUT/AndroidManifest.xml" <<'EOF'
-                    <?xml version="1.0"?>
-                    <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.demo">
-                        <application android:debuggable="true"/>
-                    </manifest>
-                    EOF
-                    exit 0
-                """),
+            apktool_stub = make_stub_executable(
+                tdp / "stub-apktool",
+                out_flag="-o",
+                files={
+                    "AndroidManifest.xml": (
+                        '<?xml version="1.0"?>\n'
+                        '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.demo">\n'
+                        '    <application android:debuggable="true"/>\n'
+                        '</manifest>\n'
+                    )
+                },
             )
             with mock.patch(
                 "venomhook.android_pipeline.extract_binary_meta",
@@ -858,25 +821,17 @@ class AndroidAnalysisRoundtripTests(unittest.TestCase):
 
     def _full_analysis(self, tdp: Path) -> AndroidAnalysis:
         apk = _make_apk_with_lib(tdp, {"arm64-v8a": ["libcore.so"]})
-        apktool_stub = _executable(
-            tdp / "stub-apktool.sh",
-            textwrap.dedent("""\
-                #!/bin/sh
-                while [ $# -gt 0 ]; do
-                    case "$1" in
-                        -o) shift; OUT="$1"; shift; ;;
-                        *) shift; ;;
-                    esac
-                done
-                mkdir -p "$OUT"
-                cat > "$OUT/AndroidManifest.xml" <<'EOF'
-                <?xml version="1.0"?>
-                <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.demo">
-                    <application android:debuggable="true"/>
-                </manifest>
-                EOF
-                exit 0
-            """),
+        apktool_stub = make_stub_executable(
+            tdp / "stub-apktool",
+            out_flag="-o",
+            files={
+                "AndroidManifest.xml": (
+                    '<?xml version="1.0"?>\n'
+                    '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.demo">\n'
+                    '    <application android:debuggable="true"/>\n'
+                    '</manifest>\n'
+                )
+            },
         )
         with mock.patch(
             "venomhook.android_pipeline.extract_binary_meta",

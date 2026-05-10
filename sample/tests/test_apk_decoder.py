@@ -17,6 +17,9 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _subproc_stub import make_stub_executable
 
 from venomhook.apk_decoder import (
     ANDROID_NS,
@@ -960,21 +963,12 @@ class TestRunApktoolDecode(unittest.TestCase):
             tdp = Path(td)
             apk = tdp / "fake.apk"
             apk.write_bytes(b"PK\x03\x04stub")
-            stub = tdp / "stub-apktool.sh"
-            stub.write_text(textwrap.dedent("""\
-                #!/bin/sh
-                # apktool d --force ... -o OUT apk_path
-                while [ $# -gt 0 ]; do
-                    case "$1" in
-                        -o) shift; OUT="$1"; shift; ;;
-                        *) shift; ;;
-                    esac
-                done
-                mkdir -p "$OUT/smali/com/x"
-                echo "<manifest package=\\"com.x\\"/>" > "$OUT/AndroidManifest.xml"
-                exit 0
-            """))
-            stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+            stub = make_stub_executable(
+                tdp / "stub-apktool",
+                out_flag="-o",
+                files={"AndroidManifest.xml": '<manifest package="com.x"/>\n'},
+                mkdirs=["smali/com/x"],
+            )
             result = run_apktool_decode(apk, tdp / "out", ApktoolConfig(apktool_path=str(stub)))
             self.assertEqual(result.returncode, 0)
             self.assertTrue(result.manifest_path)
@@ -985,9 +979,7 @@ class TestRunApktoolDecode(unittest.TestCase):
             tdp = Path(td)
             apk = tdp / "fake.apk"
             apk.write_bytes(b"PK")
-            stub = tdp / "fail-apktool.sh"
-            stub.write_text("#!/bin/sh\nexit 5\n")
-            stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+            stub = make_stub_executable(tdp / "fail-apktool", exit_code=5)
             with self.assertRaises(ApktoolRunError):
                 run_apktool_decode(apk, tdp / "out", ApktoolConfig(apktool_path=str(stub)))
 
@@ -1061,32 +1053,25 @@ class TestDecodeApk(unittest.TestCase):
             tdp = Path(td)
             apk = tdp / "fake.apk"
             apk.write_bytes(b"PK")
-            stub = tdp / "stub-apktool.sh"
-            stub.write_text(textwrap.dedent("""\
-                #!/bin/sh
-                while [ $# -gt 0 ]; do
-                    case "$1" in
-                        -o) shift; OUT="$1"; shift; ;;
-                        *) shift; ;;
-                    esac
-                done
-                mkdir -p "$OUT"
-                cat > "$OUT/AndroidManifest.xml" <<'EOF'
-                <?xml version="1.0"?>
-                <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.demo">
-                    <uses-permission android:name="android.permission.INTERNET"/>
-                    <application android:name=".App">
-                        <activity android:name=".MainActivity" android:exported="true">
-                            <intent-filter>
-                                <action android:name="android.intent.action.MAIN"/>
-                            </intent-filter>
-                        </activity>
-                    </application>
-                </manifest>
-                EOF
-                exit 0
-            """))
-            stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+            stub = make_stub_executable(
+                tdp / "stub-apktool",
+                out_flag="-o",
+                files={
+                    "AndroidManifest.xml": (
+                        '<?xml version="1.0"?>\n'
+                        '<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.demo">\n'
+                        '    <uses-permission android:name="android.permission.INTERNET"/>\n'
+                        '    <application android:name=".App">\n'
+                        '        <activity android:name=".MainActivity" android:exported="true">\n'
+                        '            <intent-filter>\n'
+                        '                <action android:name="android.intent.action.MAIN"/>\n'
+                        '            </intent-filter>\n'
+                        '        </activity>\n'
+                        '    </application>\n'
+                        '</manifest>\n'
+                    )
+                },
+            )
 
             result, meta = decode_apk(apk, tdp / "o", ApktoolConfig(apktool_path=str(stub)))
             self.assertTrue(result.manifest_path)

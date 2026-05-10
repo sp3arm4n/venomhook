@@ -144,7 +144,10 @@ def find_apktool(env_var: str = APKTOOL_ENV_VAR) -> str:
     explicit = os.environ.get(env_var)
     if explicit:
         path = Path(explicit)
-        if path.is_file() and os.access(explicit, os.X_OK):
+        # X_OK is unreliable on Windows (NTFS has no POSIX exec bit), so on
+        # Windows we accept any regular file and let subprocess surface a
+        # real launch error if the path isn't actually runnable.
+        if path.is_file() and (os.name == "nt" or os.access(explicit, os.X_OK)):
             return explicit
         raise ApktoolNotFoundError(
             f"{env_var}={explicit!r} is set but does not point to an executable file"
@@ -207,6 +210,10 @@ def run_apktool_decode(
             check=False,
             capture_output=True,
             text=True,
+            # Pin UTF-8 so apktool's emoji/i18n output doesn't crash
+            # decoding under Windows cp949/cp1252 / non-UTF-8 POSIX locales.
+            encoding="utf-8",
+            errors="replace",
             timeout=cfg.timeout_sec,
         )
     except subprocess.TimeoutExpired as e:
