@@ -21,6 +21,7 @@ from venomhook.apk_extractor import (
     ABI_PREFERENCE,
     ApkExtractError,
     ApkMeta,
+    extract_all_native_libs,
     extract_apk_meta,
     extract_native_lib,
     select_abi,
@@ -210,6 +211,45 @@ class ExtractNativeLibTests(unittest.TestCase):
                 extract_native_lib(
                     apk, abi="armeabi-v7a", lib_name=None, dest_dir=tmp_path / "out"
                 )
+
+
+class ExtractAllNativeLibsTests(unittest.TestCase):
+    def test_extracts_every_so_in_abi(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            apk = _make_apk(
+                tmp_path,
+                {"arm64-v8a": ["libfoo.so", "libbar.so", "libbaz.so"],
+                 "x86_64": ["libfoo.so"]},
+            )
+            dest = tmp_path / "out"
+            paths = extract_all_native_libs(apk, "arm64-v8a", dest)
+            self.assertEqual(
+                [p.name for p in paths],
+                ["libbar.so", "libbaz.so", "libfoo.so"],
+            )
+            for p in paths:
+                self.assertTrue(p.exists())
+                self.assertTrue(p.read_bytes().startswith(b"\x7fELF"))
+
+    def test_does_not_pull_other_abi(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            apk = _make_apk(
+                tmp_path,
+                {"arm64-v8a": ["libfoo.so"],
+                 "x86_64": ["libsecret.so"]},
+            )
+            paths = extract_all_native_libs(apk, "arm64-v8a", tmp_path / "out")
+            names = {p.name for p in paths}
+            self.assertEqual(names, {"libfoo.so"})
+
+    def test_missing_abi_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            apk = _make_apk(tmp_path, {"arm64-v8a": ["libfoo.so"]})
+            with self.assertRaises(ApkExtractError):
+                extract_all_native_libs(apk, "armeabi-v7a", tmp_path / "out")
 
 
 class ErrorHandlingTests(unittest.TestCase):

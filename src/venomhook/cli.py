@@ -499,7 +499,10 @@ def main(argv: list[str] | None = None) -> None:
         help='ABI to extract for .so analysis ("auto"/"arm64-v8a"/etc.)',
     )
     audit_parser.add_argument(
-        "--apk-lib", type=str, help="Specific .so basename within ABI (default: first available)",
+        "--apk-lib", type=str,
+        help='Specific .so basename within ABI, or "all" to extract & analyse '
+        "every .so under the ABI (JNI bridge correlation runs against the "
+        "union of exports). Default: first available .so only.",
     )
     audit_parser.add_argument(
         "--out-dir", type=Path,
@@ -997,6 +1000,10 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
     if args.cache_dir:
         cache = AnalysisCache(args.cache_dir / "cache.db")
 
+    requested_all_libs = (
+        isinstance(args.apk_lib, str) and args.apk_lib.lower() == "all"
+    )
+
     def cache_replay_blocker(cached) -> str | None:
         if cached.app_meta is None:
             return "no decoded manifest"
@@ -1005,7 +1012,20 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
                 f"cached ABI is {cached.selected_abi or '<none>'}, "
                 f"requested {args.abi}"
             )
-        if args.apk_lib:
+        if requested_all_libs:
+            # Multi-lib request — cached rows that captured only the primary
+            # .so are insufficient. With SCHEMA_VERSION=3 a fresh "all" run
+            # populates additional_so_metas; pre-9-1 replays will be empty
+            # there and we want to redo the work.
+            siblings = cached.apk_meta.native_libs.get(
+                cached.selected_abi or "", []
+            )
+            if len(siblings) > 1 and not cached.additional_so_metas:
+                return (
+                    "cached analysis covered only the primary .so; "
+                    "--apk-lib all requested"
+                )
+        elif args.apk_lib:
             cached_lib = cached.so_meta.name if cached.so_meta else None
             if cached_lib != args.apk_lib:
                 return (
@@ -1049,13 +1069,14 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
                     args.apk,
                     work_dir,
                     abi=args.abi,
-                    lib_name=args.apk_lib,
+                    lib_name=None if requested_all_libs else args.apk_lib,
                     use_apktool=True,
                     use_jadx=not args.no_jadx,
                     apktool_config=apktool_config,
                     jadx_config=jadx_config,
                     fail_on_missing_tools=args.strict_tools,
                     require_native=False,
+                    analyze_all_libs=requested_all_libs,
                 )
             except AndroidPipelineError as e:
                 logging.error("android-audit failed: %s", e)

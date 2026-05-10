@@ -198,8 +198,13 @@ class FindingCardsTest(unittest.TestCase):
 
     def test_findings_ordered_critical_to_info(self) -> None:
         html = render_audit_html(_stub_analysis())
-        i_high = html.find("MANIFEST-001")
-        i_info = html.find("MANIFEST-007")
+        # Phase 9-3 added a taxonomy overview section that mentions every
+        # rule_id in pills BEFORE the finding cards. Search starting from
+        # the actual cards section so we measure card order, not pill order.
+        cards_start = html.find('class="findings-section"')
+        self.assertGreater(cards_start, 0, "findings-section must exist")
+        i_high = html.find("MANIFEST-001", cards_start)
+        i_info = html.find("MANIFEST-007", cards_start)
         self.assertGreater(i_info, i_high,
                            "INFO finding should appear after HIGH findings")
 
@@ -235,9 +240,14 @@ class PoCEmbeddingTest(unittest.TestCase):
         self.assertIn("개념 증명(PoC) 2건", card_html)
 
     def test_finding_with_no_poc_renders_zero_poc_section(self) -> None:
-        # MANIFEST-007 has no matching PoC in our stub
+        # MANIFEST-007 has no matching PoC in our stub. Phase 9-3 added a
+        # taxonomy pill section that mentions every rule_id BEFORE the cards;
+        # we narrow the lookup to within the findings-section so the assertion
+        # measures the card body, not the pill area.
         html = render_audit_html(_stub_analysis())
-        i007 = html.find("MANIFEST-007")
+        cards_start = html.find('class="findings-section"')
+        self.assertGreater(cards_start, 0)
+        i007 = html.find("MANIFEST-007", cards_start)
         self.assertNotEqual(i007, -1)
         next_section = html.find("</section>", i007)
         card_tail = html[i007:next_section]
@@ -449,6 +459,63 @@ class NativeStringsSectionTest(unittest.TestCase):
         html = render_audit_html(analysis)
         self.assertIn("URL 임베디드 (25건)", html)
         self.assertIn("외 5개 더", html)
+
+
+class TaxonomySectionTest(unittest.TestCase):
+    """Phase 9-3: MASVS category grouping in the HTML report."""
+
+    def test_taxonomy_section_renders_when_findings_present(self) -> None:
+        html = render_audit_html(_stub_analysis())
+        self.assertIn("카테고리별 분포", html)
+        # Stub analysis has MANIFEST-001 (RESILIENCE-1), MANIFEST-004
+        # (PLATFORM-1), and MANIFEST-007 (PRIVACY-1) — three distinct buckets.
+        self.assertIn("MASVS-RESILIENCE-1", html)
+        self.assertIn("MASVS-PLATFORM-1", html)
+        self.assertIn("MASVS-PRIVACY-1", html)
+        self.assertIn("3 카테고리", html)
+
+    def test_taxonomy_section_omitted_when_no_findings(self) -> None:
+        analysis = _stub_analysis()
+        analysis.audit_report.findings.clear()
+        analysis.code_audit_report = None
+        html = render_audit_html(analysis)
+        self.assertNotIn("카테고리별 분포", html)
+
+    def test_pills_carry_severity_class(self) -> None:
+        html = render_audit_html(_stub_analysis())
+        # MANIFEST-001 in the stub is HIGH; pill should carry the class
+        self.assertIn('class="pill sev-high"', html)
+        self.assertIn(">MANIFEST-001<", html)
+
+    def test_section_appears_before_findings_section(self) -> None:
+        # Reviewer should see the category overview before drilling into
+        # individual cards. Order is documented behavior.
+        html = render_audit_html(_stub_analysis())
+        cat_pos = html.find("카테고리별 분포")
+        find_pos = html.find("탐지된 취약점")
+        self.assertGreater(cat_pos, 0)
+        self.assertGreater(find_pos, 0)
+        self.assertLess(cat_pos, find_pos)
+
+    def test_code_findings_contribute_to_taxonomy(self) -> None:
+        # Inject one CODE-003 finding (weak crypto -> MASVS-CRYPTO-1) so the
+        # taxonomy section picks up the code-side mapping.
+        cf = CodeFinding(
+            rule_id="CODE-003",
+            severity="high",
+            title="weak cipher",
+            file="com/demo/Cipher.java",
+            line_no=42,
+            line_text='Cipher.getInstance("DES")',
+            class_fqn="com.demo.Cipher",
+            detail="weak primitive",
+            remediation="use AES/GCM",
+        )
+        analysis = _analysis_with_code_findings(code_findings=[cf])
+        html = render_audit_html(analysis)
+        self.assertIn("카테고리별 분포", html)
+        self.assertIn("MASVS-CRYPTO-1", html)
+        self.assertIn(">CODE-003<", html)
 
 
 if __name__ == "__main__":

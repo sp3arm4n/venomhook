@@ -45,6 +45,7 @@ from venomhook.models import (
     PoCArtifact,
 )
 from venomhook.native_strings import NativeStringHints
+from venomhook.rule_taxonomy import categorize_findings
 
 
 __all__ = [
@@ -179,6 +180,27 @@ table.tbl .no { color: var(--text-muted); }
 .warnings { background: var(--card-muted); border-left: 3px solid var(--sev-medium); padding: 10px 14px; margin-bottom: 16px; border-radius: 0 4px 4px 0; }
 .warnings ul { margin: 6px 0 0 0; padding-left: 20px; }
 .warnings li { font-size: 0.88em; }
+
+.taxonomy { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.taxonomy .cat {
+  background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+  padding: 12px 14px;
+}
+.taxonomy .cat .framework { font-size: 0.74em; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.6px; }
+.taxonomy .cat .key { font-family: ui-monospace, monospace; font-size: 0.92em; color: var(--accent); margin-top: 2px; }
+.taxonomy .cat .label { margin: 4px 0 8px 0; font-size: 0.88em; }
+.taxonomy .cat .pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.taxonomy .cat .pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--card-muted); border: 1px solid var(--border);
+  padding: 2px 8px; border-radius: 3px; font-size: 0.78em;
+  font-family: ui-monospace, monospace;
+}
+.taxonomy .cat .pill.sev-critical { border-left: 3px solid var(--sev-critical); }
+.taxonomy .cat .pill.sev-high { border-left: 3px solid var(--sev-high); }
+.taxonomy .cat .pill.sev-medium { border-left: 3px solid var(--sev-medium); }
+.taxonomy .cat .pill.sev-low { border-left: 3px solid var(--sev-low); }
+.taxonomy .cat .pill.sev-info { border-left: 3px solid var(--sev-info); }
 
 footer { margin-top: 48px; padding: 16px 0; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 0.82em; text-align: center; }
 """
@@ -546,6 +568,60 @@ def _render_native_strings_section(hints: NativeStringHints) -> str:
     )
 
 
+def _render_taxonomy_section(
+    audit: Optional[AndroidAuditReport],
+    code_audit: Optional[CodeAuditReport],
+) -> str:
+    """Phase 9-3: cross-rule grouping by OWASP MASVS category.
+
+    Surfaces a high-level overview alongside the severity bar so a
+    reviewer can see at a glance "this app has 3 NETWORK problems
+    and 2 STORAGE problems" without scrolling every finding card.
+    Empty render (returns "") when no rule_id has a category, which
+    keeps the report compact for clean apps.
+    """
+    findings: list[object] = []
+    if audit:
+        findings.extend(audit.findings)
+    if code_audit:
+        findings.extend(code_audit.findings)
+    if not findings:
+        return ""
+
+    groups = categorize_findings(findings)
+    if not groups:
+        return ""
+
+    cards: list[str] = []
+    # Group categories by framework so MASVS sits together (matters
+    # once Phase 8 adds CWE entries — same template, different
+    # framework key in each card).
+    for group in groups:
+        cat = group.category
+        pills = "".join(
+            f'<span class="pill sev-{escape(sev)}">'
+            f"{escape(rule_id)}</span>"
+            for rule_id, sev in group.finding_refs
+        )
+        cards.append(
+            '<div class="cat">'
+            f'<div class="framework">{escape(cat.framework)}</div>'
+            f'<div class="key">{escape(cat.key)}</div>'
+            f'<div class="label">{escape(cat.label)}</div>'
+            f'<div class="pills">{pills}</div>'
+            "</div>"
+        )
+
+    total = sum(g.count for g in groups)
+    return (
+        '<section class="taxonomy-section">'
+        f"<h2>카테고리별 분포 ({total}건 / {len(groups)} 카테고리)</h2>"
+        '<div class="taxonomy">'
+        + "".join(cards) +
+        "</div></section>"
+    )
+
+
 def _render_components_table(components: list[AndroidComponent]) -> str:
     if not components:
         return ""
@@ -583,23 +659,45 @@ def _render_components_table(components: list[AndroidComponent]) -> str:
     )
 
 
-def _render_bridges_table(bridges: list[JniBridge], limit: int = 50) -> str:
+def _render_bridges_table(
+    bridges: list[JniBridge],
+    limit: int = 50,
+    strings_by_symbol: Optional[dict[str, list[str]]] = None,
+) -> str:
     if not bridges:
         return ""
     matched = [b for b in bridges if b.matched_symbol]
     unmatched = [b for b in bridges if not b.matched_symbol]
     ordered = matched + unmatched
+    sbs = strings_by_symbol or {}
     rows = []
     for b in ordered[:limit]:
         jm = b.java_method
         sym = escape(b.matched_symbol) if b.matched_symbol else (
             '<span class="no">미매칭</span>'
         )
+        # Phase 9-4 — surface attributed-string evidence inline so the
+        # operator sees which bridges are crypto / network / debug
+        # candidates without flipping to a separate section. We only
+        # show up to 3 hints per row to keep the table compact;
+        # operators can read the full list in the JSON dump.
+        hints_html = ""
+        evidence = sbs.get(b.matched_symbol or "", [])[:3]
+        if evidence:
+            chips = "".join(
+                f'<span class="pill" style="font-size: 0.72em;">'
+                f"{escape(s[:48])}</span>"
+                for s in evidence
+            )
+            hints_html = (
+                '<div style="margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px;">'
+                + chips + "</div>"
+            )
         rows.append(
             f"<tr>"
             f'<td class="fqn">{escape(jm.class_fqn)}.{escape(jm.method_name)}</td>'
             f"<td>{len(jm.arg_types)}</td>"
-            f'<td class="mono">{sym}</td>'
+            f'<td class="mono">{sym}{hints_html}</td>'
             f"</tr>"
         )
     note = ""
@@ -691,6 +789,12 @@ def render_audit_html(
         + "</section>"
     )
 
+    # Phase 9-3 — taxonomy overview (MASVS for Android, CWE in future phases).
+    # Sits between the severity bar context and the per-rule cards so a
+    # reviewer can see category coverage before drilling into individual
+    # findings. Empty render is returned when no rule has a mapping.
+    taxonomy_section = _render_taxonomy_section(audit, analysis.code_audit_report)
+
     code_findings_section = ""
     if analysis.code_audit_report:
         code_findings_section = _render_code_findings_section(
@@ -715,10 +819,21 @@ def render_audit_html(
     bridges_section = ""
     if analysis.bridges:
         matched_count = sum(1 for b in analysis.bridges if b.matched_symbol)
+        attributed_count = sum(
+            1 for b in analysis.bridges
+            if b.matched_symbol and analysis.strings_by_symbol.get(b.matched_symbol)
+        )
+        attributed_note = ""
+        if attributed_count:
+            attributed_note = (
+                f' · <span style="color: var(--text-muted); font-size: 0.85em;">'
+                f"{attributed_count}개 브리지에 문자열 단서 첨부"
+                "</span>"
+            )
         bridges_section = (
             '<section class="bridges-section">'
-            f"<h2>JNI 브리지 ({matched_count}개 매칭 / {len(analysis.bridges)}개 선언)</h2>"
-            f"{_render_bridges_table(analysis.bridges)}"
+            f"<h2>JNI 브리지 ({matched_count}개 매칭 / {len(analysis.bridges)}개 선언){attributed_note}</h2>"
+            f"{_render_bridges_table(analysis.bridges, strings_by_symbol=analysis.strings_by_symbol)}"
             "</section>"
         )
 
@@ -740,6 +855,7 @@ def render_audit_html(
         f"{_render_summary_dl(analysis)}"
         "</header>"
         f"{warnings_html}"
+        f"{taxonomy_section}"
         f"{findings_section}"
         f"{code_findings_section}"
         f"{native_strings_section}"

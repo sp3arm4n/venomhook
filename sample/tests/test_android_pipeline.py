@@ -228,6 +228,243 @@ class TestAnalyzeApkBridgeCorrelation(unittest.TestCase):
             self.assertEqual(result.bridges, [])
 
 
+class TestAnalyzeApkMultiLib(unittest.TestCase):
+    """Phase 9-1: --apk-lib all extracts every .so and merges exports/strings."""
+
+    def test_analyze_all_libs_populates_additional_so_metas(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(
+                tdp,
+                {"arm64-v8a": ["libcrypto.so", "libssl.so", "libnetwork.so"]},
+            )
+
+            # Primary is libcrypto.so (sorted lex first).
+            def _meta_per_path(path):
+                name = Path(path).name
+                if name == "libcrypto.so":
+                    return _stub_binary_meta(str(path), ["Java_com_app_C_e", "JNI_OnLoad"])
+                if name == "libssl.so":
+                    return _stub_binary_meta(str(path), ["Java_com_app_S_handshake"])
+                if name == "libnetwork.so":
+                    return _stub_binary_meta(str(path), ["Java_com_app_N_connect"])
+                raise AssertionError(f"unexpected path: {path}")
+
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                side_effect=_meta_per_path,
+            ):
+                result = analyze_apk(
+                    apk,
+                    tdp / "work",
+                    use_apktool=False,
+                    use_jadx=False,
+                    analyze_all_libs=True,
+                )
+
+            self.assertIsNotNone(result.so_meta)
+            self.assertEqual(result.so_meta.name, "libcrypto.so")
+            self.assertEqual(len(result.additional_so_metas), 2)
+            extra_names = {m.name for m in result.additional_so_metas}
+            self.assertEqual(extra_names, {"libssl.so", "libnetwork.so"})
+            self.assertEqual(len(result.additional_so_paths), 2)
+            # all_so_metas convenience aggregates primary + extras
+            self.assertEqual(len(result.all_so_metas), 3)
+
+    def test_jni_bridges_correlate_against_union_of_exports(self):
+        """A JNI symbol exported only by a non-primary .so must still match."""
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(
+                tdp,
+                {"arm64-v8a": ["libcrypto.so", "libssl.so"]},
+            )
+
+            def _meta_per_path(path):
+                name = Path(path).name
+                if name == "libcrypto.so":
+                    return _stub_binary_meta(str(path), ["Java_com_app_Crypto_encrypt"])
+                if name == "libssl.so":
+                    # the SSL native belongs to a different .so
+                    return _stub_binary_meta(str(path), ["Java_com_app_Ssl_handshake"])
+                raise AssertionError(path)
+
+            stub_natives = [
+                JavaNativeMethod(
+                    class_fqn="com.app.Crypto", method_name="encrypt",
+                    return_type="void", arg_types=[],
+                ),
+                JavaNativeMethod(
+                    class_fqn="com.app.Ssl", method_name="handshake",
+                    return_type="void", arg_types=[],
+                ),
+            ]
+
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                side_effect=_meta_per_path,
+            ), mock.patch(
+                "venomhook.android_pipeline.decompile_apk",
+                return_value=(mock.MagicMock(), stub_natives),
+            ):
+                result = analyze_apk(
+                    apk,
+                    tdp / "work",
+                    use_apktool=False,
+                    analyze_all_libs=True,
+                )
+
+            self.assertEqual(len(result.matched_bridges), 2)
+            matched_syms = {b.matched_symbol for b in result.matched_bridges}
+            self.assertEqual(
+                matched_syms,
+                {"Java_com_app_Crypto_encrypt", "Java_com_app_Ssl_handshake"},
+            )
+
+    def test_skipped_libs_warning_suppressed_in_all_mode(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(
+                tdp,
+                {"arm64-v8a": ["libcrypto.so", "libssl.so"]},
+            )
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                side_effect=lambda p: _stub_binary_meta(str(p), []),
+            ):
+                result = analyze_apk(
+                    apk,
+                    tdp / "work",
+                    use_apktool=False,
+                    use_jadx=False,
+                    analyze_all_libs=True,
+                )
+            joined = " | ".join(result.warnings)
+            self.assertNotIn("--apk-lib", joined)
+            self.assertNotIn("만 분석되었습니다", joined)
+
+    def test_single_lib_mode_still_warns_about_siblings(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(
+                tdp,
+                {"arm64-v8a": ["libcrypto.so", "libssl.so"]},
+            )
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                return_value=_stub_binary_meta("/tmp/libcrypto.so", []),
+            ):
+                result = analyze_apk(
+                    apk,
+                    tdp / "work",
+                    use_apktool=False,
+                    use_jadx=False,
+                )
+            joined = " | ".join(result.warnings)
+            self.assertIn("--apk-lib", joined)
+
+    def test_strings_by_symbol_populated_when_bridges_match(self):
+        """Phase 9-4: bridge-matched JNI symbols receive co-locality hints."""
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp, {"arm64-v8a": ["libcrypto.so"]})
+
+            # Stub a binary whose .rodata yielded crypto + URL strings, so
+            # the categorizer fills both buckets.
+            def _meta(path):
+                m = _stub_binary_meta(
+                    str(path),
+                    ["Java_com_app_Crypto_encrypt", "JNI_OnLoad"],
+                )
+                m.strings = ["AES/CBC/PKCS5Padding", "http://a.example/cb", "MD5"]
+                return m
+
+            stub_natives = [
+                JavaNativeMethod(
+                    class_fqn="com.app.Crypto", method_name="encrypt",
+                    return_type="void", arg_types=[],
+                ),
+            ]
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                side_effect=_meta,
+            ), mock.patch(
+                "venomhook.android_pipeline.decompile_apk",
+                return_value=(mock.MagicMock(), stub_natives),
+            ):
+                result = analyze_apk(apk, tdp / "work", use_apktool=False)
+
+            attributed = result.strings_by_symbol.get("Java_com_app_Crypto_encrypt")
+            self.assertIsNotNone(attributed)
+            self.assertIn("AES/CBC/PKCS5Padding", attributed)
+            self.assertIn("MD5", attributed)
+            # URL must NOT bleed into a crypto-named symbol
+            self.assertNotIn("http://a.example/cb", attributed)
+
+    def test_strings_by_symbol_empty_when_no_hints(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp, {"arm64-v8a": ["libfoo.so"]})
+
+            def _meta(path):
+                m = _stub_binary_meta(str(path), ["Java_com_app_X_y"])
+                m.strings = ["nothing relevant"]
+                return m
+
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                side_effect=_meta,
+            ), mock.patch(
+                "venomhook.android_pipeline.decompile_apk",
+                return_value=(mock.MagicMock(), []),
+            ):
+                result = analyze_apk(apk, tdp / "work", use_apktool=False)
+
+            self.assertEqual(result.strings_by_symbol, {})
+
+    def test_extra_lief_failure_does_not_abort_run(self):
+        """Failure on a non-primary .so degrades gracefully with a warning.
+
+        Sort order makes ``libcrypto.so`` (lex-first) the primary; the
+        synthetically broken ``libzbroken.so`` is iterated as an extra,
+        so its parse failure is downgraded to a warning rather than
+        aborting the analysis.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(
+                tdp,
+                {"arm64-v8a": ["libcrypto.so", "libzbroken.so"]},
+            )
+            from venomhook.binary_meta import BinaryMetaError
+
+            def _meta_per_path(path):
+                name = Path(path).name
+                if name == "libcrypto.so":
+                    return _stub_binary_meta(str(path), ["JNI_OnLoad"])
+                raise BinaryMetaError(f"synthetic parse failure for {name}")
+
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                side_effect=_meta_per_path,
+            ):
+                result = analyze_apk(
+                    apk,
+                    tdp / "work",
+                    use_apktool=False,
+                    use_jadx=False,
+                    analyze_all_libs=True,
+                )
+
+            self.assertIsNotNone(result.so_meta)
+            self.assertEqual(result.so_meta.name, "libcrypto.so")
+            self.assertEqual(result.additional_so_metas, [])
+            self.assertTrue(
+                any("libzbroken.so" in w for w in result.warnings),
+                f"expected warning mentioning libzbroken.so, got {result.warnings!r}",
+            )
+
+
 class TestAnalyzeApkAbiSelection(unittest.TestCase):
     def test_explicit_abi(self):
         with tempfile.TemporaryDirectory() as td:
@@ -647,6 +884,43 @@ class AndroidAnalysisRoundtripTests(unittest.TestCase):
             restored = AndroidAnalysis.from_dict(d)
             self.assertIsNone(restored.audit_report)
             self.assertEqual(restored.pocs, [])
+
+    def test_round_trip_preserves_additional_so_metas(self):
+        """Phase 9-1: --apk-lib all payload with additional_so_metas survives round-trip."""
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(
+                tdp,
+                {"arm64-v8a": ["libcrypto.so", "libssl.so"]},
+            )
+
+            def _meta_per_path(path):
+                name = Path(path).name
+                if name == "libcrypto.so":
+                    return _stub_binary_meta(str(path), ["Java_com_app_C_e"])
+                if name == "libssl.so":
+                    return _stub_binary_meta(str(path), ["Java_com_app_S_h"])
+                raise AssertionError(path)
+
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                side_effect=_meta_per_path,
+            ):
+                original = analyze_apk(
+                    apk, tdp / "work",
+                    use_apktool=False, use_jadx=False,
+                    analyze_all_libs=True,
+                )
+            self.assertEqual(len(original.additional_so_metas), 1)
+            restored = AndroidAnalysis.from_dict(original.to_dict())
+            self.assertEqual(len(restored.additional_so_metas), 1)
+            self.assertEqual(
+                [m.name for m in restored.additional_so_metas],
+                ["libssl.so"],
+            )
+            self.assertEqual(
+                restored.additional_so_paths, original.additional_so_paths
+            )
 
     def test_round_trip_with_no_native_libs_branch(self):
         # Post-9d0dbca safety mode: selected_abi/extracted_so_path/so_meta
