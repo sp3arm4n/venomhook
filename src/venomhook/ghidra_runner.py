@@ -55,10 +55,15 @@ class GhidraRunner:
         logger.info("running Ghidra headless: %s", " ".join(cmd))
         # Pin UTF-8 so Ghidra's i18n stdout/stderr doesn't crash decoding
         # under Windows cp949/cp1252 or non-UTF-8 POSIX locales.
-        result = subprocess.run(
-            cmd, capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-        )
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+            )
+        except OSError as e:
+            raise RuntimeError(
+                f"could not exec Ghidra headless command at {cmd[0]!r}: {e}"
+            ) from e
         if result.returncode != 0:
             logger.error("Ghidra headless failed: %s", result.stderr)
             raise RuntimeError(f"Ghidra headless failed (code {result.returncode})")

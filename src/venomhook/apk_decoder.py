@@ -224,6 +224,10 @@ def run_apktool_decode(
         raise ApktoolNotFoundError(
             f"could not exec apktool binary at {binary!r}: {e}"
         ) from e
+    except OSError as e:
+        raise ApktoolRunError(
+            f"could not exec apktool binary at {binary!r}: {e}"
+        ) from e
 
     manifest = out / "AndroidManifest.xml"
     smali_present = any(out.glob("smali*"))

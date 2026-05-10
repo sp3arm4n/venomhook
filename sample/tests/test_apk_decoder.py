@@ -983,6 +983,21 @@ class TestRunApktoolDecode(unittest.TestCase):
             with self.assertRaises(ApktoolRunError):
                 run_apktool_decode(apk, tdp / "out", ApktoolConfig(apktool_path=str(stub)))
 
+    def test_launch_os_error_is_wrapped(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = tdp / "fake.apk"
+            apk.write_bytes(b"PK")
+            with mock.patch(
+                "venomhook.apk_decoder.subprocess.run",
+                side_effect=PermissionError("permission denied"),
+            ):
+                with self.assertRaises(ApktoolRunError) as ctx:
+                    run_apktool_decode(
+                        apk, tdp / "out", ApktoolConfig(apktool_path="/bad/apktool")
+                    )
+            self.assertIn("could not exec apktool binary", str(ctx.exception))
+
     def test_default_command_includes_force_and_o(self):
         with tempfile.TemporaryDirectory() as td:
             tdp = Path(td)

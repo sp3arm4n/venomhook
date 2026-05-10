@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -118,6 +119,17 @@ class PipelineTests(unittest.TestCase):
             runner = GhidraRunner(headless_cmd=[sys.executable, stub_script.as_posix()], post_script=None)
             runner.run(SAMPLE_STATIC_META, out_static)
             self.assertTrue(out_static.exists())
+
+    def test_ghidra_runner_wraps_launch_os_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runner = GhidraRunner(headless_cmd=["/bad/analyzeHeadless"], post_script=None)
+            with mock.patch(
+                "venomhook.ghidra_runner.subprocess.run",
+                side_effect=PermissionError("permission denied"),
+            ):
+                with self.assertRaises(RuntimeError) as ctx:
+                    runner.run(SAMPLE_STATIC_META, Path(tmpdir) / "out.json")
+            self.assertIn("could not exec Ghidra headless command", str(ctx.exception))
 
 
 if __name__ == "__main__":
