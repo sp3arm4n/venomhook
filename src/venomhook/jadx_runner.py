@@ -211,6 +211,10 @@ def run_jadx(
         raise JadxNotFoundError(
             f"could not exec jadx binary at {binary!r}: {e}"
         ) from e
+    except OSError as e:
+        raise JadxRunError(
+            f"could not exec jadx binary at {binary!r}: {e}"
+        ) from e
 
     java_files = sum(1 for _ in out.rglob("*.java"))
     stdout_tail = (completed.stdout or "")[-4096:]

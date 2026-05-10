@@ -1,6 +1,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
@@ -23,6 +24,15 @@ class OrchestratorTests(unittest.TestCase):
 
         cmd_str = run_frida("1234", Path("venomhook.js"), frida_path="frida", attach=True, dry_run=True)
         self.assertIn("-p 1234", cmd_str)
+
+    def test_run_frida_wraps_launch_os_error(self) -> None:
+        with mock.patch(
+            "venomhook.orchestrator.subprocess.run",
+            side_effect=PermissionError("permission denied"),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                run_frida("1234", Path("venomhook.js"), frida_path="/bad/frida", attach=True)
+        self.assertIn("could not exec frida binary", str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -457,6 +457,21 @@ class TestRunJadx(unittest.TestCase):
                 run_jadx(apk, tdp / "out", config=cfg)
             self.assertIn("exit=5", str(ctx.exception))
 
+    def test_launch_os_error_is_wrapped(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = tdp / "fake.apk"
+            apk.write_bytes(b"PK")
+            with mock.patch(
+                "venomhook.jadx_runner.subprocess.run",
+                side_effect=PermissionError("permission denied"),
+            ):
+                with self.assertRaises(JadxRunError) as ctx:
+                    run_jadx(
+                        apk, tdp / "out", config=JadxConfig(jadx_path="/bad/jadx")
+                    )
+            self.assertIn("could not exec jadx binary", str(ctx.exception))
+
     def test_partial_failure_with_output_is_accepted(self):
         # jadx returns non-zero on partial decompile; if .java exists, succeed.
         with tempfile.TemporaryDirectory() as td:
