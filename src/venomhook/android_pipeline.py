@@ -46,6 +46,7 @@ from venomhook.apk_decoder import (
 from venomhook.apk_extractor import (
     ApkExtractError,
     ApkMeta,
+    extract_all_native_libs,
     extract_apk_meta,
     extract_native_lib,
     select_abi,
@@ -115,6 +116,13 @@ class AndroidAnalysis:
     # when no native lib was analysed; otherwise present even with all-
     # empty buckets so the report shape stays stable.
     native_string_hints: Optional[NativeStringHints] = None
+    # Phase 9-1 — additional .so libraries beyond the primary one. Populated
+    # only when the caller passed analyze_all_libs=True (CLI: --apk-lib all).
+    # The primary .so stays in ``so_meta`` / ``extracted_so_path`` so legacy
+    # consumers keep working; ``additional_so_metas`` carries the rest in
+    # the same order as ``additional_so_paths``. Empty for single-lib runs.
+    additional_so_metas: list[BinaryMeta] = field(default_factory=list)
+    additional_so_paths: list[str] = field(default_factory=list)
 
     @property
     def matched_bridges(self) -> list[JniBridge]:
@@ -123,6 +131,21 @@ class AndroidAnalysis:
     @property
     def unmatched_bridges(self) -> list[JniBridge]:
         return [b for b in self.bridges if not b.is_matched]
+
+    @property
+    def all_so_metas(self) -> list[BinaryMeta]:
+        """Primary + additional .so metadata in a single iterable.
+
+        Convenience for HTML / PoC layers that should treat the bundle
+        uniformly. Single-lib runs return ``[so_meta]`` (or ``[]`` when
+        no native lib was analysed); multi-lib runs return the primary
+        followed by ``additional_so_metas``.
+        """
+        out: list[BinaryMeta] = []
+        if self.so_meta is not None:
+            out.append(self.so_meta)
+        out.extend(self.additional_so_metas)
+        return out
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AndroidAnalysis":
@@ -164,6 +187,11 @@ class AndroidAnalysis:
                 NativeStringHints.from_dict(nsh_data)
                 if nsh_data is not None else None
             ),
+            additional_so_metas=[
+                _BinaryMeta.from_dict(m)
+                for m in data.get("additional_so_metas", [])
+            ],
+            additional_so_paths=list(data.get("additional_so_paths", [])),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -185,6 +213,10 @@ class AndroidAnalysis:
                 self.native_string_hints.to_dict()
                 if self.native_string_hints else None
             ),
+            "additional_so_metas": [
+                m.to_dict() for m in self.additional_so_metas
+            ],
+            "additional_so_paths": list(self.additional_so_paths),
             "warnings": list(self.warnings),
         }
 
@@ -201,6 +233,7 @@ def analyze_apk(
     jadx_config: Optional[JadxConfig] = None,
     fail_on_missing_tools: bool = False,
     require_native: bool = True,
+    analyze_all_libs: bool = False,
 ) -> AndroidAnalysis:
     """Run the full Android-side static analysis pipeline on an APK.
 
@@ -224,6 +257,15 @@ def analyze_apk(
     extraction fails. Native fields are then None / empty and JNI bridge
     correlation is skipped.
 
+    `analyze_all_libs=True` (CLI: ``--apk-lib all``) extracts every ``.so``
+    under the selected ABI and runs lief on each. The first sorted .so still
+    fills ``so_meta`` / ``extracted_so_path`` for legacy consumers; the rest
+    populates ``additional_so_metas`` / ``additional_so_paths``. JNI bridge
+    correlation then matches against the union of every analysed .so's
+    exports, and ``native_string_hints`` is built from the merged string
+    pool. ``lib_name`` is ignored when this flag is set (the primary is
+    chosen by sort order, matching the single-lib default).
+
     Returns ``AndroidAnalysis``. Raises ``AndroidPipelineError`` on REQUIRED-
     step failures or (when strict) tool unavailability.
     """
@@ -242,6 +284,8 @@ def analyze_apk(
     selected_abi: Optional[str] = None
     so_path: Optional[Path] = None
     so_meta: Optional[BinaryMeta] = None
+    additional_so_metas: list[BinaryMeta] = []
+    additional_so_paths: list[str] = []
 
     if not apk_meta.abis:
         msg = f"APK lib/<abi>/ 하위에 네이티브 라이브러리가 없습니다: {apk}"
@@ -260,30 +304,43 @@ def analyze_apk(
 
         if selected_abi is not None:
             so_dir = work / "lib"
+            extracted_paths: list[Path] = []
             try:
-                so_path = extract_native_lib(apk, selected_abi, lib_name, so_dir)
+                if analyze_all_libs:
+                    extracted_paths = extract_all_native_libs(apk, selected_abi, so_dir)
+                    so_path = extracted_paths[0] if extracted_paths else None
+                else:
+                    so_path = extract_native_lib(apk, selected_abi, lib_name, so_dir)
+                    extracted_paths = [so_path] if so_path else []
             except ApkExtractError as e:
-                msg = f".so 추출 실패 (abi={selected_abi}, lib={lib_name}): {e}"
+                msg = (
+                    f".so 추출 실패 (abi={selected_abi}, "
+                    f"lib={'all' if analyze_all_libs else lib_name}): {e}"
+                )
                 if require_native:
                     raise AndroidPipelineError(msg) from e
                 warnings.append(f"{msg} — 네이티브 분석을 건너뜁니다")
 
-            # 본 파이프라인은 의도적으로 .so 1개만 분석합니다 (메모리/시간 상한
-            # 유지). 같은 ABI에 .so가 여러 개 있으면 선택 안 된 .so는 JNI 브리지
-            # 매칭에서 빠지는데, 운영자 입장에서는 "unmatched"가 많아 보이는데
-            # 그 이유를 모름. libsqlcipher / libssl 등 서드파티 .so에서 로드되는
-            # 클래스의 native 메소드가 그렇게 됩니다. 경고를 명시해 운영자가
-            # --apk-lib로 다시 실행할 수 있도록 안내.
+            # 본 파이프라인은 기본적으로 .so 1개만 분석합니다 (메모리/시간 상한
+            # 유지). --apk-lib all로 호출되면 같은 ABI 안의 모든 .so를 추출하고
+            # JNI 브리지 매칭도 union exports에 대해 수행하므로 이 경고는 띄우지
+            # 않습니다. 단일 .so 모드에서 sibling이 있을 때만 운영자에게 다시
+            # 실행하도록 안내.
             siblings = apk_meta.native_libs.get(selected_abi, [])
-            if so_path is not None and len(siblings) > 1:
+            if (
+                not analyze_all_libs
+                and so_path is not None
+                and len(siblings) > 1
+            ):
                 analyzed = so_path.name
                 others = [s for s in siblings if s != analyzed]
                 warnings.append(
                     f"'{analyzed}'만 분석되었습니다. APK는 '{selected_abi}' "
                     f"ABI에 {len(siblings)}개의 .so를 포함하고 있습니다 "
                     f"({', '.join(others)}). 빠진 .so를 분석하려면 --apk-lib "
-                    "<이름>으로 재실행하세요. 그쪽 .so를 로드하는 클래스의 JNI "
-                    "브리지는 본 보고서에서 'unmatched'로 표시됩니다."
+                    "<이름> 또는 --apk-lib all로 재실행하세요. 그쪽 .so를 "
+                    "로드하는 클래스의 JNI 브리지는 본 보고서에서 "
+                    "'unmatched'로 표시됩니다."
                 )
 
         # ----- Step 3: BinaryMeta of the .so (REQUIRED for JNI correlation) -----
@@ -295,6 +352,23 @@ def analyze_apk(
                 if require_native:
                     raise AndroidPipelineError(msg) from e
                 warnings.append(f"{msg} — 네이티브 분석을 건너뜁니다")
+
+            if analyze_all_libs and so_meta is not None:
+                # Run lief on each remaining .so. A failure on a non-primary
+                # library is recorded as a warning and the rest of the
+                # analysis continues — losing one library's exports degrades
+                # JNI correlation but does not invalidate the report.
+                for extra_path in extracted_paths[1:]:
+                    try:
+                        extra_meta = extract_binary_meta(extra_path)
+                    except BinaryMetaError as e:
+                        warnings.append(
+                            f"{extra_path}에 대한 binary_meta 추출 실패 "
+                            f"(계속 진행): {e}"
+                        )
+                        continue
+                    additional_so_metas.append(extra_meta)
+                    additional_so_paths.append(str(extra_path))
 
     # ----- Step 4: AndroidManifest decode (optional) -----
     app_meta: Optional[AndroidAppMeta] = None
@@ -340,7 +414,10 @@ def analyze_apk(
     bridges: list[JniBridge] = []
     if java_natives and so_meta is not None:
         bridges = build_bridges(java_natives)
-        correlate_symbols(bridges, so_meta.exports)
+        union_exports: list[str] = list(so_meta.exports)
+        for extra in additional_so_metas:
+            union_exports.extend(extra.exports)
+        correlate_symbols(bridges, union_exports)
 
     # ----- Step 7: manifest audit + PoC generation (Phase 3) -----
     audit_report: Optional[AndroidAuditReport] = None
@@ -371,7 +448,10 @@ def analyze_apk(
     # analyzed.
     native_string_hints: Optional[NativeStringHints] = None
     if so_meta is not None:
-        native_string_hints = categorize_strings(list(so_meta.strings))
+        merged_strings: list[str] = list(so_meta.strings)
+        for extra in additional_so_metas:
+            merged_strings.extend(extra.strings)
+        native_string_hints = categorize_strings(merged_strings)
 
     return AndroidAnalysis(
         apk_meta=apk_meta,
@@ -386,4 +466,6 @@ def analyze_apk(
         pocs=pocs,
         code_audit_report=code_audit_report,
         native_string_hints=native_string_hints,
+        additional_so_metas=additional_so_metas,
+        additional_so_paths=additional_so_paths,
     )

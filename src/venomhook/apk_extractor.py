@@ -28,6 +28,7 @@ __all__ = [
     "extract_apk_meta",
     "select_abi",
     "extract_native_lib",
+    "extract_all_native_libs",
     "ABI_PREFERENCE",
 ]
 
@@ -222,3 +223,55 @@ def extract_native_lib(
         raise ApkExtractError(f"corrupt APK archive: {p}: {e}") from e
 
     return out_path
+
+
+def extract_all_native_libs(
+    apk_path: str | Path,
+    abi: str,
+    dest_dir: str | Path,
+) -> list[Path]:
+    """Extract every ``.so`` under ``lib/<abi>/`` to ``dest_dir``.
+
+    Returns the extracted paths sorted lexicographically (stable across
+    runs). Used by the multi-.so pipeline path (``--apk-lib all``) when
+    operators want JNI bridge correlation against every native library
+    the APK ships, not just the first one.
+
+    Same overwrite semantics as ``extract_native_lib``: existing files
+    of the same name are silently replaced. The caller is expected to
+    pass a clean directory when overwrite is undesired.
+
+    Raises ApkExtractError when no ``.so`` files exist for the ABI or
+    the archive itself is corrupt.
+    """
+    p = Path(apk_path).resolve()
+    dest = Path(dest_dir).resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+
+    if not zipfile.is_zipfile(p):
+        raise ApkExtractError(f"not a valid APK (ZIP) archive: {p}")
+
+    prefix = f"lib/{abi}/"
+    out_paths: list[Path] = []
+    try:
+        with zipfile.ZipFile(p, "r") as zf:
+            candidates = sorted(
+                e for e in zf.namelist() if e.startswith(prefix) and e.endswith(".so")
+            )
+            if not candidates:
+                raise ApkExtractError(
+                    f"no .so files in {prefix} (APK={p}); did you select the right ABI?"
+                )
+            for entry in candidates:
+                out_path = dest / Path(entry).name
+                with zf.open(entry, "r") as src, out_path.open("wb") as out:
+                    while True:
+                        chunk = src.read(64 * 1024)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                out_paths.append(out_path)
+    except zipfile.BadZipFile as e:
+        raise ApkExtractError(f"corrupt APK archive: {p}: {e}") from e
+
+    return out_paths

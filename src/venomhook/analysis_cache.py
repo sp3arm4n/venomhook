@@ -47,7 +47,11 @@ __all__ = [
 # Bumped whenever AndroidAnalysis.to_dict() changes shape incompatibly.
 # Phase 7 added code_audit_report and native_string_hints; keeping the old
 # version would let pre-Phase-7 cache rows replay without code findings.
-SCHEMA_VERSION = 2
+# Phase 9-1 added additional_so_metas / additional_so_paths for the
+# --apk-lib all path; without the bump a v2 single-lib payload could be
+# replayed for an --apk-lib all request and silently miss the extra .so
+# data the new request actually wanted.
+SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
