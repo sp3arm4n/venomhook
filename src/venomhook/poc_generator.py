@@ -216,6 +216,56 @@ def _build_cleartext(meta: AndroidAppMeta, finding: ManifestFinding) -> list[PoC
     ]
 
 
+def _build_user_cert_trust(meta: AndroidAppMeta, finding: ManifestFinding) -> list[PoCArtifact]:
+    """MANIFEST-010 PoC — push a user CA, then route the device through mitmproxy.
+
+    base-config가 user CA를 신뢰하면 단말에 mitmproxy 인증서를 설치해
+    프록시 경로로 라우팅하기만 해도 모든 TLS 트래픽이 평문으로 보입니다.
+    이 시나리오는 user 인증서 설치 + 프록시 설정 + 앱 실행을 한 시퀀스로
+    묶어 운영자가 즉시 검증할 수 있게 합니다.
+    """
+    pkg = meta.package_name or "<package>"
+    return [
+        PoCArtifact(
+            rule_id=finding.rule_id,
+            title="mitmproxy 사용자 CA 설치 후 TLS 가로채기",
+            severity=finding.severity,
+            kind="shell",
+            package_name=pkg,
+            description=(
+                "NSC base-config가 user 인증서 trust-anchors에 포함된 경우, "
+                "단말에 mitmproxy의 ca-cert.pem을 user 인증서로 설치하고 "
+                "단말의 Wi-Fi 프록시를 mitmproxy로 향하게 하면 핀닝이 별도로 "
+                "걸리지 않은 모든 호스트의 TLS 통신을 그대로 가로챌 수 "
+                "있습니다. 본 PoC는 그 시퀀스를 한 번에 실행합니다."
+            ),
+            commands=[
+                "# 1) mitmproxy 실행 (Listen 8080)",
+                "mitmproxy --listen-port 8080 --mode regular",
+                "# 2) mitmproxy CA 인증서를 단말로 push",
+                "adb push ~/.mitmproxy/mitmproxy-ca-cert.cer /sdcard/mitmproxy.cer",
+                "# 3) 단말에서: 설정 > 보안 > 인증서 설치 > '단말기에서' > "
+                "/sdcard/mitmproxy.cer 선택 (사용자 인증서로 설치)",
+                "# 4) 단말 Wi-Fi 프록시를 host=<PC IP> port=8080으로 수동 설정",
+                _adb_shell(["am", "start", "-n", f"{pkg}/.MainActivity"]),
+                "# 5) mitmproxy 콘솔에서 TLS 평문화된 요청/응답 확인",
+            ],
+            expected_evidence=(
+                "mitmproxy에 https:// URL, 헤더, JSON 본문이 그대로 표시됩니다. "
+                "TLS handshake에서 mitmproxy CA로 발급한 사설 인증서를 단말이 "
+                "수락한 결과입니다. 핀닝이 추가로 걸린 호스트는 여전히 차단됩니다."
+            ),
+            notes=(
+                "Android 7+ (API 24+)부터 base-config 기본값이 user 인증서 "
+                "비신뢰입니다 — 본 룰은 명시적 opt-in이 있을 때만 발동합니다. "
+                "release 빌드에서 발견되면 디버그 NSC가 같이 패키징되었을 "
+                "가능성이 큽니다."
+            ),
+            references=list(finding.references),
+        ),
+    ]
+
+
 def _build_allow_backup(meta: AndroidAppMeta, finding: ManifestFinding) -> list[PoCArtifact]:
     pkg = meta.package_name or "<package>"
     return [
@@ -955,6 +1005,7 @@ PER_RULE_BUILDERS: dict[str, Callable[[AndroidAppMeta, ManifestFinding], list[Po
     "MANIFEST-004": _build_exported_no_permission,
     "MANIFEST-005": _build_exported_provider,
     "MANIFEST-006": _build_grant_uri,
+    "MANIFEST-010": _build_user_cert_trust,
 }
 
 

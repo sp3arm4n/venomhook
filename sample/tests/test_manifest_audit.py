@@ -413,6 +413,39 @@ class TestTargetSdk(unittest.TestCase):
         self.assertNotIn("MANIFEST-009", _ids(report))
 
 
+# ---------- MANIFEST-010 NSC user-cert trust ----------
+
+
+class TestUserCertTrust(unittest.TestCase):
+    def test_user_cert_trust_triggers_high(self):
+        report = audit_manifest(_meta(
+            network_security_config="@xml/nsc",
+            nsc=NetworkSecurityConfigMeta(base_trusts_user_certs=True),
+        ))
+        m010 = [f for f in report.findings if f.rule_id == "MANIFEST-010"]
+        self.assertEqual(len(m010), 1)
+        self.assertEqual(m010[0].severity, SEV_HIGH)
+        self.assertIn("사용자 설치 CA", m010[0].title)
+
+    def test_user_cert_trust_false_does_not_trigger(self):
+        report = audit_manifest(_meta(
+            network_security_config="@xml/nsc",
+            nsc=NetworkSecurityConfigMeta(base_trusts_user_certs=False),
+        ))
+        self.assertNotIn("MANIFEST-010", _ids(report))
+
+    def test_no_nsc_does_not_trigger(self):
+        report = audit_manifest(_meta(network_security_config=None, nsc=None))
+        self.assertNotIn("MANIFEST-010", _ids(report))
+
+    def test_nsc_present_but_field_unset_does_not_trigger(self):
+        report = audit_manifest(_meta(
+            network_security_config="@xml/nsc",
+            nsc=NetworkSecurityConfigMeta(),  # base_trusts_user_certs default False
+        ))
+        self.assertNotIn("MANIFEST-010", _ids(report))
+
+
 # ---------- AndroidAuditReport ----------
 
 

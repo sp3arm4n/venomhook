@@ -415,6 +415,45 @@ def _check_min_sdk(meta: AndroidAppMeta) -> list[ManifestFinding]:
     )]
 
 
+def _check_user_cert_trust(meta: AndroidAppMeta) -> list[ManifestFinding]:
+    """MANIFEST-010: NSC base-config trusts user-installed CA certificates.
+
+    Apps that opt user-installed CAs into the trust chain (via
+    ``<base-config><trust-anchors><certificates src="user"/></trust-anchors>``)
+    let any device-side mitmproxy / Charles install survive cert pinning
+    fallthrough — it's a one-line MITM gate. Phase 7-3 already captured
+    the flag on NetworkSecurityConfigMeta; this rule just surfaces it
+    with an actionable PoC reference.
+    """
+    nsc = meta.nsc
+    if nsc is None or not nsc.base_trusts_user_certs:
+        return []
+    return [ManifestFinding(
+        rule_id="MANIFEST-010",
+        title="NSC base-config가 사용자 설치 CA를 신뢰",
+        severity=SEV_HIGH,
+        detail=(
+            "network_security_config.xml의 base-config가 "
+            "<certificates src=\"user\"/>를 trust-anchors에 포함하고 있습니다. "
+            "단말에 사용자 CA를 설치한 공격자(mitmproxy / Charles 등)는 "
+            "TLS 핀닝이 별도로 걸려 있지 않은 모든 호스트로의 통신을 "
+            "그대로 가로챌 수 있습니다. 디버그 빌드에서 자주 남겨두는 "
+            "설정이지만 release 빌드에서는 위험합니다."
+        ),
+        remediation=(
+            "release 빌드의 base-config에서 user 인증서 신뢰를 제거하세요. "
+            "디버그 전용 신뢰가 필요하면 별도 NSC를 두고 "
+            "AndroidManifest의 debuggable=true 변형 빌드에만 적용하세요. "
+            "특정 호스트만 직접 핀닝해야 하면 domain-config + pin-set "
+            "조합을 권장합니다."
+        ),
+        references=[
+            "OWASP MASVS-NETWORK-1",
+            "https://developer.android.com/training/articles/security-config",
+        ],
+    )]
+
+
 def _check_target_sdk(meta: AndroidAppMeta) -> list[ManifestFinding]:
     if meta.target_sdk is None or meta.target_sdk >= MIN_RECOMMENDED_TARGET_SDK:
         return []
@@ -447,6 +486,7 @@ RULES: list[Callable[[AndroidAppMeta], list[ManifestFinding]]] = [
     _check_dangerous_permissions,
     _check_min_sdk,
     _check_target_sdk,
+    _check_user_cert_trust,
 ]
 
 

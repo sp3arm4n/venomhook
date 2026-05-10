@@ -29,6 +29,7 @@ from venomhook.models import (
     IntentDataSpec,
     IntentFilter,
     ManifestFinding,
+    NetworkSecurityConfigMeta,
     PoCArtifact,
 )
 from venomhook.poc_generator import (
@@ -169,6 +170,24 @@ class CleartextBuilderTests(unittest.TestCase):
         a = arts[0]
         self.assertEqual(a.kind, "shell")
         self.assertTrue(any("mitmproxy" in c for c in a.commands))
+
+
+class UserCertTrustBuilderTests(unittest.TestCase):
+    def test_mitmproxy_user_cert_recipe_emitted(self) -> None:
+        meta = _meta(
+            network_security_config="@xml/nsc",
+            nsc=NetworkSecurityConfigMeta(base_trusts_user_certs=True),
+        )
+        arts = generate_pocs(meta, audit_manifest(meta))
+        m010_arts = [a for a in arts if a.rule_id == "MANIFEST-010"]
+        self.assertEqual(len(m010_arts), 1)
+        a = m010_arts[0]
+        self.assertEqual(a.kind, "shell")
+        self.assertEqual(a.severity, "high")
+        commands = " ".join(a.commands)
+        self.assertIn("mitmproxy", commands)
+        self.assertIn("mitmproxy.cer", commands)
+        self.assertIn("am start", commands)
 
 
 class AllowBackupBuilderTests(unittest.TestCase):
@@ -650,10 +669,13 @@ class GrantUriBuilderTests(unittest.TestCase):
 
 
 class CoverageMatrixTests(unittest.TestCase):
-    def test_builders_cover_001_through_006(self) -> None:
+    def test_builders_cover_001_through_006_and_010(self) -> None:
+        # MANIFEST-007..009 are informational (no PoC); MANIFEST-010 is the
+        # NSC user-cert trust rule added in Phase 9-2 with a mitmproxy CA
+        # install recipe. Keep this matrix in sync as new rules land.
         self.assertEqual(
             set(PER_RULE_BUILDERS),
-            {f"MANIFEST-00{i}" for i in range(1, 7)},
+            {f"MANIFEST-00{i}" for i in range(1, 7)} | {"MANIFEST-010"},
         )
 
     def test_informational_rules_emit_nothing(self) -> None:
