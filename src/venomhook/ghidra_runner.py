@@ -53,7 +53,12 @@ class GhidraRunner:
     def run(self, binary_path: Path, out_static_meta: Path) -> None:
         cmd = self.build_command(binary_path, out_static_meta)
         logger.info("running Ghidra headless: %s", " ".join(cmd))
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # Pin UTF-8 so Ghidra's i18n stdout/stderr doesn't crash decoding
+        # under Windows cp949/cp1252 or non-UTF-8 POSIX locales.
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
         if result.returncode != 0:
             logger.error("Ghidra headless failed: %s", result.stderr)
             raise RuntimeError(f"Ghidra headless failed (code {result.returncode})")

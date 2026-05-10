@@ -113,7 +113,9 @@ class PipelineTests(unittest.TestCase):
                 "import shutil; shutil.copy(src, dst)\n",
                 encoding="utf-8",
             )
-            runner = GhidraRunner(headless_cmd=["python3", stub_script.as_posix()], post_script=None)
+            # Use sys.executable instead of "python3" so the test works on
+            # Windows (where the launcher is `python.exe`, not `python3`).
+            runner = GhidraRunner(headless_cmd=[sys.executable, stub_script.as_posix()], post_script=None)
             runner.run(SAMPLE_STATIC_META, out_static)
             self.assertTrue(out_static.exists())
 

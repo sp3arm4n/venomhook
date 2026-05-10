@@ -18,6 +18,9 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _subproc_stub import make_stub_executable
 
 from venomhook.jadx_runner import (
     JADX_ENV_VAR,
@@ -421,27 +424,18 @@ class TestRunJadx(unittest.TestCase):
             tdp = Path(td)
             apk = tdp / "fake.apk"
             apk.write_bytes(b"PK\x03\x04stub")  # any non-empty file
-            stub = tdp / "stub-jadx.sh"
-            stub.write_text(textwrap.dedent("""\
-                #!/bin/sh
-                # Args: -d OUTDIR ... apk_path
-                # We naively grep for -d position.
-                while [ $# -gt 0 ]; do
-                    case "$1" in
-                        -d) shift; OUT="$1"; shift; ;;
-                        *) shift; ;;
-                    esac
-                done
-                mkdir -p "$OUT/sources/com/x"
-                cat > "$OUT/sources/com/x/Stub.java" <<EOF
-                package com.x;
-                public class Stub {
-                    public native int stub();
-                }
-                EOF
-                exit 0
-            """))
-            stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+            stub = make_stub_executable(
+                tdp / "stub-jadx",
+                out_flag="-d",
+                files={
+                    "sources/com/x/Stub.java": (
+                        "package com.x;\n"
+                        "public class Stub {\n"
+                        "    public native int stub();\n"
+                        "}\n"
+                    )
+                },
+            )
 
             cfg = JadxConfig(jadx_path=str(stub))
             result = run_jadx(apk, tdp / "out", config=cfg)
@@ -454,9 +448,9 @@ class TestRunJadx(unittest.TestCase):
             tdp = Path(td)
             apk = tdp / "fake.apk"
             apk.write_bytes(b"PK\x03\x04stub")
-            failing = tdp / "fail-jadx.sh"
-            failing.write_text("#!/bin/sh\necho boom >&2\nexit 5\n")
-            failing.chmod(failing.stat().st_mode | stat.S_IXUSR)
+            failing = make_stub_executable(
+                tdp / "fail-jadx", exit_code=5, stderr_text="boom\n"
+            )
 
             cfg = JadxConfig(jadx_path=str(failing))
             with self.assertRaises(JadxRunError) as ctx:
@@ -469,21 +463,12 @@ class TestRunJadx(unittest.TestCase):
             tdp = Path(td)
             apk = tdp / "fake.apk"
             apk.write_bytes(b"PK")
-            partial = tdp / "partial-jadx.sh"
-            partial.write_text(textwrap.dedent("""\
-                #!/bin/sh
-                while [ $# -gt 0 ]; do
-                    case "$1" in
-                        -d) shift; OUT="$1"; shift; ;;
-                        *) shift; ;;
-                    esac
-                done
-                mkdir -p "$OUT"
-                echo "package x;" > "$OUT/X.java"
-                echo "class X {}" >> "$OUT/X.java"
-                exit 1
-            """))
-            partial.chmod(partial.stat().st_mode | stat.S_IXUSR)
+            partial = make_stub_executable(
+                tdp / "partial-jadx",
+                out_flag="-d",
+                files={"X.java": "package x;\nclass X {}\n"},
+                exit_code=1,
+            )
             cfg = JadxConfig(jadx_path=str(partial))
             result = run_jadx(apk, tdp / "out", config=cfg)
             self.assertEqual(result.returncode, 1)
@@ -561,26 +546,19 @@ class TestDecompileApk(unittest.TestCase):
             apk = tdp / "fake.apk"
             apk.write_bytes(b"PK")
 
-            stub = tdp / "stub-jadx.sh"
-            stub.write_text(textwrap.dedent("""\
-                #!/bin/sh
-                while [ $# -gt 0 ]; do
-                    case "$1" in
-                        -d) shift; OUT="$1"; shift; ;;
-                        *) shift; ;;
-                    esac
-                done
-                mkdir -p "$OUT/sources/com/p"
-                cat > "$OUT/sources/com/p/A.java" <<'EOF'
-                package com.p;
-                public class A {
-                    public native String tok();
-                    public native byte[] enc(byte[] x, int n);
-                }
-                EOF
-                exit 0
-            """))
-            stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+            stub = make_stub_executable(
+                tdp / "stub-jadx",
+                out_flag="-d",
+                files={
+                    "sources/com/p/A.java": (
+                        "package com.p;\n"
+                        "public class A {\n"
+                        "    public native String tok();\n"
+                        "    public native byte[] enc(byte[] x, int n);\n"
+                        "}\n"
+                    )
+                },
+            )
 
             result, natives = decompile_apk(apk, tdp / "o", config=JadxConfig(jadx_path=str(stub)))
             self.assertEqual(result.returncode, 0)
