@@ -1,4 +1,5 @@
 venv/
+venv-win/
 build/
 dist/
 __pycache__/
