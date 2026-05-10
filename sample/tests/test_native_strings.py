@@ -16,7 +16,9 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from venomhook.native_strings import (
     NativeStringHints,
+    attribute_strings_by_symbol_name,
     categorize_strings,
+    classify_symbol_name,
     summarize_hints,
 )
 
@@ -174,6 +176,107 @@ class SummarizeHintsTests(unittest.TestCase):
         self.assertIn("URL", out)
         self.assertIn("crypto", out)
         self.assertIn("shell", out)
+
+
+class ClassifySymbolNameTests(unittest.TestCase):
+    """Phase 9-4: symbol-name -> category set."""
+
+    def test_jni_crypto_symbol_classifies_as_crypto(self) -> None:
+        cats = classify_symbol_name("Java_com_app_Crypto_encrypt")
+        self.assertIn("crypto", cats)
+
+    def test_jni_log_symbol_classifies_as_debug(self) -> None:
+        cats = classify_symbol_name("Java_com_app_Logger_logSession")
+        self.assertIn("debug", cats)
+
+    def test_jni_url_symbol_classifies_as_urls(self) -> None:
+        cats = classify_symbol_name("Java_com_app_Net_fetchUrl")
+        self.assertIn("urls", cats)
+
+    def test_camelcase_split_works(self) -> None:
+        # "encryptPayload" should still be picked up — split on case
+        cats = classify_symbol_name("encryptPayload")
+        self.assertIn("crypto", cats)
+
+    def test_obfuscated_returns_empty(self) -> None:
+        # Single-char names commonly produced by ProGuard / R8 must NOT
+        # match anything — better to under-attribute than guess.
+        self.assertEqual(classify_symbol_name("a"), frozenset())
+        self.assertEqual(classify_symbol_name("Java_a_b_c"), frozenset())
+
+    def test_empty_string_safe(self) -> None:
+        self.assertEqual(classify_symbol_name(""), frozenset())
+
+    def test_token_boundary_check(self) -> None:
+        # "key" is a category token but should NOT fire on "monkey"
+        # (substring without word boundary).
+        self.assertNotIn("crypto", classify_symbol_name("monkey"))
+        # As a JNI export "Java_x_apiKey" SHOULD fire
+        self.assertIn("crypto", classify_symbol_name("Java_x_apiKey"))
+
+
+class AttributeStringsBySymbolNameTests(unittest.TestCase):
+    """Phase 9-4: co-locality attribution."""
+
+    def test_crypto_symbol_gets_crypto_strings(self) -> None:
+        hints = NativeStringHints(
+            crypto=["AES/CBC/PKCS5Padding", "MD5"],
+            urls=["http://a.example"],
+        )
+        out = attribute_strings_by_symbol_name(
+            ["Java_com_app_Cipher_encrypt"], hints
+        )
+        self.assertIn("Java_com_app_Cipher_encrypt", out)
+        attr = out["Java_com_app_Cipher_encrypt"]
+        self.assertIn("AES/CBC/PKCS5Padding", attr)
+        self.assertIn("MD5", attr)
+        # URL must not be attributed to a crypto-named symbol
+        self.assertNotIn("http://a.example", attr)
+
+    def test_url_symbol_gets_url_strings(self) -> None:
+        hints = NativeStringHints(
+            urls=["http://api.example/x"],
+            crypto=["AES/CBC"],
+        )
+        out = attribute_strings_by_symbol_name(
+            ["Java_com_app_Net_fetchUrl"], hints
+        )
+        self.assertEqual(
+            out["Java_com_app_Net_fetchUrl"], ["http://api.example/x"]
+        )
+
+    def test_obfuscated_symbol_dropped(self) -> None:
+        hints = NativeStringHints(crypto=["AES/CBC"])
+        out = attribute_strings_by_symbol_name(["Java_a_b_c"], hints)
+        self.assertEqual(out, {})
+
+    def test_empty_hints_returns_empty(self) -> None:
+        out = attribute_strings_by_symbol_name(
+            ["Java_x_encrypt"], NativeStringHints()
+        )
+        self.assertEqual(out, {})
+
+    def test_cap_per_symbol_respected(self) -> None:
+        hints = NativeStringHints(
+            crypto=[f"AES_{i}" for i in range(20)],
+        )
+        out = attribute_strings_by_symbol_name(
+            ["Java_x_encrypt"], hints, cap_per_symbol=5,
+        )
+        self.assertEqual(len(out["Java_x_encrypt"]), 5)
+
+    def test_multi_category_symbol_collects_from_each_bucket(self) -> None:
+        # "tokenLog" matches secret_hints (token) AND debug (log)
+        hints = NativeStringHints(
+            secret_hints=["api_key=abc"],
+            debug=["assertion failed"],
+            crypto=["AES/CBC"],   # should NOT appear (no crypto in name)
+        )
+        out = attribute_strings_by_symbol_name(["Java_x_tokenLog"], hints)
+        attr = out["Java_x_tokenLog"]
+        self.assertIn("api_key=abc", attr)
+        self.assertIn("assertion failed", attr)
+        self.assertNotIn("AES/CBC", attr)
 
 
 if __name__ == "__main__":

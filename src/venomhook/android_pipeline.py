@@ -69,7 +69,11 @@ from venomhook.models import (
     JniBridge,
     PoCArtifact,
 )
-from venomhook.native_strings import NativeStringHints, categorize_strings
+from venomhook.native_strings import (
+    NativeStringHints,
+    attribute_strings_by_symbol_name,
+    categorize_strings,
+)
 from venomhook.poc_generator import generate_code_pocs, generate_pocs
 
 
@@ -123,6 +127,12 @@ class AndroidAnalysis:
     # the same order as ``additional_so_paths``. Empty for single-lib runs.
     additional_so_metas: list[BinaryMeta] = field(default_factory=list)
     additional_so_paths: list[str] = field(default_factory=list)
+    # Phase 9-4 — co-locality string attribution per JNI export symbol.
+    # Map symbol name -> list of pentest-relevant strings whose category
+    # bucket matches the symbol name's inferred category. Heuristic only
+    # (name-driven, not RVA / xref-based) — see native_strings module
+    # docstring. Empty when no symbols classify or hints have no buckets.
+    strings_by_symbol: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def matched_bridges(self) -> list[JniBridge]:
@@ -192,6 +202,9 @@ class AndroidAnalysis:
                 for m in data.get("additional_so_metas", [])
             ],
             additional_so_paths=list(data.get("additional_so_paths", [])),
+            strings_by_symbol={
+                k: list(v) for k, v in (data.get("strings_by_symbol") or {}).items()
+            },
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -217,6 +230,9 @@ class AndroidAnalysis:
                 m.to_dict() for m in self.additional_so_metas
             ],
             "additional_so_paths": list(self.additional_so_paths),
+            "strings_by_symbol": {
+                k: list(v) for k, v in self.strings_by_symbol.items()
+            },
             "warnings": list(self.warnings),
         }
 
@@ -447,11 +463,37 @@ def analyze_apk(
     # crypto algorithm names, secret-shaped tokens). None when no .so was
     # analyzed.
     native_string_hints: Optional[NativeStringHints] = None
+    strings_by_symbol: dict[str, list[str]] = {}
     if so_meta is not None:
         merged_strings: list[str] = list(so_meta.strings)
         for extra in additional_so_metas:
             merged_strings.extend(extra.strings)
         native_string_hints = categorize_strings(merged_strings)
+
+        # Phase 9-4 — symbol-name co-locality attribution. Operate over the
+        # union of every analysed .so's exports so multi-lib runs surface
+        # bridges in libssl.so / libsqlcipher.so alongside the primary.
+        # Bridge-matched symbols only when bridges exist; otherwise fall
+        # back to all exports (audit consumers without jadx still get
+        # advisory hints).
+        candidate_symbols: list[str] = []
+        if bridges:
+            seen_syms: set[str] = set()
+            for b in bridges:
+                if b.matched_symbol and b.matched_symbol not in seen_syms:
+                    seen_syms.add(b.matched_symbol)
+                    candidate_symbols.append(b.matched_symbol)
+        else:
+            seen_syms = set()
+            for meta_obj in [so_meta, *additional_so_metas]:
+                for sym in meta_obj.exports:
+                    if sym.startswith("Java_") and sym not in seen_syms:
+                        seen_syms.add(sym)
+                        candidate_symbols.append(sym)
+        if candidate_symbols and not native_string_hints.is_empty:
+            strings_by_symbol = attribute_strings_by_symbol_name(
+                candidate_symbols, native_string_hints
+            )
 
     return AndroidAnalysis(
         apk_meta=apk_meta,
@@ -468,4 +510,5 @@ def analyze_apk(
         native_string_hints=native_string_hints,
         additional_so_metas=additional_so_metas,
         additional_so_paths=additional_so_paths,
+        strings_by_symbol=strings_by_symbol,
     )

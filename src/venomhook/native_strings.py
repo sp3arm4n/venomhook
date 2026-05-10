@@ -41,6 +41,8 @@ __all__ = [
     "NativeStringHints",
     "categorize_strings",
     "summarize_hints",
+    "classify_symbol_name",
+    "attribute_strings_by_symbol_name",
 ]
 
 
@@ -202,6 +204,152 @@ def categorize_strings(strings: list[str]) -> NativeStringHints:
             _add("debug", s)
 
     return hints
+
+
+# --------------------------------------------------------------------------
+# Phase 9-4 — symbol-name based string attribution (co-locality heuristic)
+# --------------------------------------------------------------------------
+#
+# True per-symbol attribution requires disassembling the .text section to
+# trace which functions reference which .rodata literals (ADRP+ADD on ARM64,
+# RIP-rel LEA on x86-64). That's a Capstone-class task and not in scope for
+# Phase 9-4 — what we deliver instead is **co-locality by category**:
+#
+#   1. classify_symbol_name() infers a category set from the export name's
+#      tokens ("Java_X_encrypt" -> {"crypto"}; "Java_X_logSession" -> {"debug",
+#      "secret_hints"}).
+#   2. attribute_strings_by_symbol_name() picks, per symbol, the subset of
+#      already-categorized hint strings whose buckets intersect with the
+#      symbol's name buckets. The result triages "this exported native is in
+#      the same category as embedded artefacts the .so contains" — a
+#      first-pass operator hint that points at high-yield Frida targets
+#      without claiming static cross-reference accuracy.
+#
+# Because the heuristic is name-driven, an obfuscated/renamed export
+# (Java_a_b_c) returns an empty bucket set and contributes nothing —
+# safer to under-attribute than mislead.
+
+_SYMBOL_CATEGORY_TOKENS: dict[str, tuple[str, ...]] = {
+    "crypto": (
+        "crypt", "encrypt", "decrypt", "cipher", "aes", "des",
+        "rsa", "hash", "md5", "sha", "hmac", "pbkdf", "kdf",
+        "sign", "verify", "key",
+    ),
+    "urls": (
+        "url", "http", "https", "host", "endpoint",
+        "fetch", "request", "api",
+    ),
+    "ip_endpoints": ("ip", "addr", "socket", "connect", "bind"),
+    "paths": ("path", "file", "dir", "asset", "resource", "cache"),
+    "shell_commands": ("exec", "shell", "spawn", "command", "system"),
+    "secret_hints": (
+        "auth", "token", "secret", "password", "passwd",
+        "credential", "session", "login", "jwt", "bearer",
+    ),
+    "sql": ("query", "sqlite", "select", "insert", "update", "delete"),
+    "debug": ("log", "trace", "debug", "print", "dump", "verbose"),
+}
+
+
+def _normalize_symbol(name: str) -> str:
+    """Reduce a JNI-mangled / camelCase name to space-separated lowercase tokens.
+
+    "Java_com_app_Crypto_encrypt" -> "java com app crypto encrypt"
+    "logSessionToken"             -> "log session token"
+    Operators run on the lowercase string form via ``in`` so the goal is
+    just to expose token boundaries.
+    """
+    out = []
+    prev_lower = False
+    for ch in name:
+        if ch == "_" or ch == "$":
+            out.append(" ")
+            prev_lower = False
+            continue
+        if ch.isupper() and prev_lower:
+            out.append(" ")
+        out.append(ch.lower())
+        prev_lower = ch.islower() or ch.isdigit()
+    return "".join(out)
+
+
+def classify_symbol_name(name: str) -> frozenset[str]:
+    """Return the category buckets a symbol's name suggests it operates on.
+
+    Categories mirror :class:`NativeStringHints` field names. An empty
+    set means the name is opaque (obfuscated, generic, or simply doesn't
+    contain a recognizable English token) — the caller should treat that
+    as "no advisory attribution available" rather than "not interesting".
+    """
+    if not name:
+        return frozenset()
+    tokens_str = _normalize_symbol(name)
+    matched: set[str] = set()
+    for bucket, needles in _SYMBOL_CATEGORY_TOKENS.items():
+        for needle in needles:
+            # Use word-boundary-ish match by checking surrounding spaces
+            # so "key" in "monkey" doesn't fire while "key" in "api key" does.
+            if f" {needle} " in f" {tokens_str} " or tokens_str.startswith(f"{needle} ") or tokens_str.endswith(f" {needle}") or tokens_str == needle:
+                matched.add(bucket)
+                break
+    return frozenset(matched)
+
+
+def attribute_strings_by_symbol_name(
+    symbol_names: list[str],
+    hints: NativeStringHints,
+    *,
+    cap_per_symbol: int = 12,
+) -> dict[str, list[str]]:
+    """Co-locality heuristic: bucket-match each symbol against ``hints``.
+
+    For every symbol whose ``classify_symbol_name`` returns a non-empty
+    set, the result includes the strings from the matching hint buckets
+    (capped at ``cap_per_symbol`` — symbol-level reports usually want a
+    short evidence list, not the whole .so dump). Symbols with an empty
+    classification do not appear in the output.
+
+    Stable order: symbols ordered as input; per-symbol strings ordered
+    by category (NativeStringHints field order) and within each category
+    by their existing ordering in ``hints``.
+    """
+    if hints.is_empty:
+        return {}
+
+    bucket_lookup: dict[str, list[str]] = {
+        "urls": list(hints.urls),
+        "ip_endpoints": list(hints.ip_endpoints),
+        "paths": list(hints.paths),
+        "shell_commands": list(hints.shell_commands),
+        "crypto": list(hints.crypto),
+        "secret_hints": list(hints.secret_hints),
+        "sql": list(hints.sql),
+        "debug": list(hints.debug),
+    }
+
+    out: dict[str, list[str]] = {}
+    for name in symbol_names:
+        cats = classify_symbol_name(name)
+        if not cats:
+            continue
+        evidence: list[str] = []
+        for bucket in (
+            "urls", "ip_endpoints", "paths", "shell_commands",
+            "crypto", "secret_hints", "sql", "debug",
+        ):
+            if bucket not in cats:
+                continue
+            for s in bucket_lookup[bucket]:
+                if s in evidence:
+                    continue
+                evidence.append(s)
+                if len(evidence) >= cap_per_symbol:
+                    break
+            if len(evidence) >= cap_per_symbol:
+                break
+        if evidence:
+            out[name] = evidence
+    return out
 
 
 def summarize_hints(hints: NativeStringHints) -> str:

@@ -659,23 +659,45 @@ def _render_components_table(components: list[AndroidComponent]) -> str:
     )
 
 
-def _render_bridges_table(bridges: list[JniBridge], limit: int = 50) -> str:
+def _render_bridges_table(
+    bridges: list[JniBridge],
+    limit: int = 50,
+    strings_by_symbol: Optional[dict[str, list[str]]] = None,
+) -> str:
     if not bridges:
         return ""
     matched = [b for b in bridges if b.matched_symbol]
     unmatched = [b for b in bridges if not b.matched_symbol]
     ordered = matched + unmatched
+    sbs = strings_by_symbol or {}
     rows = []
     for b in ordered[:limit]:
         jm = b.java_method
         sym = escape(b.matched_symbol) if b.matched_symbol else (
             '<span class="no">미매칭</span>'
         )
+        # Phase 9-4 — surface attributed-string evidence inline so the
+        # operator sees which bridges are crypto / network / debug
+        # candidates without flipping to a separate section. We only
+        # show up to 3 hints per row to keep the table compact;
+        # operators can read the full list in the JSON dump.
+        hints_html = ""
+        evidence = sbs.get(b.matched_symbol or "", [])[:3]
+        if evidence:
+            chips = "".join(
+                f'<span class="pill" style="font-size: 0.72em;">'
+                f"{escape(s[:48])}</span>"
+                for s in evidence
+            )
+            hints_html = (
+                '<div style="margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px;">'
+                + chips + "</div>"
+            )
         rows.append(
             f"<tr>"
             f'<td class="fqn">{escape(jm.class_fqn)}.{escape(jm.method_name)}</td>'
             f"<td>{len(jm.arg_types)}</td>"
-            f'<td class="mono">{sym}</td>'
+            f'<td class="mono">{sym}{hints_html}</td>'
             f"</tr>"
         )
     note = ""
@@ -797,10 +819,21 @@ def render_audit_html(
     bridges_section = ""
     if analysis.bridges:
         matched_count = sum(1 for b in analysis.bridges if b.matched_symbol)
+        attributed_count = sum(
+            1 for b in analysis.bridges
+            if b.matched_symbol and analysis.strings_by_symbol.get(b.matched_symbol)
+        )
+        attributed_note = ""
+        if attributed_count:
+            attributed_note = (
+                f' · <span style="color: var(--text-muted); font-size: 0.85em;">'
+                f"{attributed_count}개 브리지에 문자열 단서 첨부"
+                "</span>"
+            )
         bridges_section = (
             '<section class="bridges-section">'
-            f"<h2>JNI 브리지 ({matched_count}개 매칭 / {len(analysis.bridges)}개 선언)</h2>"
-            f"{_render_bridges_table(analysis.bridges)}"
+            f"<h2>JNI 브리지 ({matched_count}개 매칭 / {len(analysis.bridges)}개 선언){attributed_note}</h2>"
+            f"{_render_bridges_table(analysis.bridges, strings_by_symbol=analysis.strings_by_symbol)}"
             "</section>"
         )
 

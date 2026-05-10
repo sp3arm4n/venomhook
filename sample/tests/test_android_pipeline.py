@@ -363,6 +363,65 @@ class TestAnalyzeApkMultiLib(unittest.TestCase):
             joined = " | ".join(result.warnings)
             self.assertIn("--apk-lib", joined)
 
+    def test_strings_by_symbol_populated_when_bridges_match(self):
+        """Phase 9-4: bridge-matched JNI symbols receive co-locality hints."""
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp, {"arm64-v8a": ["libcrypto.so"]})
+
+            # Stub a binary whose .rodata yielded crypto + URL strings, so
+            # the categorizer fills both buckets.
+            def _meta(path):
+                m = _stub_binary_meta(
+                    str(path),
+                    ["Java_com_app_Crypto_encrypt", "JNI_OnLoad"],
+                )
+                m.strings = ["AES/CBC/PKCS5Padding", "http://a.example/cb", "MD5"]
+                return m
+
+            stub_natives = [
+                JavaNativeMethod(
+                    class_fqn="com.app.Crypto", method_name="encrypt",
+                    return_type="void", arg_types=[],
+                ),
+            ]
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                side_effect=_meta,
+            ), mock.patch(
+                "venomhook.android_pipeline.decompile_apk",
+                return_value=(mock.MagicMock(), stub_natives),
+            ):
+                result = analyze_apk(apk, tdp / "work", use_apktool=False)
+
+            attributed = result.strings_by_symbol.get("Java_com_app_Crypto_encrypt")
+            self.assertIsNotNone(attributed)
+            self.assertIn("AES/CBC/PKCS5Padding", attributed)
+            self.assertIn("MD5", attributed)
+            # URL must NOT bleed into a crypto-named symbol
+            self.assertNotIn("http://a.example/cb", attributed)
+
+    def test_strings_by_symbol_empty_when_no_hints(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp, {"arm64-v8a": ["libfoo.so"]})
+
+            def _meta(path):
+                m = _stub_binary_meta(str(path), ["Java_com_app_X_y"])
+                m.strings = ["nothing relevant"]
+                return m
+
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                side_effect=_meta,
+            ), mock.patch(
+                "venomhook.android_pipeline.decompile_apk",
+                return_value=(mock.MagicMock(), []),
+            ):
+                result = analyze_apk(apk, tdp / "work", use_apktool=False)
+
+            self.assertEqual(result.strings_by_symbol, {})
+
     def test_extra_lief_failure_does_not_abort_run(self):
         """Failure on a non-primary .so degrades gracefully with a warning.
 

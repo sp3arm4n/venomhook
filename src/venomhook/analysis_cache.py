@@ -51,7 +51,10 @@ __all__ = [
 # --apk-lib all path; without the bump a v2 single-lib payload could be
 # replayed for an --apk-lib all request and silently miss the extra .so
 # data the new request actually wanted.
-SCHEMA_VERSION = 3
+# Phase 9-4 added strings_by_symbol (co-locality string attribution per
+# JNI export); v3 rows replay with empty attribution which would mis-
+# represent a fresh-run report, so we bump again.
+SCHEMA_VERSION = 4
 
 
 @dataclass(frozen=True)
