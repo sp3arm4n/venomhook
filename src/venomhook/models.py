@@ -963,6 +963,12 @@ class PoCArtifact:
     expected_evidence: str = ""
     notes: str = ""
     references: list[str] = field(default_factory=list)
+    # Phase 11-3: when multiple PoCs share the same (rule_id, kind,
+    # template shape) they collapse into one artifact via
+    # ``poc_generator.dedup_pocs_by_template`` and ``applies_to``
+    # records the components (or class FQNs for code-tier PoCs) the
+    # remaining template covers. Empty list when the PoC is unique.
+    applies_to: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PoCArtifact":
@@ -978,6 +984,7 @@ class PoCArtifact:
             expected_evidence=data.get("expected_evidence", ""),
             notes=data.get("notes", ""),
             references=list(data.get("references", [])),
+            applies_to=list(data.get("applies_to", [])),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1000,4 +1007,6 @@ class PoCArtifact:
             result["notes"] = self.notes
         if self.references:
             result["references"] = list(self.references)
+        if self.applies_to:
+            result["applies_to"] = list(self.applies_to)
         return result

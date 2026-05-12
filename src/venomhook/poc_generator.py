@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import json
 import shlex
-from typing import Callable
+from typing import Callable, Iterable
 
 from venomhook.models import (
     AndroidAppMeta,
@@ -53,6 +53,7 @@ __all__ = [
     "generate_pocs",
     "generate_code_pocs",
     "format_pocs_text",
+    "dedup_pocs_by_template",
     "PER_RULE_BUILDERS",
     "PER_CODE_RULE_BUILDERS",
 ]
@@ -1027,6 +1028,78 @@ PER_RULE_BUILDERS: dict[str, Callable[[AndroidAppMeta, ManifestFinding], list[Po
 }
 
 
+import re as _re_for_dedup
+
+
+# Tokens that almost always vary between PoCs that share the same
+# template — class names, component FQNs, action URI hosts. Substituting
+# them with a placeholder lets us detect "same shape, different target."
+_DEDUP_REPLACE_RE = _re_for_dedup.compile(
+    r"(com\.[\w$.]+|"             # any com.* class FQN
+    r"kakao[\w.]+://[\w./?#=&-]*|"  # deeplink URIs (kakaotalk://, kakaopay://, ...)
+    r"https?://[\w./?#=&-]+|"     # http/https URIs
+    r"[\w-]+\.[\w]+\.[\w./-]+"    # generic dotted host or class path
+    r")"
+)
+
+
+def _template_signature(p: PoCArtifact) -> tuple:
+    """Reduce a PoCArtifact to a hashable signature that ignores the
+    components/URIs it targets.
+
+    Two PoCs sharing this signature are templates of the same shape —
+    same rule, same channel, same command pattern, same step count.
+    Used by ``dedup_pocs_by_template`` to merge them while preserving
+    each target in ``applies_to``.
+    """
+    normalized_cmds = tuple(
+        _DEDUP_REPLACE_RE.sub("<T>", c) for c in p.commands
+    )
+    normalized_title = _DEDUP_REPLACE_RE.sub("<T>", p.title)
+    return (p.rule_id, p.kind, p.severity, normalized_title, normalized_cmds)
+
+
+def dedup_pocs_by_template(
+    artifacts: Iterable[PoCArtifact],
+) -> list[PoCArtifact]:
+    """Phase 11-3: collapse PoCs that share a template into one
+    representative + ``applies_to`` listing each merged target.
+
+    KakaoTalk audit emitted 190 PoCArtifacts; many were the same shell
+    template parametrised by component or class FQN (3.7× polynomial
+    blow-up). Operators got identical .sh scripts with only the
+    component string changing — exhausting to read.
+
+    The first artifact for a signature stays as-is. Subsequent matches
+    contribute their ``component`` (or class_fqn-shaped first token of
+    the title) into the representative's ``applies_to`` list. The
+    representative's commands and metadata are untouched so any one
+    .sh stays runnable.
+
+    Stable: output order matches first-seen order of each signature.
+    Pure function; the artifacts passed in are not mutated when they
+    survive as representatives, but the merged ``applies_to`` list is
+    extended on the representative object — callers needing immutable
+    inputs should pass copies.
+    """
+    out: list[PoCArtifact] = []
+    seen: dict[tuple, int] = {}
+    for p in artifacts:
+        sig = _template_signature(p)
+        idx = seen.get(sig)
+        if idx is None:
+            seen[sig] = len(out)
+            out.append(p)
+            continue
+        rep = out[idx]
+        # Record this artifact's component (or fall back to its title
+        # fragment) on the representative.
+        target = p.component or p.title
+        if target and target != rep.component and target not in rep.applies_to:
+            rep.applies_to.append(target)
+    return out
+
+
 def generate_pocs(
     meta: AndroidAppMeta, report: AndroidAuditReport
 ) -> list[PoCArtifact]:
@@ -1035,6 +1108,11 @@ def generate_pocs(
     Findings whose rule_id has no builder (informational rules like
     MANIFEST-007..009) are skipped silently. Output order mirrors
     ``report.findings`` so the operator can read PoCs alongside the audit.
+
+    Phase 11-3: builders may emit one PoC per finding-target combination
+    even when the template is identical. ``dedup_pocs_by_template``
+    folds those duplicates so the operator sees one .sh per unique
+    template with the affected components rolled into ``applies_to``.
     """
     artifacts: list[PoCArtifact] = []
     for f in report.findings:
@@ -1042,7 +1120,7 @@ def generate_pocs(
         if builder is None:
             continue
         artifacts.extend(builder(meta, f))
-    return artifacts
+    return dedup_pocs_by_template(artifacts)
 
 
 def format_pocs_text(artifacts: list[PoCArtifact]) -> str:
