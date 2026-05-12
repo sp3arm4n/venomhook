@@ -545,6 +545,12 @@ def main(argv: list[str] | None = None) -> None:
         "--jadx-path", type=str, help="Override jadx binary path (default: $PATH lookup)",
     )
     audit_parser.add_argument(
+        "--jadx-timeout", type=int, default=None,
+        help="Override jadx decompile timeout in seconds (default: 600). "
+        "Large multi-DEX APKs (KakaoTalk-scale, 200MB+ with 15+ DEX) often "
+        "need 1800+ to finish.",
+    )
+    audit_parser.add_argument(
         "--no-jadx", action="store_true",
         help="Skip jadx (java decompile + JNI bridges); audit-only mode",
     )
@@ -994,7 +1000,15 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
         logging.info("using temporary work dir: %s", work_dir)
 
     apktool_config = ApktoolConfig(apktool_path=args.apktool_path) if args.apktool_path else None
-    jadx_config = JadxConfig(jadx_path=args.jadx_path) if args.jadx_path else None
+    if args.jadx_path or args.jadx_timeout is not None:
+        jadx_kwargs: dict = {}
+        if args.jadx_path:
+            jadx_kwargs["jadx_path"] = args.jadx_path
+        if args.jadx_timeout is not None:
+            jadx_kwargs["timeout_sec"] = args.jadx_timeout
+        jadx_config = JadxConfig(**jadx_kwargs)
+    else:
+        jadx_config = None
 
     cache: AnalysisCache | None = None
     if args.cache_dir:

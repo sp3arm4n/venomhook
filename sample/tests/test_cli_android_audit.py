@@ -694,5 +694,89 @@ class AndroidAuditCliTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 1)
 
 
+class JadxTimeoutCliTests(unittest.TestCase):
+    """Phase 9 follow-up: --jadx-timeout overrides JadxConfig.timeout_sec.
+
+    Discovered during the KakaoTalk 26.3.2 regression run — 18 DEX with
+    Kotlin-heavy obfuscation hit the hardcoded 600s ceiling and the
+    pipeline degraded to an empty code_audit_report. Exposing the
+    timeout on the CLI lets the operator extend it without patching
+    jadx_runner.
+    """
+
+    def _run(self, argv: list[str]) -> str:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            main(argv)
+        return buf.getvalue()
+
+    def _capture_analyze(self, argv: list[str]) -> dict:
+        captured: dict = {}
+
+        def fake_analyze(*args, **kwargs):
+            captured["jadx_config"] = kwargs.get("jadx_config")
+            from venomhook.android_pipeline import AndroidAnalysis
+            from venomhook.apk_extractor import ApkMeta
+            return AndroidAnalysis(
+                apk_meta=ApkMeta(path="x", name="x.apk", hash="sha256:0"),
+                selected_abi=None,
+                extracted_so_path=None,
+                so_meta=None,
+            )
+
+        with mock.patch(
+            "venomhook.cli.analyze_apk", side_effect=fake_analyze,
+        ), self.assertRaises(SystemExit):
+            # Missing app_meta -> exit 1, but the kwargs we wanted to
+            # inspect were already passed in.
+            self._run(argv)
+        return captured
+
+    def test_jadx_timeout_reaches_jadx_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            captured = self._capture_analyze([
+                "android-audit",
+                "--apk", str(apk),
+                "--out-dir", str(tdp / "work"),
+                "--jadx-timeout", "1800",
+                "--quiet",
+            ])
+        jc = captured["jadx_config"]
+        self.assertIsNotNone(jc)
+        self.assertEqual(jc.timeout_sec, 1800)
+        # jadx_path stays unspecified -> default auto-detect
+        self.assertIsNone(jc.jadx_path)
+
+    def test_jadx_path_and_timeout_can_coexist(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            captured = self._capture_analyze([
+                "android-audit",
+                "--apk", str(apk),
+                "--out-dir", str(tdp / "work"),
+                "--jadx-path", "/opt/custom/jadx",
+                "--jadx-timeout", "1200",
+                "--quiet",
+            ])
+        jc = captured["jadx_config"]
+        self.assertEqual(jc.timeout_sec, 1200)
+        self.assertEqual(jc.jadx_path, "/opt/custom/jadx")
+
+    def test_no_jadx_args_means_no_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            captured = self._capture_analyze([
+                "android-audit",
+                "--apk", str(apk),
+                "--out-dir", str(tdp / "work"),
+                "--quiet",
+            ])
+        self.assertIsNone(captured["jadx_config"])
+
+
 if __name__ == "__main__":
     unittest.main()
