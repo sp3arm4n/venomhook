@@ -321,6 +321,31 @@ class MergeCodeReportsTests(unittest.TestCase):
         # files_scanned is sum
         self.assertEqual(merged.files_scanned, 3)
 
+    def test_merge_does_not_mutate_inputs_or_duplicate_on_repeat(self):
+        java = CodeAuditReport(
+            package_name="com.x",
+            findings=[CodeFinding(
+                rule_id="CODE-001", title="java", severity="medium",
+                file="x.java", class_fqn="com.x.A", line_no=10,
+            )],
+        )
+        smali = CodeAuditReport(
+            package_name="com.x",
+            findings=[CodeFinding(
+                rule_id="CODE-001", title="smali", severity="medium",
+                file="x.smali", class_fqn="com.x.A",
+                evidence_tier="smali", line_no=25,
+            )],
+        )
+
+        merged1 = merge_code_reports(java, smali)
+        merged2 = merge_code_reports(java, smali)
+
+        self.assertEqual(java.findings[0].occurrences, [])
+        self.assertEqual(smali.findings[0].occurrences, [])
+        self.assertEqual(len(merged1.findings[0].occurrences), 1)
+        self.assertEqual(len(merged2.findings[0].occurrences), 1)
+
     def test_smali_occurrences_also_fold_into_java_rep(self):
         """If smali tier itself dedup-grouped multiple lines into one
         finding + occurrences, the WHOLE smali bundle (primary + occs)
@@ -355,6 +380,9 @@ class MergeCodeReportsTests(unittest.TestCase):
         # on the java representative
         self.assertEqual(len(rep.occurrences), 3)
         self.assertEqual({o.evidence_tier for o in rep.occurrences}, {"smali"})
+        self.assertEqual([o.file for o in rep.occurrences], [
+            "x.smali", "x.smali", "x.smali",
+        ])
 
     def test_severity_difference_keeps_smali_separate(self):
         """High and medium severity findings on the same class stay as

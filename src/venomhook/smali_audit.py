@@ -35,7 +35,8 @@ The smali tier is intentionally **conservative** — same rule IDs and
 severities, but evidence_tier="smali" labels each finding so HTML /
 JSON consumers can show "이 발견은 smali 기반" tooltips. When both
 tiers fire on the same (rule_id, class) pair, the pipeline keeps the
-Java-tier finding (richer line text); the smali duplicate is dropped.
+Java-tier finding (richer line text) and folds the smali evidence into
+that finding's occurrences.
 
 Pure-Python; no external dependencies. Skips third-party prefixes
 that the Java tier already filters (Kotlin stdlib, AndroidX, Google
@@ -52,6 +53,10 @@ from typing import Iterator, Optional
 
 from venomhook.code_audit import (
     DEFAULT_THIRD_PARTY_PREFIXES,
+    _append_occurrence_if_new,
+    _copy_finding_for_dedup,
+    _copy_occurrence_for_rep,
+    _finding_as_occurrence,
     _strip_line_comment,  # quote-aware to match code_audit conventions
     dedup_findings_by_class,
 )
@@ -424,8 +429,6 @@ def merge_code_reports(
     are None). When both are present, the smali tier's files_scanned is
     added to the result for completeness, and partial flag is OR'd.
     """
-    from venomhook.models import CodeOccurrence
-
     if java_report is None and smali_report is None:
         return None
     if java_report is None:
@@ -436,35 +439,35 @@ def merge_code_reports(
     # Index java findings by (rule, class_or_file, severity) so a smali
     # match on the same key can fold instead of duplicate.
     java_index: dict[tuple[str, str, str], CodeFinding] = {}
-    for jf in java_report.findings:
+    merged: list[CodeFinding] = [
+        _copy_finding_for_dedup(jf) for jf in java_report.findings
+    ]
+    for jf in merged:
         key = (jf.rule_id, jf.class_fqn or jf.file, jf.severity)
         # Last write wins on collision (shouldn't happen post P11-1 dedup
         # but defensive). Keep the first instead so order matches input.
         java_index.setdefault(key, jf)
 
-    merged: list[CodeFinding] = list(java_report.findings)
     for sf in smali_report.findings:
         key = (sf.rule_id, sf.class_fqn or sf.file, sf.severity)
         rep = java_index.get(key)
         if rep is None:
             # No overlap — keep the smali finding as a separate entry.
-            merged.append(sf)
+            merged.append(_copy_finding_for_dedup(sf))
             continue
         # Same (rule, class, severity) in both tiers — fold smali into
         # the java representative as additional evidence.
-        rep.occurrences.append(CodeOccurrence(
-            line_no=sf.line_no,
-            line_text=sf.line_text,
-            file=sf.file if sf.file != rep.file else "",
-            evidence_tier="smali",
-        ))
+        primary_occ = _finding_as_occurrence(sf, rep.file)
+        primary_occ.evidence_tier = "smali"
+        _append_occurrence_if_new(rep, primary_occ)
         for occ in sf.occurrences:
-            rep.occurrences.append(CodeOccurrence(
-                line_no=occ.line_no,
-                line_text=occ.line_text,
-                file=occ.file if occ.file != rep.file else "",
-                evidence_tier="smali",
-            ))
+            copied_occ = _copy_occurrence_for_rep(
+                occ,
+                source_file=sf.file,
+                rep_file=rep.file,
+            )
+            copied_occ.evidence_tier = "smali"
+            _append_occurrence_if_new(rep, copied_occ)
 
     return CodeAuditReport(
         package_name=java_report.package_name or smali_report.package_name,
