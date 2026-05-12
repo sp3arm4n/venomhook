@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from dataclasses import replace
 from typing import Callable, Iterable
 
 from venomhook.models import (
@@ -1059,6 +1060,20 @@ def _template_signature(p: PoCArtifact) -> tuple:
     return (p.rule_id, p.kind, p.severity, normalized_title, normalized_cmds)
 
 
+def _copy_poc_artifact(artifact: PoCArtifact) -> PoCArtifact:
+    return replace(
+        artifact,
+        commands=list(artifact.commands),
+        references=list(artifact.references),
+        applies_to=list(artifact.applies_to),
+    )
+
+
+def _append_apply_target(rep: PoCArtifact, target: str | None) -> None:
+    if target and target != rep.component and target not in rep.applies_to:
+        rep.applies_to.append(target)
+
+
 def dedup_pocs_by_template(
     artifacts: Iterable[PoCArtifact],
 ) -> list[PoCArtifact]:
@@ -1070,17 +1085,14 @@ def dedup_pocs_by_template(
     blow-up). Operators got identical .sh scripts with only the
     component string changing — exhausting to read.
 
-    The first artifact for a signature stays as-is. Subsequent matches
-    contribute their ``component`` (or class_fqn-shaped first token of
-    the title) into the representative's ``applies_to`` list. The
-    representative's commands and metadata are untouched so any one
-    .sh stays runnable.
+    The first artifact for a signature stays as the representative.
+    Subsequent matches contribute their ``component`` (or class_fqn-shaped
+    first token of the title) into the representative's ``applies_to``
+    list. The representative's commands and metadata are copied from the
+    first artifact so any one .sh stays runnable.
 
-    Stable: output order matches first-seen order of each signature.
-    Pure function; the artifacts passed in are not mutated when they
-    survive as representatives, but the merged ``applies_to`` list is
-    extended on the representative object — callers needing immutable
-    inputs should pass copies.
+    Stable and non-mutating: output order matches first-seen order of
+    each signature, and the artifacts passed in are never modified.
     """
     out: list[PoCArtifact] = []
     seen: dict[tuple, int] = {}
@@ -1089,14 +1101,14 @@ def dedup_pocs_by_template(
         idx = seen.get(sig)
         if idx is None:
             seen[sig] = len(out)
-            out.append(p)
+            out.append(_copy_poc_artifact(p))
             continue
         rep = out[idx]
         # Record this artifact's component (or fall back to its title
         # fragment) on the representative.
-        target = p.component or p.title
-        if target and target != rep.component and target not in rep.applies_to:
-            rep.applies_to.append(target)
+        _append_apply_target(rep, p.component or p.title)
+        for target in p.applies_to:
+            _append_apply_target(rep, target)
     return out
 
 

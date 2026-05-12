@@ -59,7 +59,10 @@ __all__ = [
 # Phase 10-4 added smali-tier findings. Old v4 rows can have a populated
 # Java code_audit_report yet still miss every smali finding, so replaying
 # them would silently under-report the new tier.
-SCHEMA_VERSION = 5
+# Phase 11 added occurrence folding and PoC applies_to/template dedup. Old
+# v5 rows would replay pre-normalized findings and PoCs without the new
+# cardinality guarantees, so they must be recomputed.
+SCHEMA_VERSION = 6
 
 
 @dataclass(frozen=True)
