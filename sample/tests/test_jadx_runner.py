@@ -604,6 +604,59 @@ class TestRunJadx(unittest.TestCase):
             self.assertIn("--decompilation-mode", cmd)
             self.assertIn("simple", cmd)
 
+    def test_fast_mode_appends_simple_mode_flag(self):
+        """Phase 10-5: fast_mode=True adds '-m simple' to the command."""
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = tdp / "x.apk"
+            apk.write_bytes(b"PK")
+            seen: dict[str, list[str]] = {}
+
+            class FakeCompleted:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            def fake_run(cmd, **kw):
+                seen["cmd"] = list(cmd)
+                out_dir = Path(cmd[cmd.index("-d") + 1])
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / "x.java").write_text("class X {}")
+                return FakeCompleted()
+
+            cfg = JadxConfig(jadx_path="/usr/bin/jadx", fast_mode=True)
+            with mock.patch("venomhook.jadx_runner.subprocess.run", side_effect=fake_run):
+                run_jadx(apk, tdp / "o", config=cfg)
+            cmd = seen["cmd"]
+            # -m simple must be present
+            self.assertIn("-m", cmd)
+            self.assertEqual(cmd[cmd.index("-m") + 1], "simple")
+
+    def test_fast_mode_default_false_does_not_emit_m_flag(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = tdp / "x.apk"
+            apk.write_bytes(b"PK")
+            seen: dict[str, list[str]] = {}
+
+            class FakeCompleted:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            def fake_run(cmd, **kw):
+                seen["cmd"] = list(cmd)
+                out_dir = Path(cmd[cmd.index("-d") + 1])
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / "x.java").write_text("class X {}")
+                return FakeCompleted()
+
+            cfg = JadxConfig(jadx_path="/usr/bin/jadx")
+            with mock.patch("venomhook.jadx_runner.subprocess.run", side_effect=fake_run):
+                run_jadx(apk, tdp / "o", config=cfg)
+            # -m must not appear because fast_mode defaults to False
+            self.assertNotIn("-m", seen["cmd"])
+
 
 # ---------- decompile_apk ----------
 

@@ -554,6 +554,19 @@ def main(argv: list[str] | None = None) -> None:
         "need 1800+ to finish.",
     )
     audit_parser.add_argument(
+        "--jadx-threads", type=int, default=None,
+        help="jadx parallelism (-j N). Default 4 (jadx built-in). Bumping "
+        "this on a many-core machine cuts wall-clock on heavy APKs.",
+    )
+    audit_parser.add_argument(
+        "--jadx-fast", action="store_true",
+        help="Run jadx with -m simple to skip structure-restoring passes. "
+        "Output .java is uglier (linear, goto-style) but VenomHook rules "
+        "are insensitive to control-flow shape — they match literal "
+        "const-strings and method calls. 30-50%% wall-clock saving on "
+        "obfuscated APKs. Independent of --jadx-timeout / --apk-lib.",
+    )
+    audit_parser.add_argument(
         "--no-jadx", action="store_true",
         help="Skip jadx (java decompile + JNI bridges); audit-only mode",
     )
@@ -1028,12 +1041,21 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
         logging.info("using temporary work dir: %s", work_dir)
 
     apktool_config = ApktoolConfig(apktool_path=args.apktool_path) if args.apktool_path else None
-    if args.jadx_path or args.jadx_timeout is not None:
+    if (
+        args.jadx_path
+        or args.jadx_timeout is not None
+        or getattr(args, "jadx_threads", None) is not None
+        or getattr(args, "jadx_fast", False)
+    ):
         jadx_kwargs: dict = {}
         if args.jadx_path:
             jadx_kwargs["jadx_path"] = args.jadx_path
         if args.jadx_timeout is not None:
             jadx_kwargs["timeout_sec"] = args.jadx_timeout
+        if getattr(args, "jadx_threads", None) is not None:
+            jadx_kwargs["threads"] = args.jadx_threads
+        if getattr(args, "jadx_fast", False):
+            jadx_kwargs["fast_mode"] = True
         jadx_config = JadxConfig(**jadx_kwargs)
     else:
         jadx_config = None

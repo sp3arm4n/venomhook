@@ -83,8 +83,15 @@ class JadxConfig:
     no_imports: bool = True          # --no-imports
     no_debug_info: bool = True       # --no-debug-info
     show_bad_code: bool = False      # --show-bad-code (emits broken decompilations)
-    threads: Optional[int] = None    # -j N
+    threads: Optional[int] = None    # -j N (None = jadx default of 4)
     timeout_sec: int = 600
+    # Phase 10-5: -m simple skips deobfuscation passes and uses the
+    # linear (goto-style) IR translation. Output Java is uglier but the
+    # rule patterns we run on it (const-string + method invocations)
+    # are unaffected. On KakaoTalk-scale APKs this can cut wall-clock
+    # by 30-50% — at the cost of harder-to-read .java for any manual
+    # follow-up. When False (default) jadx picks "auto" mode.
+    fast_mode: bool = False
     extra_args: list[str] = field(default_factory=list)
 
 
@@ -194,6 +201,11 @@ def run_jadx(
         cmd.append("--show-bad-code")
     if cfg.threads is not None and cfg.threads > 0:
         cmd.extend(["-j", str(cfg.threads)])
+    if cfg.fast_mode:
+        # `-m simple` switches off the structure-restoring passes — the
+        # rule engine doesn't care because it matches against literal
+        # const-strings and method calls, not control-flow shape.
+        cmd.extend(["-m", "simple"])
     cmd.extend(cfg.extra_args)
     cmd.append(str(apk))
 

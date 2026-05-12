@@ -856,6 +856,26 @@ class JadxTimeoutCliTests(unittest.TestCase):
             ])
         self.assertIsNone(captured["jadx_config"])
 
+    def test_jadx_threads_and_fast_mode_propagate(self):
+        """Phase 10-5: --jadx-threads and --jadx-fast reach JadxConfig."""
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            captured = self._capture_analyze([
+                "android-audit",
+                "--apk", str(apk),
+                "--out-dir", str(tdp / "work"),
+                "--jadx-threads", "8",
+                "--jadx-fast",
+                "--quiet",
+            ])
+        jc = captured["jadx_config"]
+        self.assertEqual(jc.threads, 8)
+        self.assertTrue(jc.fast_mode)
+        # untouched fields keep defaults
+        self.assertEqual(jc.timeout_sec, 600)
+        self.assertIsNone(jc.jadx_path)
+
 
 if __name__ == "__main__":
     unittest.main()
