@@ -202,7 +202,11 @@ class AllowBackupBuilderTests(unittest.TestCase):
 
 
 class ExportedNoPermissionBuilderTests(unittest.TestCase):
-    def test_per_action_artifact_for_activity(self) -> None:
+    def test_actions_grouped_into_single_artifact_per_component(self) -> None:
+        """Phase 11-2: one adb PoC per component with every action in
+        commands (was: N adb PoCs for N actions). Plus one Frida
+        observer per component, unchanged.
+        """
         comp = _comp(
             type="activity", name="com.x.PublicAct",
             exported=True, exported_declared=True,
@@ -211,15 +215,32 @@ class ExportedNoPermissionBuilderTests(unittest.TestCase):
         )
         meta = _meta(components=[comp])
         arts = generate_pocs(meta, audit_manifest(meta))
-        # one ADB artifact per action + one Frida observer for the component
-        self.assertEqual(len(arts), 3)
         adb_arts = [a for a in arts if a.kind == "adb"]
         frida_arts = [a for a in arts if a.kind == "frida"]
-        self.assertEqual(len(adb_arts), 2)
+        self.assertEqual(len(adb_arts), 1, f"got {len(adb_arts)} adb PoCs, expected 1")
         self.assertEqual(len(frida_arts), 1)
-        for a in adb_arts:
-            self.assertEqual(a.component, "com.x.PublicAct")
-            self.assertTrue(any("am start" in c for c in a.commands))
+        adb = adb_arts[0]
+        self.assertEqual(adb.component, "com.x.PublicAct")
+        # Both actions present in commands of the single artifact
+        joined = "\n".join(adb.commands)
+        self.assertIn("android.intent.action.VIEW", joined)
+        self.assertIn("android.intent.action.SEND", joined)
+        self.assertIn("2 actions", adb.title)
+
+    def test_single_action_no_action_count_suffix(self) -> None:
+        """When the component has only one action the title stays clean."""
+        comp = _comp(
+            type="activity", name="com.x.OneAct",
+            exported=True, exported_declared=True,
+            intent_actions=["android.intent.action.MAIN"],
+        )
+        meta = _meta(components=[comp])
+        arts = generate_pocs(meta, audit_manifest(meta))
+        adb = next(a for a in arts if a.kind == "adb")
+        self.assertNotIn("actions", adb.title)
+        self.assertEqual(adb.commands.count(
+            "# 1 intent-filter actions — 각 라인을 차례로 시도"
+        ), 0)
 
     def test_frida_observer_for_activity_hooks_oncreate(self) -> None:
         comp = _comp(

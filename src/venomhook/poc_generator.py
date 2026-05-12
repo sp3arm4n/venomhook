@@ -356,36 +356,54 @@ def _build_exported_no_permission(
         "provider": "프로바이더",
     }.get(component.type, component.type)
 
+    # Phase 11-2: KakaoTalk's RecentExcludeIntentFilterActivity carries 43
+    # intent-filter actions and we used to emit 43 separate PoCArtifacts,
+    # each running 1 `am` command. Operators saw the same template repeated
+    # 43 times. Consolidate into one PoC per component whose .sh tries every
+    # action sequentially so a single artifact covers the full attack
+    # surface for that component.
     actions = component.intent_actions or [None]
     artifacts: list[PoCArtifact] = []
-    for action in actions:
-        cmd = _am_command_for(component, pkg, action)
-        artifacts.append(PoCArtifact(
-            rule_id=finding.rule_id,
-            title=f"외부 노출 {type_korean} '{component.name}' 호출"
-            + (f" (action={action})" if action else ""),
-            severity=finding.severity,
-            kind="adb",
-            package_name=pkg,
-            component=component.name,
-            description=(
-                f"외부에 노출된 {type_korean}가 권한 없이 외부 인텐트를 수용합니다. "
-                "본 레시피는 직접 인텐트를 전송합니다 — 실제 공격에서는 "
-                "onCreate/onReceive 안의 신뢰 결정 지점으로 전달되는 extras를 "
-                "조작해 함께 보냅니다."
-            ),
-            commands=[
-                cmd,
-                "# 파싱 로직을 탐색하려면 extras를 추가, 예:",
-                f"#   {cmd} --es payload \"$(printf 'A%.0s' {{1..1024}})\"",
-            ],
-            expected_evidence=(
-                "컴포넌트가 호출자 shell uid(2000)로 시작/수신됩니다 (앱 uid가 "
-                "아님). logcat에 onCreate/onStartCommand/onReceive 진입 로그가 "
-                "남습니다."
-            ),
-            references=list(finding.references),
-        ))
+    primary_cmd = _am_command_for(component, pkg, actions[0])
+    commands: list[str] = []
+    if len(actions) == 1:
+        commands.append(primary_cmd)
+    else:
+        commands.append(
+            f"# {len(actions)} intent-filter actions — 각 라인을 차례로 시도"
+        )
+        for action in actions:
+            commands.append(_am_command_for(component, pkg, action))
+    commands.extend([
+        "",
+        "# 파싱 로직을 탐색하려면 extras를 추가, 예:",
+        f"#   {primary_cmd} --es payload \"$(printf 'A%.0s' {{1..1024}})\"",
+    ])
+    title = f"외부 노출 {type_korean} '{component.name}' 호출"
+    if len(actions) > 1:
+        title += f" — {len(actions)} actions"
+    artifacts.append(PoCArtifact(
+        rule_id=finding.rule_id,
+        title=title,
+        severity=finding.severity,
+        kind="adb",
+        package_name=pkg,
+        component=component.name,
+        description=(
+            f"외부에 노출된 {type_korean}가 권한 없이 외부 인텐트를 수용합니다. "
+            f"이 컴포넌트는 {len(actions)}개의 intent-filter action을 가지며, "
+            "본 레시피는 각 action을 차례로 시도합니다 — 실제 공격에서는 "
+            "onCreate/onReceive 안의 신뢰 결정 지점으로 전달되는 extras를 "
+            "조작해 함께 보냅니다."
+        ),
+        commands=commands,
+        expected_evidence=(
+            "컴포넌트가 호출자 shell uid(2000)로 시작/수신됩니다 (앱 uid가 "
+            "아님). logcat에 onCreate/onStartCommand/onReceive 진입 로그가 "
+            "남습니다."
+        ),
+        references=list(finding.references),
+    ))
     artifacts.extend(_deeplink_pocs(component, pkg, finding))
     artifacts.append(_frida_intent_observer(component, pkg, finding))
     return artifacts
