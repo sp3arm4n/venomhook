@@ -406,6 +406,11 @@ class TestExtractNativeMethods(unittest.TestCase):
 
 
 class TestRunJadx(unittest.TestCase):
+    def test_config_positional_extra_args_compatibility(self):
+        cfg = JadxConfig(None, True, True, True, False, 8, 120, ["--log-level", "error"])
+        self.assertEqual(cfg.extra_args, ["--log-level", "error"])
+        self.assertFalse(cfg.fast_mode)
+
     def test_missing_apk_raises(self):
         with tempfile.TemporaryDirectory() as td:
             cfg = JadxConfig(jadx_path="/bin/true")

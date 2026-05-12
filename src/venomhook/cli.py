@@ -1031,7 +1031,7 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
 
     def write_json(path: Path, payload: object) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2))
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     if args.out_dir:
         work_dir = args.out_dir
@@ -1312,7 +1312,7 @@ def cmd_android_cache_diff(args: argparse.Namespace) -> None:
 
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
-        args.json.write_text(json.dumps(diff.to_dict(), indent=2))
+        args.json.write_text(json.dumps(diff.to_dict(), indent=2), encoding="utf-8")
         logging.info("diff written to %s", args.json)
 
     if args.exit_on_changes and diff.has_changes:

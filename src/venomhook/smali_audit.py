@@ -48,7 +48,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, Optional
+from typing import Iterator, Optional
 
 from venomhook.code_audit import (
     DEFAULT_THIRD_PARTY_PREFIXES,
@@ -101,9 +101,8 @@ _EXT_STORAGE_RE = re.compile(
 )
 
 # CODE-006 — MODE_WORLD_* file/preference modes. Smali references these
-# as immediate constants (0x1 / 0x2) right before Context->openFileOutput
-# or Context->getSharedPreferences. We match the MODE_* sget patterns
-# AND the explicit numeric constants when accompanied by openFileOutput.
+# either as field reads or as numeric mode constants (0x1 / 0x2) passed
+# into Context.openFileOutput / getSharedPreferences.
 _MODE_WORLD_RE = re.compile(
     r'(?:'
     r'sget\s+\w+,\s*Landroid/content/Context;->MODE_WORLD_(?:READABLE|WRITEABLE)'
@@ -113,6 +112,21 @@ _MODE_WORLD_RE = re.compile(
     r')',
     re.IGNORECASE,
 )
+_MODE_WORLD_CONST_RE = re.compile(
+    r'\bconst(?:/\w+)?\s+(?P<reg>[vp]\d+),\s*(?P<value>0x[12]|[12])\b',
+    re.IGNORECASE,
+)
+_CONTEXT_MODE_CALL_RE = re.compile(
+    r'invoke-(?:virtual|interface|direct|super)[^{]*\{(?P<regs>[^}]*)\},\s*'
+    r'Landroid/content/Context;->'
+    r'(?P<method>openFileOutput|getSharedPreferences)\('
+)
+_MODE_VALUE_NAMES = {
+    "0x1": "MODE_WORLD_READABLE",
+    "1": "MODE_WORLD_READABLE",
+    "0x2": "MODE_WORLD_WRITEABLE",
+    "2": "MODE_WORLD_WRITEABLE",
+}
 
 
 @dataclass(frozen=True)
@@ -204,6 +218,7 @@ SMALI_RULES: tuple[_Rule, ...] = (
         ),
     ),
 )
+_RULE_BY_ID = {rule.rule_id: rule for rule in SMALI_RULES}
 
 
 # ---------- file iteration ----------
@@ -274,6 +289,30 @@ def _smali_class_fqn(rel: Path) -> str:
     return ".".join(parts)
 
 
+def _finding_for_rule(
+    rule: _Rule,
+    *,
+    rel: Path,
+    line_no: int,
+    line: str,
+    class_fqn: str,
+    matched: str,
+) -> CodeFinding:
+    return CodeFinding(
+        rule_id=rule.rule_id,
+        title=rule.title,
+        severity=rule.severity,
+        file=str(rel),
+        line_no=line_no,
+        line_text=line.strip()[:300],
+        class_fqn=class_fqn,
+        detail=rule.detail_template.format(matched=matched.strip()),
+        remediation=rule.remediation,
+        references=list(rule.references),
+        evidence_tier="smali",
+    )
+
+
 def audit_smali(
     apktool_out: str | Path,
     app_meta: Optional[AndroidAppMeta] = None,
@@ -298,10 +337,41 @@ def audit_smali(
         except OSError:
             continue
         class_fqn = _smali_class_fqn(rel)
+        mode_world_regs: dict[str, tuple[int, str]] = {}
         for line_no, raw_line in enumerate(text.splitlines(), 1):
             line = _strip_line_comment(raw_line)
             if not line:
                 continue
+            const_match = _MODE_WORLD_CONST_RE.search(line)
+            if const_match:
+                value = const_match.group("value").lower()
+                mode_world_regs[const_match.group("reg")] = (
+                    line_no,
+                    _MODE_VALUE_NAMES[value],
+                )
+
+            call_match = _CONTEXT_MODE_CALL_RE.search(line)
+            if call_match and counts_per_rule["CODE-006"] < max_findings_per_rule:
+                regs = [r.strip() for r in call_match.group("regs").split(",")]
+                for reg in regs:
+                    prior = mode_world_regs.get(reg)
+                    if not prior:
+                        continue
+                    const_line_no, mode_name = prior
+                    if line_no - const_line_no > 5:
+                        continue
+                    rule = _RULE_BY_ID["CODE-006"]
+                    findings.append(_finding_for_rule(
+                        rule,
+                        rel=rel,
+                        line_no=line_no,
+                        line=line,
+                        class_fqn=class_fqn,
+                        matched=mode_name,
+                    ))
+                    counts_per_rule["CODE-006"] += 1
+                    break
+
             for rule in SMALI_RULES:
                 if counts_per_rule[rule.rule_id] >= max_findings_per_rule:
                     continue
@@ -309,18 +379,13 @@ def audit_smali(
                 if not m:
                     continue
                 matched = m.group(1) if m.groups() else m.group(0)
-                findings.append(CodeFinding(
-                    rule_id=rule.rule_id,
-                    title=rule.title,
-                    severity=rule.severity,
-                    file=str(rel),
+                findings.append(_finding_for_rule(
+                    rule,
+                    rel=rel,
                     line_no=line_no,
-                    line_text=line.strip()[:300],
+                    line=line,
                     class_fqn=class_fqn,
-                    detail=rule.detail_template.format(matched=matched.strip()),
-                    remediation=rule.remediation,
-                    references=list(rule.references),
-                    evidence_tier="smali",
+                    matched=matched,
                 ))
                 counts_per_rule[rule.rule_id] += 1
 

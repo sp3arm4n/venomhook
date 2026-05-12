@@ -85,6 +85,7 @@ class JadxConfig:
     show_bad_code: bool = False      # --show-bad-code (emits broken decompilations)
     threads: Optional[int] = None    # -j N (None = jadx default of 4)
     timeout_sec: int = 600
+    extra_args: list[str] = field(default_factory=list)
     # Phase 10-5: -m simple skips deobfuscation passes and uses the
     # linear (goto-style) IR translation. Output Java is uglier but the
     # rule patterns we run on it (const-string + method invocations)
@@ -92,7 +93,6 @@ class JadxConfig:
     # by 30-50% — at the cost of harder-to-read .java for any manual
     # follow-up. When False (default) jadx picks "auto" mode.
     fast_mode: bool = False
-    extra_args: list[str] = field(default_factory=list)
 
 
 @dataclass
