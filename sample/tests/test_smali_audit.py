@@ -284,12 +284,16 @@ class MergeCodeReportsTests(unittest.TestCase):
         merged = merge_code_reports(None, smali)
         self.assertIs(merged, smali)
 
-    def test_java_wins_on_overlap(self):
+    def test_java_wins_on_overlap_with_smali_fold(self):
+        """Phase 11-5: java tier survives, smali primary line folds into
+        java's occurrences as additional evidence.
+        """
         java = CodeAuditReport(
             package_name="com.x",
             findings=[CodeFinding(
                 rule_id="CODE-001", title="java", severity="medium",
                 file="x.java", class_fqn="com.x.A",
+                line_no=10,
                 line_text="String url = \"http://...\"",
             )],
             files_scanned=1,
@@ -299,17 +303,83 @@ class MergeCodeReportsTests(unittest.TestCase):
             findings=[CodeFinding(
                 rule_id="CODE-001", title="smali", severity="medium",
                 file="x.smali", class_fqn="com.x.A", evidence_tier="smali",
+                line_no=25,
                 line_text="const-string v0, \"http://...\"",
             )],
             files_scanned=2,
         )
         merged = merge_code_reports(java, smali)
         self.assertEqual(len(merged.findings), 1)
-        # java tier survived
-        self.assertEqual(merged.findings[0].evidence_tier, "java")
-        self.assertEqual(merged.findings[0].title, "java")
+        # java tier survived as the representative
+        rep = merged.findings[0]
+        self.assertEqual(rep.evidence_tier, "java")
+        self.assertEqual(rep.title, "java")
+        # smali tier folded in as occurrence (NEW in Phase 11-5)
+        self.assertEqual(len(rep.occurrences), 1)
+        self.assertEqual(rep.occurrences[0].evidence_tier, "smali")
+        self.assertEqual(rep.occurrences[0].line_no, 25)
         # files_scanned is sum
         self.assertEqual(merged.files_scanned, 3)
+
+    def test_smali_occurrences_also_fold_into_java_rep(self):
+        """If smali tier itself dedup-grouped multiple lines into one
+        finding + occurrences, the WHOLE smali bundle (primary + occs)
+        attaches to the java representative.
+        """
+        from venomhook.models import CodeOccurrence
+        java = CodeAuditReport(
+            package_name="com.x",
+            findings=[CodeFinding(
+                rule_id="CODE-001", title="java", severity="medium",
+                file="x.java", class_fqn="com.x.A", line_no=10,
+            )],
+            files_scanned=1,
+        )
+        smali_finding = CodeFinding(
+            rule_id="CODE-001", title="smali", severity="medium",
+            file="x.smali", class_fqn="com.x.A", evidence_tier="smali",
+            line_no=25,
+            occurrences=[
+                CodeOccurrence(line_no=30, line_text="b", evidence_tier="smali"),
+                CodeOccurrence(line_no=40, line_text="c", evidence_tier="smali"),
+            ],
+        )
+        smali = CodeAuditReport(
+            package_name="com.x",
+            findings=[smali_finding],
+            files_scanned=2,
+        )
+        merged = merge_code_reports(java, smali)
+        rep = merged.findings[0]
+        # 1 (smali primary) + 2 (smali's own occurrences) = 3 smali occs
+        # on the java representative
+        self.assertEqual(len(rep.occurrences), 3)
+        self.assertEqual({o.evidence_tier for o in rep.occurrences}, {"smali"})
+
+    def test_severity_difference_keeps_smali_separate(self):
+        """High and medium severity findings on the same class stay as
+        two cards (mirrors the dedup_findings_by_class semantics).
+        """
+        java = CodeAuditReport(
+            package_name="com.x",
+            findings=[CodeFinding(
+                rule_id="CODE-002", title="java-high", severity="high",
+                file="x.java", class_fqn="com.x.W", line_no=10,
+            )],
+        )
+        smali = CodeAuditReport(
+            package_name="com.x",
+            findings=[CodeFinding(
+                rule_id="CODE-002", title="smali-medium", severity="medium",
+                file="x.smali", class_fqn="com.x.W", evidence_tier="smali",
+                line_no=25,
+            )],
+        )
+        merged = merge_code_reports(java, smali)
+        self.assertEqual(len(merged.findings), 2)
+        # No fold — different severities are not the same finding
+        for f in merged.findings:
+            self.assertEqual(f.occurrences, [])
 
     def test_distinct_findings_concatenate(self):
         java = CodeAuditReport(
