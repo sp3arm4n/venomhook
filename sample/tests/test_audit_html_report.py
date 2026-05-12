@@ -518,5 +518,81 @@ class TaxonomySectionTest(unittest.TestCase):
         self.assertIn(">CODE-003<", html)
 
 
+class OccurrencesAndAppliesToRenderTests(unittest.TestCase):
+    """Phase 11-1 / 11-3 HTML: occurrence badge + applies_to chip."""
+
+    def test_code_finding_occurrence_count_badge_renders(self) -> None:
+        from venomhook.models import CodeOccurrence
+        cf = CodeFinding(
+            rule_id="CODE-001", title="hardcoded HTTP", severity="high",
+            file="com/demo/Net.java", line_no=42,
+            line_text='String url = "http://a";',
+            class_fqn="com.demo.Net",
+            detail="..", remediation="use https",
+            occurrences=[
+                CodeOccurrence(line_no=50, line_text='"http://b";'),
+                CodeOccurrence(line_no=58, line_text='"http://c";',
+                               evidence_tier="smali"),
+            ],
+        )
+        analysis = _analysis_with_code_findings(code_findings=[cf])
+        html = render_audit_html(analysis)
+        # x3 = primary + 2 occurrences
+        self.assertIn("×3건", html)
+        # Collapsible additional evidence
+        self.assertIn("동일 클래스 내 추가 단서", html)
+        self.assertIn("L50", html)
+        self.assertIn("L58", html)
+        # Smali tier label on the divergent occurrence
+        self.assertIn("[smali]", html)
+
+    def test_code_finding_no_badge_when_single_occurrence(self) -> None:
+        cf = CodeFinding(
+            rule_id="CODE-001", title="t", severity="high",
+            file="com/demo/A.java", line_no=10, class_fqn="com.demo.A",
+        )
+        analysis = _analysis_with_code_findings(code_findings=[cf])
+        html = render_audit_html(analysis)
+        self.assertNotIn("×1건", html)
+        self.assertNotIn("추가 단서", html)
+
+    def test_smali_tier_label_renders(self) -> None:
+        cf = CodeFinding(
+            rule_id="CODE-003", title="weak crypto", severity="high",
+            file="com/demo/C.smali", line_no=12, class_fqn="com.demo.C",
+            evidence_tier="smali",
+        )
+        analysis = _analysis_with_code_findings(code_findings=[cf])
+        html = render_audit_html(analysis)
+        self.assertIn("tier: smali", html)
+
+    def test_poc_applies_to_chip_renders(self) -> None:
+        """PoC card summary should show '+N 적용' when applies_to non-empty."""
+        from venomhook.poc_generator import PER_RULE_BUILDERS
+        # Generate via the actual builder so we get the right shape, then
+        # mutate applies_to like the dedup helper would.
+        meta = _stub_app()
+        findings = [
+            ManifestFinding(
+                rule_id="MANIFEST-004", title="외부 노출 액티비티",
+                severity="high",
+                detail="d", remediation="r",
+                component="com.demo.A",
+                references=[],
+            ),
+        ]
+        artifacts = PER_RULE_BUILDERS["MANIFEST-004"](meta, findings[0])
+        artifacts[0].applies_to = ["com.demo.B", "com.demo.C"]
+
+        from venomhook.android_pipeline import AndroidAnalysis
+        analysis = _stub_analysis()
+        analysis.pocs = artifacts
+        analysis.audit_report.findings = findings
+        html = render_audit_html(analysis)
+        self.assertIn("+2 적용", html)
+        self.assertIn("com.demo.B", html)
+        self.assertIn("com.demo.C", html)
+
+
 if __name__ == "__main__":
     unittest.main()

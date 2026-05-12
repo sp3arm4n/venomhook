@@ -35,6 +35,7 @@ from venomhook.models import (
 from venomhook.poc_generator import (
     PER_CODE_RULE_BUILDERS,
     PER_RULE_BUILDERS,
+    dedup_pocs_by_template,
     format_pocs_text,
     generate_code_pocs,
     generate_pocs,
@@ -202,7 +203,11 @@ class AllowBackupBuilderTests(unittest.TestCase):
 
 
 class ExportedNoPermissionBuilderTests(unittest.TestCase):
-    def test_per_action_artifact_for_activity(self) -> None:
+    def test_actions_grouped_into_single_artifact_per_component(self) -> None:
+        """Phase 11-2: one adb PoC per component with every action in
+        commands (was: N adb PoCs for N actions). Plus one Frida
+        observer per component, unchanged.
+        """
         comp = _comp(
             type="activity", name="com.x.PublicAct",
             exported=True, exported_declared=True,
@@ -211,15 +216,32 @@ class ExportedNoPermissionBuilderTests(unittest.TestCase):
         )
         meta = _meta(components=[comp])
         arts = generate_pocs(meta, audit_manifest(meta))
-        # one ADB artifact per action + one Frida observer for the component
-        self.assertEqual(len(arts), 3)
         adb_arts = [a for a in arts if a.kind == "adb"]
         frida_arts = [a for a in arts if a.kind == "frida"]
-        self.assertEqual(len(adb_arts), 2)
+        self.assertEqual(len(adb_arts), 1, f"got {len(adb_arts)} adb PoCs, expected 1")
         self.assertEqual(len(frida_arts), 1)
-        for a in adb_arts:
-            self.assertEqual(a.component, "com.x.PublicAct")
-            self.assertTrue(any("am start" in c for c in a.commands))
+        adb = adb_arts[0]
+        self.assertEqual(adb.component, "com.x.PublicAct")
+        # Both actions present in commands of the single artifact
+        joined = "\n".join(adb.commands)
+        self.assertIn("android.intent.action.VIEW", joined)
+        self.assertIn("android.intent.action.SEND", joined)
+        self.assertIn("2 actions", adb.title)
+
+    def test_single_action_no_action_count_suffix(self) -> None:
+        """When the component has only one action the title stays clean."""
+        comp = _comp(
+            type="activity", name="com.x.OneAct",
+            exported=True, exported_declared=True,
+            intent_actions=["android.intent.action.MAIN"],
+        )
+        meta = _meta(components=[comp])
+        arts = generate_pocs(meta, audit_manifest(meta))
+        adb = next(a for a in arts if a.kind == "adb")
+        self.assertNotIn("actions", adb.title)
+        self.assertEqual(adb.commands.count(
+            "# 1 intent-filter actions — 각 라인을 차례로 시도"
+        ), 0)
 
     def test_frida_observer_for_activity_hooks_oncreate(self) -> None:
         comp = _comp(
@@ -710,6 +732,109 @@ class FormatPocsTextTests(unittest.TestCase):
         self.assertIn("MANIFEST-001", out)
         self.assertIn("종류: adb", out)
         self.assertIn("adb forward", out)
+
+
+class DedupPocsByTemplateTests(unittest.TestCase):
+    """Phase 11-3: same-shape PoCs collapse, applies_to records targets."""
+
+    def _p(self, *, rule="MANIFEST-004", kind="adb", title="t",
+           commands=None, component=None, severity="high") -> PoCArtifact:
+        return PoCArtifact(
+            rule_id=rule, title=title, severity=severity, kind=kind,
+            package_name="com.demo", component=component,
+            commands=list(commands or []),
+        )
+
+    def test_empty_input(self):
+        self.assertEqual(dedup_pocs_by_template([]), [])
+
+    def test_unique_pocs_passthrough(self):
+        a = self._p(commands=["am start -n com.demo/.A"])
+        b = self._p(rule="MANIFEST-005", commands=["adb backup"])
+        out = dedup_pocs_by_template([a, b])
+        self.assertEqual(len(out), 2)
+        for p in out:
+            self.assertEqual(p.applies_to, [])
+
+    def test_same_shape_different_component_collapses(self):
+        """Two adb am-start commands targeting different com.demo classes
+        must dedup to one representative + applies_to listing the second.
+        """
+        a = self._p(
+            title="외부 노출 액티비티 'com.demo.A' 호출",
+            component="com.demo.A",
+            commands=["adb shell am start -n com.demo/com.demo.A"],
+        )
+        b = self._p(
+            title="외부 노출 액티비티 'com.demo.B' 호출",
+            component="com.demo.B",
+            commands=["adb shell am start -n com.demo/com.demo.B"],
+        )
+        out = dedup_pocs_by_template([a, b])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].component, "com.demo.A")
+        self.assertEqual(out[0].applies_to, ["com.demo.B"])
+
+    def test_three_components_collapse_to_one(self):
+        ps = [
+            self._p(
+                title=f"외부 노출 액티비티 '{cls}' 호출",
+                component=cls,
+                commands=[f"adb shell am start -n com.demo/{cls}"],
+            )
+            for cls in ("com.demo.A", "com.demo.B", "com.demo.C")
+        ]
+        out = dedup_pocs_by_template(ps)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(set(out[0].applies_to), {"com.demo.B", "com.demo.C"})
+
+    def test_different_severity_not_collapsed(self):
+        a = self._p(severity="high",   component="com.demo.A",
+                    commands=["adb shell am start -n com.demo/com.demo.A"])
+        b = self._p(severity="medium", component="com.demo.B",
+                    commands=["adb shell am start -n com.demo/com.demo.B"])
+        out = dedup_pocs_by_template([a, b])
+        self.assertEqual(len(out), 2)
+
+    def test_different_kind_not_collapsed(self):
+        a = self._p(kind="adb",   component="com.demo.A",
+                    commands=["adb shell am start -n com.demo/com.demo.A"])
+        b = self._p(kind="frida", component="com.demo.A",
+                    commands=["Java.use('com.demo.A')"])
+        out = dedup_pocs_by_template([a, b])
+        self.assertEqual(len(out), 2)
+
+    def test_deeplink_uri_normalized_for_dedup(self):
+        """kakaotalk://x/foo vs kakaotalk://x/bar → same template, dedup."""
+        a = self._p(
+            title="Deeplink 진입: kakaotalk://foo",
+            component="com.demo.SchemeBridgeA",
+            commands=[
+                "adb shell am start -W -a android.intent.action.VIEW "
+                "-d 'kakaotalk://foo/path1'"
+            ],
+        )
+        b = self._p(
+            title="Deeplink 진입: kakaotalk://bar",
+            component="com.demo.SchemeBridgeB",
+            commands=[
+                "adb shell am start -W -a android.intent.action.VIEW "
+                "-d 'kakaotalk://bar/path2'"
+            ],
+        )
+        out = dedup_pocs_by_template([a, b])
+        self.assertEqual(len(out), 1)
+        self.assertIn("com.demo.SchemeBridgeB", out[0].applies_to)
+
+    def test_applies_to_round_trips_via_dict(self):
+        p = self._p(component="com.demo.A")
+        p.applies_to = ["com.demo.B", "com.demo.C"]
+        rt = PoCArtifact.from_dict(p.to_dict())
+        self.assertEqual(rt.applies_to, ["com.demo.B", "com.demo.C"])
+
+    def test_empty_applies_to_omitted_from_json(self):
+        p = self._p(component="com.demo.A")
+        self.assertNotIn("applies_to", p.to_dict())
 
 
 if __name__ == "__main__":

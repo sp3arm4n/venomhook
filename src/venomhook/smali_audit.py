@@ -53,6 +53,7 @@ from typing import Iterator, Optional
 from venomhook.code_audit import (
     DEFAULT_THIRD_PARTY_PREFIXES,
     _strip_line_comment,  # quote-aware to match code_audit conventions
+    dedup_findings_by_class,
 )
 from venomhook.models import (
     AndroidAppMeta,
@@ -390,6 +391,10 @@ def audit_smali(
                 counts_per_rule[rule.rule_id] += 1
 
     package_name = app_meta.package_name if app_meta else ""
+    # Phase 11-1: same dedup the .java tier uses — KakaoTalk's
+    # smali tier saw 306 findings before dedup; same (rule, class)
+    # collapse turns it into representative + occurrences.
+    findings = dedup_findings_by_class(findings)
     return CodeAuditReport(
         package_name=package_name,
         findings=findings,
@@ -403,15 +408,24 @@ def merge_code_reports(
 ) -> Optional[CodeAuditReport]:
     """Combine .java and smali findings, preferring .java on overlap.
 
-    Two findings are considered the same when their (rule_id, class_fqn)
-    match — the .java tier wins because its evidence (line text) is
-    more readable. The smali tier covers the gap when jadx had no
-    output for a given class.
+    Two findings are considered the same when their
+    (rule_id, class_fqn, severity) match — the .java tier wins because
+    its evidence (line text) is more readable. The smali tier covers
+    the gap when jadx had no output for a given class.
+
+    Phase 11-5: when both tiers fired on the same (rule, class, severity),
+    the smali finding's primary line + its occurrences are folded into
+    the java representative's ``occurrences`` list as additional
+    smali-tier evidence. This avoids dropping useful smali matches
+    silently — even when java tier ran, smali may have caught extra
+    lines that jadx couldn't decompile.
 
     Either argument can be None; result is the other (or None when both
     are None). When both are present, the smali tier's files_scanned is
     added to the result for completeness, and partial flag is OR'd.
     """
+    from venomhook.models import CodeOccurrence
+
     if java_report is None and smali_report is None:
         return None
     if java_report is None:
@@ -419,16 +433,38 @@ def merge_code_reports(
     if smali_report is None:
         return java_report
 
-    seen: set[tuple[str, str]] = {
-        (f.rule_id, f.class_fqn) for f in java_report.findings
-    }
+    # Index java findings by (rule, class_or_file, severity) so a smali
+    # match on the same key can fold instead of duplicate.
+    java_index: dict[tuple[str, str, str], CodeFinding] = {}
+    for jf in java_report.findings:
+        key = (jf.rule_id, jf.class_fqn or jf.file, jf.severity)
+        # Last write wins on collision (shouldn't happen post P11-1 dedup
+        # but defensive). Keep the first instead so order matches input.
+        java_index.setdefault(key, jf)
+
     merged: list[CodeFinding] = list(java_report.findings)
-    for f in smali_report.findings:
-        key = (f.rule_id, f.class_fqn)
-        if key in seen:
+    for sf in smali_report.findings:
+        key = (sf.rule_id, sf.class_fqn or sf.file, sf.severity)
+        rep = java_index.get(key)
+        if rep is None:
+            # No overlap — keep the smali finding as a separate entry.
+            merged.append(sf)
             continue
-        merged.append(f)
-        seen.add(key)
+        # Same (rule, class, severity) in both tiers — fold smali into
+        # the java representative as additional evidence.
+        rep.occurrences.append(CodeOccurrence(
+            line_no=sf.line_no,
+            line_text=sf.line_text,
+            file=sf.file if sf.file != rep.file else "",
+            evidence_tier="smali",
+        ))
+        for occ in sf.occurrences:
+            rep.occurrences.append(CodeOccurrence(
+                line_no=occ.line_no,
+                line_text=occ.line_text,
+                file=occ.file if occ.file != rep.file else "",
+                evidence_tier="smali",
+            ))
 
     return CodeAuditReport(
         package_name=java_report.package_name or smali_report.package_name,

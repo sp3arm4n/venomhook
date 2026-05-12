@@ -21,8 +21,9 @@ PE, ELF, Mach-O를 같은 데이터 모델로 다룹니다. Android APK 분석�
   - **Java tier** — jadx 디컴파일 결과 위에서 6 룰 (평문 HTTP, WebView setJavaScriptEnabled / addJavascriptInterface, 약한 Cipher / 해시, 평문 자격증명 로그, 외부 저장소 사용, MODE_WORLD_READABLE/WRITEABLE)
   - **Smali tier (NEW)** — jadx가 타임아웃 / 실패해도 apktool이 생성한 smali에서 4 룰(CODE-001/003/005/006)을 매칭. 패킹·난독화 APK에도 코드 결함 산출 보장
 - **공격면 추출** — deeplink / 데이터 스킴 / 카테고리, intent-filter 구조, JNI bridge correlation, .so 문자열 카테고리화 (URL / 경로 / 쉘 / crypto / 자격증명 단서 / SQL)
-- **PoC 자동 생성** — adb 명령, Frida 후킹, mitmproxy 가로채기, logcat grep 레시피를 .sh / .frida.js / .md 번들로 export
-- **자체 포함 HTML 보고서** — 심각도 색상 카드, MASVS 카테고리 그룹핑, 코드 단서 인용, on-disk PoC 링크 — 외부 자산 / JS 의존 없음
+- **PoC 자동 생성 + dedup** — adb 명령, Frida 후킹, mitmproxy 가로채기, logcat grep 레시피를 .sh / .frida.js / .md 번들로 export. 동일 템플릿 PoC는 자동으로 1개 + `applies_to` 컴포넌트 리스트로 압축 (KakaoTalk-급 APK에서 190→17 PoCs로 −91% 압축)
+- **결과 정규화** — 같은 클래스 안의 동일 룰 반복 발화는 1개의 finding + `occurrences` 펼침으로 압축. 펜테스트 보고서 가독성↑
+- **자체 포함 HTML 보고서** — 심각도 색상 카드, MASVS 카테고리 그룹핑, 코드 단서 인용, occurrence 펼침 + applies_to 칩, on-disk PoC 링크 — 외부 자산 / JS 의존 없음
 - **10단계 라이브 진행 출력** — 모든 단계가 stderr에 `[N/10] step ...` 형식으로 진행 표시. `--quiet`로 억제 가능
 
 이 도구는 권한이 있는 분석 대상에서 리버스 엔지니어링, 보안 검증, 펜테스트, 동적 계측 자동화를 돕기 위한 용도입니다.
@@ -177,7 +178,7 @@ venomhook/
 ├── ghidra_scripts/
 ├── sample/
 │   ├── examples/
-│   └── tests/                 # 834+ 단위 테스트
+│   └── tests/                 # 864+ 단위 테스트
 ├── setup/
 ├── src/venomhook/
 │   ├── apk_decoder.py         # Manifest + apktool.yml + NSC + intent-filter 파싱

@@ -330,12 +330,28 @@ def _render_poc(link: _PocLink) -> str:
             f'<a class="file-link" href="{escape(link.href, quote=True)}" '
             f'title="실행 가능 아티팩트 열기">{escape(Path(link.href).name)}</a>'
         )
+    # Phase 11-3: applies_to chip in summary so the operator knows this
+    # single .sh covers multiple components / classes without unfolding.
+    applies_chip = ""
+    if a.applies_to:
+        applies_chip = (
+            f'<span class="kind" style="background: var(--card-muted);">'
+            f'+{len(a.applies_to)} 적용</span>'
+        )
     body_parts: list[str] = []
     if a.description:
         body_parts.append(f"<p>{escape(a.description)}</p>")
     if a.commands:
         cmd_text = "\n".join(a.commands)
         body_parts.append(f"<pre>{escape(cmd_text)}</pre>")
+    # Phase 11-3: explicit applies_to list inside the body so operators
+    # can copy the additional targets straight out of the report.
+    if a.applies_to:
+        items = "".join(f"<li><code>{escape(t)}</code></li>" for t in a.applies_to)
+        body_parts.append(
+            '<p><strong>다음 컴포넌트에도 동일 템플릿 적용 가능:</strong>'
+            f'<ul style="margin: 6px 0 0 0; font-size: 0.88em;">{items}</ul></p>'
+        )
     if a.expected_evidence:
         body_parts.append(
             f"<p><strong>예상 결과:</strong> {escape(a.expected_evidence)}</p>"
@@ -354,6 +370,7 @@ def _render_poc(link: _PocLink) -> str:
         f'<summary>'
         f'<span class="kind">{kind_label}</span>'
         f'<span class="title">{title}</span>'
+        f'{applies_chip}'
         f'{file_link}'
         f'</summary>'
         f'<div class="body">{body_html}</div>'
@@ -441,6 +458,22 @@ def _render_code_finding_card(
     if finding.file:
         loc = f"{finding.file}:{finding.line_no}" if finding.line_no else finding.file
         location = f'<span class="component">{escape(loc)}</span>'
+    # Phase 11-1: occurrence count badge. 1 = unique, N>1 = "+ N-1 more lines
+    # in the same class". Tier label sits beside it so smali-tier findings
+    # carry their evidence form prominently.
+    badges: list[str] = []
+    if finding.occurrence_count > 1:
+        badges.append(
+            f'<span class="sev-chip" style="font-size:0.78em;">'
+            f'×{finding.occurrence_count}건</span>'
+        )
+    if finding.evidence_tier and finding.evidence_tier != "java":
+        badges.append(
+            f'<span class="sev-chip" style="font-size:0.78em;">'
+            f'tier: {escape(finding.evidence_tier)}</span>'
+        )
+    badge_html = " ".join(badges)
+
     body_parts: list[str] = []
     if finding.detail:
         body_parts.append(f'<div class="description">{escape(finding.detail)}</div>')
@@ -448,6 +481,34 @@ def _render_code_finding_card(
         body_parts.append(
             '<div class="description"><strong>코드 단서:</strong> '
             f'<code>{escape(finding.line_text[:240])}</code></div>'
+        )
+    # Phase 11-1: additional occurrences as a collapsible <details>.
+    if finding.occurrences:
+        occ_rows = []
+        for o in finding.occurrences:
+            file_part = (
+                f' <span class="rule-id">{escape(o.file)}</span>'
+                if o.file else ""
+            )
+            text_part = (
+                f' <code>{escape((o.line_text or "")[:200])}</code>'
+                if o.line_text else ""
+            )
+            tier_part = (
+                f' <span class="rule-id">[{escape(o.evidence_tier)}]</span>'
+                if o.evidence_tier and o.evidence_tier != finding.evidence_tier else ""
+            )
+            occ_rows.append(
+                f'<li><strong>L{o.line_no}</strong>{file_part}{tier_part}{text_part}</li>'
+            )
+        body_parts.append(
+            '<details style="margin-top:8px;">'
+            f'<summary style="cursor:pointer; font-size:0.88em; '
+            f'color: var(--text-muted);">동일 클래스 내 추가 단서 '
+            f'{len(finding.occurrences)}건 펼치기</summary>'
+            f'<ul style="margin: 6px 0 0 0; font-size:0.85em;">'
+            + "".join(occ_rows)
+            + "</ul></details>"
         )
     if finding.remediation:
         body_parts.append(
@@ -477,6 +538,7 @@ def _render_code_finding_card(
         f'<span class="rule-id">{rule_id}</span>'
         f'<h3>{title}</h3>'
         f'{location}'
+        f"{badge_html}"
         f"</header>"
         f"{desc}"
         f"{refs}"
