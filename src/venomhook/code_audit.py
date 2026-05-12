@@ -49,6 +49,7 @@ from venomhook.models import (
     AndroidAppMeta,
     CodeAuditReport,
     CodeFinding,
+    CodeOccurrence,
 )
 
 
@@ -57,6 +58,7 @@ __all__ = [
     "iter_app_java_files",
     "RULES",
     "DEFAULT_THIRD_PARTY_PREFIXES",
+    "dedup_findings_by_class",
 ]
 
 
@@ -614,6 +616,57 @@ RULES: list[RuleFn] = [
 ]
 
 
+def dedup_findings_by_class(
+    findings: Iterable[CodeFinding],
+) -> list[CodeFinding]:
+    """Phase 11-1: collapse findings sharing (rule_id, class_fqn, severity)
+    into one representative + occurrences list.
+
+    Same class, same rule, *same severity*, multiple matching lines used
+    to produce N separate cards (KakaoTalk's ``com.caverock.androidsvg.i``
+    fired CODE-001 12 times all at high). Operators reading the report
+    scrolled past the same problem repeated; this helper keeps the first
+    occurrence as the representative finding and folds the rest into
+    ``CodeFinding.occurrences``.
+
+    The key includes severity so a single rule that emits multiple
+    severity variants (CODE-002's medium ``setJavaScriptEnabled(true)``
+    vs high ``addJavascriptInterface``) stays as two separate findings —
+    operators triaging by severity would lose the high signal otherwise.
+
+    Grouping key prefers ``class_fqn`` (recovered from package +
+    Class.java naming); falls back to ``file`` for findings whose
+    enclosing class can't be inferred (default-package code, header
+    comments, etc.).
+
+    Stable: representatives appear in the order their first occurrence
+    came from the rules. Each occurrence retains its (line_no,
+    line_text, file, evidence_tier) so HTML can render a "주요 +
+    N개 추가" expandable section.
+    """
+    out: list[CodeFinding] = []
+    index: dict[tuple[str, str, str], int] = {}
+    for f in findings:
+        key_class = f.class_fqn or f.file
+        key = (f.rule_id, key_class, f.severity)
+        slot = index.get(key)
+        if slot is None:
+            index[key] = len(out)
+            out.append(f)
+            continue
+        existing = out[slot]
+        # Don't duplicate the representative line itself.
+        if f.line_no == existing.line_no and f.file == existing.file:
+            continue
+        existing.occurrences.append(CodeOccurrence(
+            line_no=f.line_no,
+            line_text=f.line_text,
+            file=f.file if f.file != existing.file else "",
+            evidence_tier=f.evidence_tier,
+        ))
+    return out
+
+
 def audit_code(
     sources_dir: Path | str,
     meta: Optional[AndroidAppMeta] = None,
@@ -626,6 +679,11 @@ def audit_code(
     on repeat calls. Returns an empty report (with files_scanned=0) when
     the sources directory doesn't exist; callers that care about the
     distinction between "no findings" and "no scan" can check that.
+
+    Phase 11-1: findings sharing (rule_id, class_fqn) are deduplicated
+    via ``dedup_findings_by_class`` before being returned. Each
+    representative carries the extra matches in ``occurrences`` so no
+    evidence is lost while the report stays compact.
     """
     src = Path(sources_dir)
     files = iter_app_java_files(
@@ -636,6 +694,7 @@ def audit_code(
     findings: list[CodeFinding] = []
     for rule in RULES:
         findings.extend(rule(files, meta, src))
+    findings = dedup_findings_by_class(findings)
     return CodeAuditReport(
         package_name=meta.package_name if meta else "",
         findings=findings,

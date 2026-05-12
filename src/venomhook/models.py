@@ -749,6 +749,43 @@ class AndroidAuditReport:
 
 
 @dataclass
+class CodeOccurrence:
+    """One additional line where the same (rule_id, class_fqn) fired.
+
+    Phase 11-1. Used to compress duplicate findings inside one class —
+    the audit engine still scans every line, but the report shows one
+    representative finding per (rule, class) and rolls the rest into
+    ``CodeFinding.occurrences`` so the operator sees "URL hardcoded
+    here, plus 11 more lines in this class" instead of 12 separate
+    cards.
+    """
+
+    line_no: int
+    line_text: str = ""
+    file: str = ""
+    evidence_tier: str = "java"  # follows the parent finding's tier by default
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CodeOccurrence":
+        return cls(
+            line_no=int(data.get("line_no", 0)),
+            line_text=data.get("line_text", ""),
+            file=data.get("file", ""),
+            evidence_tier=data.get("evidence_tier", "java"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {"line_no": self.line_no}
+        if self.line_text:
+            result["line_text"] = self.line_text
+        if self.file:
+            result["file"] = self.file
+        if self.evidence_tier and self.evidence_tier != "java":
+            result["evidence_tier"] = self.evidence_tier
+        return result
+
+
+@dataclass
 class CodeFinding:
     """A single code-level rule violation found in jadx-decompiled Java sources.
 
@@ -780,6 +817,18 @@ class CodeFinding:
     # entirely. HTML / JSON consumers surface the tier next to each
     # finding so the reader knows the evidence form.
     evidence_tier: str = "java"
+    # Phase 11-1: additional matches of the same (rule_id, class_fqn) in
+    # the same class — kept as references to the line that fired so the
+    # operator sees the spread without 12 duplicated cards. The
+    # representative finding lives in the top-level fields above; this
+    # list carries the rest (skip the first match — it's already in
+    # the primary record).
+    occurrences: list[CodeOccurrence] = field(default_factory=list)
+
+    @property
+    def occurrence_count(self) -> int:
+        """Total matches (primary + extra occurrences). Useful for HTML."""
+        return 1 + len(self.occurrences)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "CodeFinding":
@@ -795,6 +844,10 @@ class CodeFinding:
             remediation=data.get("remediation", ""),
             references=list(data.get("references", [])),
             evidence_tier=data.get("evidence_tier", "java"),
+            occurrences=[
+                CodeOccurrence.from_dict(o)
+                for o in data.get("occurrences", [])
+            ],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -819,6 +872,8 @@ class CodeFinding:
         # Only serialize non-default tier to keep older JSON dumps clean.
         if self.evidence_tier and self.evidence_tier != "java":
             result["evidence_tier"] = self.evidence_tier
+        if self.occurrences:
+            result["occurrences"] = [o.to_dict() for o in self.occurrences]
         return result
 
 

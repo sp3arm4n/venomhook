@@ -17,11 +17,19 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from venomhook.code_audit import (
+    dedup_findings_by_class,  # noqa: F401  re-exported for tests below
+)
+from venomhook.code_audit import (
     DEFAULT_THIRD_PARTY_PREFIXES,
     audit_code,
     iter_app_java_files,
 )
-from venomhook.models import AndroidAppMeta, CodeAuditReport, CodeFinding
+from venomhook.models import (
+    AndroidAppMeta,
+    CodeAuditReport,
+    CodeFinding,
+    CodeOccurrence,
+)
 
 
 def _meta(package_name: str = "com.example.app") -> AndroidAppMeta:
@@ -567,6 +575,112 @@ class CodeAuditReportRoundTripTests(unittest.TestCase):
         self.assertEqual(roundtripped.package_name, "com.x")
         self.assertEqual(len(roundtripped.findings), 1)
         self.assertEqual(roundtripped.files_scanned, 42)
+
+
+class DedupFindingsByClassTests(unittest.TestCase):
+    """Phase 11-1: collapse same (rule_id, class_fqn) into representative+occurrences."""
+
+    def _f(self, rule_id="CODE-001", cls="com.x.A", line=1, file="x.java",
+           text="t", tier="java") -> CodeFinding:
+        return CodeFinding(
+            rule_id=rule_id, title="t", severity="medium",
+            file=file, line_no=line, line_text=text,
+            class_fqn=cls, evidence_tier=tier,
+        )
+
+    def test_empty_input(self):
+        self.assertEqual(dedup_findings_by_class([]), [])
+
+    def test_distinct_classes_kept_separate(self):
+        f1 = self._f(cls="com.x.A")
+        f2 = self._f(cls="com.x.B")
+        out = dedup_findings_by_class([f1, f2])
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0].occurrences, [])
+        self.assertEqual(out[1].occurrences, [])
+
+    def test_distinct_rules_kept_separate(self):
+        f1 = self._f(rule_id="CODE-001", cls="com.x.A")
+        f2 = self._f(rule_id="CODE-003", cls="com.x.A")
+        out = dedup_findings_by_class([f1, f2])
+        self.assertEqual(len(out), 2)
+
+    def test_same_class_same_rule_collapses(self):
+        f1 = self._f(line=10, text="http://a.test")
+        f2 = self._f(line=20, text="http://b.test")
+        f3 = self._f(line=30, text="http://c.test")
+        out = dedup_findings_by_class([f1, f2, f3])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].line_no, 10)  # representative is first
+        self.assertEqual(len(out[0].occurrences), 2)
+        self.assertEqual([o.line_no for o in out[0].occurrences], [20, 30])
+        self.assertEqual(out[0].occurrences[0].line_text, "http://b.test")
+        # occurrence_count = primary + extras
+        self.assertEqual(out[0].occurrence_count, 3)
+
+    def test_same_class_same_line_not_duplicated(self):
+        """Two rules firing on the same line still create one occurrence,
+        and a single rule firing twice on the same line (defensive case)
+        is folded down to the primary only.
+        """
+        f1 = self._f(line=10, text="x")
+        f2 = self._f(line=10, text="x")  # exact duplicate
+        out = dedup_findings_by_class([f1, f2])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].occurrences, [])
+
+    def test_empty_class_fqn_falls_back_to_file(self):
+        f1 = self._f(cls="", file="A.java", line=10)
+        f2 = self._f(cls="", file="A.java", line=20)
+        f3 = self._f(cls="", file="B.java", line=10)
+        out = dedup_findings_by_class([f1, f2, f3])
+        # A.java group + B.java group
+        self.assertEqual(len(out), 2)
+        a_group = next(f for f in out if f.file == "A.java")
+        self.assertEqual(len(a_group.occurrences), 1)
+
+    def test_evidence_tier_preserved_in_occurrence(self):
+        f1 = self._f(line=10, tier="java")
+        f2 = self._f(line=20, tier="smali")
+        out = dedup_findings_by_class([f1, f2])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].evidence_tier, "java")
+        self.assertEqual(out[0].occurrences[0].evidence_tier, "smali")
+
+    def test_codefinding_to_from_dict_round_trips_occurrences(self):
+        f = self._f(line=10)
+        f.occurrences.append(CodeOccurrence(line_no=20, line_text="more"))
+        f.occurrences.append(CodeOccurrence(line_no=30, line_text="more2",
+                                            evidence_tier="smali"))
+        rt = CodeFinding.from_dict(f.to_dict())
+        self.assertEqual(len(rt.occurrences), 2)
+        self.assertEqual(rt.occurrences[0].line_no, 20)
+        self.assertEqual(rt.occurrences[1].evidence_tier, "smali")
+
+    def test_audit_code_dedups_in_real_pipeline(self):
+        """audit_code() at module level returns the deduped report."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td)
+            # Two http URLs in one class → after audit_code, 1 finding +
+            # 1 occurrence rather than 2 separate findings.
+            (src / "com" / "demo" / "app").mkdir(parents=True)
+            (src / "com" / "demo" / "app" / "Net.java").write_text(
+                "package com.demo.app;\n"
+                "class Net {\n"
+                "  String a = \"http://a.test/\";\n"
+                "  String b = \"http://b.test/\";\n"
+                "}\n"
+            )
+            report = audit_code(
+                src, AndroidAppMeta(
+                    package_name="com.demo.app",
+                    application_class=None, permissions=[], components=[],
+                ),
+            )
+            http_findings = [f for f in report.findings if f.rule_id == "CODE-001"]
+            self.assertEqual(len(http_findings), 1)
+            self.assertEqual(http_findings[0].occurrence_count, 2)
 
 
 if __name__ == "__main__":

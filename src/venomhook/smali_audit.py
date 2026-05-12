@@ -53,6 +53,7 @@ from typing import Iterator, Optional
 from venomhook.code_audit import (
     DEFAULT_THIRD_PARTY_PREFIXES,
     _strip_line_comment,  # quote-aware to match code_audit conventions
+    dedup_findings_by_class,
 )
 from venomhook.models import (
     AndroidAppMeta,
@@ -390,6 +391,10 @@ def audit_smali(
                 counts_per_rule[rule.rule_id] += 1
 
     package_name = app_meta.package_name if app_meta else ""
+    # Phase 11-1: same dedup the .java tier uses — KakaoTalk's
+    # smali tier saw 306 findings before dedup; same (rule, class)
+    # collapse turns it into representative + occurrences.
+    findings = dedup_findings_by_class(findings)
     return CodeAuditReport(
         package_name=package_name,
         findings=findings,
