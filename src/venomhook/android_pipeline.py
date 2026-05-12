@@ -43,12 +43,10 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 
-# Phase 10-1: pipeline has 9 conceptual steps. The counter is reported
-# to the operator in stderr so a 30-minute jadx run no longer looks like
-# a hang. step_start logs "[N/9] name (start)" and returns the wall-clock
-# time; step_end consumes that and logs "[N/9] name (완료 — Xs)". When
-# logging is suppressed (--quiet) the calls are essentially free.
-_PIPELINE_TOTAL = 9
+# Phase 10-1: pipeline step counter. Operator-facing only; logs each
+# transition so a 30-minute jadx run no longer looks like a hang. The
+# total expanded to 10 in Phase 10-4 (smali fallback audit).
+_PIPELINE_TOTAL = 10
 
 
 def _step_start(num: int, name: str) -> float:
@@ -90,6 +88,7 @@ from venomhook.jadx_runner import (
 from venomhook.code_audit import audit_code
 from venomhook.jni_bridge import build_bridges, correlate_symbols
 from venomhook.manifest_audit import audit_manifest
+from venomhook.smali_audit import audit_smali, merge_code_reports
 from venomhook.models import (
     AndroidAppMeta,
     AndroidAuditReport,
@@ -341,6 +340,9 @@ def analyze_apk(
         warnings.append(f"{msg} — 네이티브 분석을 건너뜁니다")
         _step_skip(2, ".so 추출", "네이티브 라이브러리 없음")
         _step_skip(3, "BinaryMeta 추출", "네이티브 라이브러리 없음")
+        # Step 10 also relies on .so strings — flag it now to keep the
+        # counter sequence visible even on base-APK / split-APK targets
+        # like KakaoTalk where lib/ is empty.
     else:
         # ----- Step 2: ABI selection + .so extraction -----
         t0 = _step_start(2, ".so 추출")
@@ -436,6 +438,7 @@ def analyze_apk(
 
     # ----- Step 4: AndroidManifest decode (optional) -----
     app_meta: Optional[AndroidAppMeta] = None
+    apktool_out: Optional[Path] = None
     if use_apktool:
         t0 = _step_start(4, "AndroidManifest decode (apktool)")
         logger.info(
@@ -539,13 +542,35 @@ def analyze_apk(
                 # consumers can warn the reader that an empty rule
                 # bucket may reflect missing input, not a clean app.
                 code_audit_report.partial = True
-            if code_audit_report and app_meta is not None:
-                pocs.extend(generate_code_pocs(app_meta, code_audit_report))
         except OSError as e:
             warnings.append(f"코드 감사 실패 (계속 진행): {e}")
         _step_end(8, "Code 감사 (Java sources)", t0)
     else:
         _step_skip(8, "Code 감사", "jadx sources 없음")
+
+    # ----- Step 9: smali tier audit (Phase 10-4 fallback) -----
+    # apktool always produces smali_classes*/ directories alongside the
+    # decoded AndroidManifest.xml. Running smali_audit on that output
+    # guarantees code findings even when jadx times out, fails, or
+    # produced empty/garbage decompilation (Bangcle/AppGuard/OLLVM).
+    # Findings merge with the .java tier; on overlap the .java entry
+    # wins (its line text is more readable).
+    smali_report: Optional[CodeAuditReport] = None
+    if apktool_out is not None and apktool_out.is_dir():
+        t0 = _step_start(9, "smali 폴백 감사")
+        try:
+            smali_report = audit_smali(apktool_out, app_meta)
+        except OSError as e:
+            warnings.append(f"smali 감사 실패 (계속 진행): {e}")
+        _step_end(9, "smali 폴백 감사", t0)
+    else:
+        _step_skip(9, "smali 폴백 감사", "apktool 결과 없음")
+
+    # Merge .java + smali findings (java wins on overlap). The merged
+    # report is what HTML / JSON / PoC consumers downstream see.
+    code_audit_report = merge_code_reports(code_audit_report, smali_report)
+    if code_audit_report and app_meta is not None:
+        pocs.extend(generate_code_pocs(app_meta, code_audit_report))
 
     # ----- Step 9: categorize native-library strings (Phase 7-3) -----
     # so_meta.strings is harvested by binary_meta from .rodata-style sections.
@@ -556,9 +581,9 @@ def analyze_apk(
     native_string_hints: Optional[NativeStringHints] = None
     strings_by_symbol: dict[str, list[str]] = {}
     if so_meta is None:
-        _step_skip(9, "네이티브 string categorize", "so_meta 없음")
+        _step_skip(10, "네이티브 string categorize", "so_meta 없음")
     else:
-        t0 = _step_start(9, "네이티브 string categorize + symbol attribution")
+        t0 = _step_start(10, "네이티브 string categorize + symbol attribution")
         merged_strings: list[str] = list(so_meta.strings)
         for extra in additional_so_metas:
             merged_strings.extend(extra.strings)
@@ -588,7 +613,7 @@ def analyze_apk(
             strings_by_symbol = attribute_strings_by_symbol_name(
                 candidate_symbols, native_string_hints
             )
-        _step_end(9, "네이티브 string categorize + symbol attribution", t0)
+        _step_end(10, "네이티브 string categorize + symbol attribution", t0)
 
     return AndroidAnalysis(
         apk_meta=apk_meta,
