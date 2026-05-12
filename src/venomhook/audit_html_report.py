@@ -514,9 +514,26 @@ def _render_code_findings_section(
         f'<span class="sev-chip"><span class="count">{len(report.findings)}</span> 합계</span>'
     )
     sev_bar = f'<div class="severity-bar">{" ".join(sev_chips)}</div>'
+    # Phase 10-3: explicit "partial" banner when jadx timed out. Empty
+    # buckets on a partial run are NOT the same as a clean app — the
+    # reader must know findings reflect a subset of decompiled sources.
+    partial_banner = ""
+    if getattr(report, "partial", False):
+        partial_banner = (
+            '<div class="warnings" style="margin: 8px 0 16px 0;">'
+            '<strong>⚠ 부분 결과 — jadx 디컴파일 타임아웃</strong>'
+            '<p style="margin: 6px 0 0 0; font-size: 0.88em;">'
+            "jadx가 모든 DEX를 끝까지 디컴파일하지 못했습니다. 본 코드 감사는 "
+            "타임아웃 전까지 디스크에 쓰여진 .java 파일을 대상으로 실행되었으며, "
+            "디컴파일 안 된 클래스의 결함은 누락될 수 있습니다. "
+            "비어 있는 룰 버킷이 \"앱이 깨끗하다\"가 아니라 "
+            "\"입력 부족\"일 가능성을 검토하세요."
+            "</p></div>"
+        )
     return (
         '<section class="findings-section">'
         f'<h2>코드 감사 ({len(report.findings)}건 / 스캔 {report.files_scanned}개 파일)</h2>'
+        f'{partial_banner}'
         f'{sev_bar}'
         + "".join(cards)
         + "</section>"

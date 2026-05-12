@@ -54,6 +54,8 @@ __all__ = [
 # Phase 9-4 added strings_by_symbol (co-locality string attribution per
 # JNI export); v3 rows replay with empty attribution which would mis-
 # represent a fresh-run report, so we bump again.
+# Phase 10-3 added CodeAuditReport.partial — v4 rows are forward-compat
+# (partial defaults to False on load) so we *don't* bump for this one.
 SCHEMA_VERSION = 4
 
 

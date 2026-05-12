@@ -488,6 +488,60 @@ class TestRunJadx(unittest.TestCase):
             result = run_jadx(apk, tdp / "out", config=cfg)
             self.assertEqual(result.returncode, 1)
             self.assertEqual(result.java_files, 1)
+            self.assertFalse(result.partial)  # non-zero != timeout
+
+    def test_timeout_with_partial_output_returns_partial_result(self):
+        """Phase 10-3: jadx timeout that already wrote .java files
+        returns JadxResult(partial=True) instead of raising.
+
+        KakaoTalk-scale APKs hit the timeout but typically have 30K+
+        decompiled .java files on disk by then — that's audit-grade
+        input. Discarding it as the old behavior did was a defect.
+        """
+        import subprocess as sp
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = tdp / "x.apk"
+            apk.write_bytes(b"PK")
+            out_dir = tdp / "out"
+
+            def fake_run(cmd, **kw):
+                # Simulate jadx writing some .java then being killed.
+                target_dir = Path(cmd[cmd.index("-d") + 1])
+                target_dir.mkdir(parents=True, exist_ok=True)
+                for i in range(3):
+                    (target_dir / f"Foo{i}.java").write_text("class F {}")
+                raise sp.TimeoutExpired(cmd, timeout=kw.get("timeout"),
+                                         output=b"", stderr=b"")
+
+            with mock.patch("subprocess.run", side_effect=fake_run):
+                cfg = JadxConfig(jadx_path="/fake/jadx", timeout_sec=1)
+                result = run_jadx(apk, out_dir, config=cfg)
+
+            self.assertTrue(result.partial)
+            self.assertEqual(result.returncode, -1)
+            self.assertEqual(result.java_files, 3)
+            self.assertIn("timed out", result.stderr_tail)
+
+    def test_timeout_with_no_output_still_raises(self):
+        """Empty disk on timeout means nothing for code_audit — propagate
+        the failure rather than pretending the run was partial.
+        """
+        import subprocess as sp
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = tdp / "x.apk"
+            apk.write_bytes(b"PK")
+
+            def fake_run(cmd, **kw):
+                raise sp.TimeoutExpired(cmd, timeout=kw.get("timeout"),
+                                         output=b"", stderr=b"")
+
+            with mock.patch("subprocess.run", side_effect=fake_run):
+                cfg = JadxConfig(jadx_path="/fake/jadx", timeout_sec=1)
+                with self.assertRaises(JadxRunError) as ctx:
+                    run_jadx(apk, tdp / "out", config=cfg)
+            self.assertIn("timed out", str(ctx.exception))
 
     def test_command_line_includes_default_flags(self):
         with tempfile.TemporaryDirectory() as td:
@@ -549,6 +603,59 @@ class TestRunJadx(unittest.TestCase):
             self.assertIn("4", cmd)
             self.assertIn("--decompilation-mode", cmd)
             self.assertIn("simple", cmd)
+
+    def test_fast_mode_appends_simple_mode_flag(self):
+        """Phase 10-5: fast_mode=True adds '-m simple' to the command."""
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = tdp / "x.apk"
+            apk.write_bytes(b"PK")
+            seen: dict[str, list[str]] = {}
+
+            class FakeCompleted:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            def fake_run(cmd, **kw):
+                seen["cmd"] = list(cmd)
+                out_dir = Path(cmd[cmd.index("-d") + 1])
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / "x.java").write_text("class X {}")
+                return FakeCompleted()
+
+            cfg = JadxConfig(jadx_path="/usr/bin/jadx", fast_mode=True)
+            with mock.patch("venomhook.jadx_runner.subprocess.run", side_effect=fake_run):
+                run_jadx(apk, tdp / "o", config=cfg)
+            cmd = seen["cmd"]
+            # -m simple must be present
+            self.assertIn("-m", cmd)
+            self.assertEqual(cmd[cmd.index("-m") + 1], "simple")
+
+    def test_fast_mode_default_false_does_not_emit_m_flag(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = tdp / "x.apk"
+            apk.write_bytes(b"PK")
+            seen: dict[str, list[str]] = {}
+
+            class FakeCompleted:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            def fake_run(cmd, **kw):
+                seen["cmd"] = list(cmd)
+                out_dir = Path(cmd[cmd.index("-d") + 1])
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / "x.java").write_text("class X {}")
+                return FakeCompleted()
+
+            cfg = JadxConfig(jadx_path="/usr/bin/jadx")
+            with mock.patch("venomhook.jadx_runner.subprocess.run", side_effect=fake_run):
+                run_jadx(apk, tdp / "o", config=cfg)
+            # -m must not appear because fast_mode defaults to False
+            self.assertNotIn("-m", seen["cmd"])
 
 
 # ---------- decompile_apk ----------

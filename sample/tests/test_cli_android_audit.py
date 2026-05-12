@@ -694,5 +694,188 @@ class AndroidAuditCliTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 1)
 
 
+class ScanApkAliasTests(unittest.TestCase):
+    """Phase 10-2: scan-apk is the new recommended entry point.
+
+    Argparse aliases share the same parser → same args.func → same
+    cmd_android_audit. We exercise the alias and confirm it produces
+    the same findings as the canonical command for the same input.
+    """
+
+    def _run(self, argv: list[str]) -> str:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            main(argv)
+        return buf.getvalue()
+
+    def test_scan_apk_alias_runs_same_pipeline(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            apktool = _apktool_stub(tdp, _MANIFEST_DEBUGGABLE)
+
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                return_value=_stub_binary_meta("/tmp/libfoo.so"),
+            ):
+                out = self._run([
+                    "scan-apk",
+                    "--apk", str(apk),
+                    "--out-dir", str(tdp / "work"),
+                    "--apktool-path", str(apktool),
+                    "--no-jadx",
+                ])
+        # Same surface as android-audit
+        self.assertIn("AndroidManifest 감사", out)
+        self.assertIn("MANIFEST-001", out)
+        self.assertIn("PoC 번들", out)
+
+    def test_scan_apk_alias_accepts_same_flags(self):
+        """Sanity: argparse alias inherits every audit_parser flag.
+
+        We don't invoke the full pipeline here — just confirm that the
+        argparse parser accepts a representative subset of the audit
+        flags under the `scan-apk` name (argparse exit code 2 means
+        an unknown / malformed arg, which would fail here if alias
+        plumbing were wrong).
+        """
+        from venomhook.cli import main as cli_main
+
+        captured: dict = {}
+
+        def fake_analyze(*args, **kwargs):
+            captured["called"] = True
+            from venomhook.android_pipeline import AndroidAnalysis
+            from venomhook.apk_extractor import ApkMeta
+            return AndroidAnalysis(
+                apk_meta=ApkMeta(path="x", name="x.apk", hash="sha256:0"),
+                selected_abi=None, extracted_so_path=None, so_meta=None,
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            with mock.patch(
+                "venomhook.cli.analyze_apk", side_effect=fake_analyze,
+            ), self.assertRaises(SystemExit) as ctx:
+                cli_main([
+                    "scan-apk",
+                    "--apk", str(apk),
+                    "--out-dir", str(tdp / "work"),
+                    "--no-jadx",
+                    "--apk-lib", "all",
+                    "--jadx-timeout", "1800",
+                    "--severity-threshold", "high",
+                    "--quiet",
+                ])
+        # ANY exit code is fine except 2 (= argparse parse error).
+        self.assertNotEqual(ctx.exception.code, 2)
+        self.assertTrue(captured.get("called"), "analyze_apk must have been invoked")
+
+
+class JadxTimeoutCliTests(unittest.TestCase):
+    """Phase 9 follow-up: --jadx-timeout overrides JadxConfig.timeout_sec.
+
+    Discovered during the KakaoTalk 26.3.2 regression run — 18 DEX with
+    Kotlin-heavy obfuscation hit the hardcoded 600s ceiling and the
+    pipeline degraded to an empty code_audit_report. Exposing the
+    timeout on the CLI lets the operator extend it without patching
+    jadx_runner.
+    """
+
+    def _run(self, argv: list[str]) -> str:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            main(argv)
+        return buf.getvalue()
+
+    def _capture_analyze(self, argv: list[str]) -> dict:
+        captured: dict = {}
+
+        def fake_analyze(*args, **kwargs):
+            captured["jadx_config"] = kwargs.get("jadx_config")
+            from venomhook.android_pipeline import AndroidAnalysis
+            from venomhook.apk_extractor import ApkMeta
+            return AndroidAnalysis(
+                apk_meta=ApkMeta(path="x", name="x.apk", hash="sha256:0"),
+                selected_abi=None,
+                extracted_so_path=None,
+                so_meta=None,
+            )
+
+        with mock.patch(
+            "venomhook.cli.analyze_apk", side_effect=fake_analyze,
+        ), self.assertRaises(SystemExit):
+            # Missing app_meta -> exit 1, but the kwargs we wanted to
+            # inspect were already passed in.
+            self._run(argv)
+        return captured
+
+    def test_jadx_timeout_reaches_jadx_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            captured = self._capture_analyze([
+                "android-audit",
+                "--apk", str(apk),
+                "--out-dir", str(tdp / "work"),
+                "--jadx-timeout", "1800",
+                "--quiet",
+            ])
+        jc = captured["jadx_config"]
+        self.assertIsNotNone(jc)
+        self.assertEqual(jc.timeout_sec, 1800)
+        # jadx_path stays unspecified -> default auto-detect
+        self.assertIsNone(jc.jadx_path)
+
+    def test_jadx_path_and_timeout_can_coexist(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            captured = self._capture_analyze([
+                "android-audit",
+                "--apk", str(apk),
+                "--out-dir", str(tdp / "work"),
+                "--jadx-path", "/opt/custom/jadx",
+                "--jadx-timeout", "1200",
+                "--quiet",
+            ])
+        jc = captured["jadx_config"]
+        self.assertEqual(jc.timeout_sec, 1200)
+        self.assertEqual(jc.jadx_path, "/opt/custom/jadx")
+
+    def test_no_jadx_args_means_no_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            captured = self._capture_analyze([
+                "android-audit",
+                "--apk", str(apk),
+                "--out-dir", str(tdp / "work"),
+                "--quiet",
+            ])
+        self.assertIsNone(captured["jadx_config"])
+
+    def test_jadx_threads_and_fast_mode_propagate(self):
+        """Phase 10-5: --jadx-threads and --jadx-fast reach JadxConfig."""
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            captured = self._capture_analyze([
+                "android-audit",
+                "--apk", str(apk),
+                "--out-dir", str(tdp / "work"),
+                "--jadx-threads", "8",
+                "--jadx-fast",
+                "--quiet",
+            ])
+        jc = captured["jadx_config"]
+        self.assertEqual(jc.threads, 8)
+        self.assertTrue(jc.fast_mode)
+        # untouched fields keep defaults
+        self.assertEqual(jc.timeout_sec, 600)
+        self.assertIsNone(jc.jadx_path)
+
+
 if __name__ == "__main__":
     unittest.main()

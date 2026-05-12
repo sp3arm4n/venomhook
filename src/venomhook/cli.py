@@ -491,7 +491,10 @@ def main(argv: list[str] | None = None) -> None:
 
     audit_parser = subparsers.add_parser(
         "android-audit",
-        help="Decode APK manifest, run vulnerability audit, generate PoC recipes",
+        aliases=["scan-apk"],
+        help="Run the unified APK static analysis pipeline (manifest + code + "
+             "PoC + HTML). Also available as `scan-apk` — the recommended "
+             "single entry point for Android pentest workflows.",
     )
     audit_parser.add_argument("--apk", type=Path, required=True, help="Path to Android APK")
     audit_parser.add_argument(
@@ -543,6 +546,25 @@ def main(argv: list[str] | None = None) -> None:
     )
     audit_parser.add_argument(
         "--jadx-path", type=str, help="Override jadx binary path (default: $PATH lookup)",
+    )
+    audit_parser.add_argument(
+        "--jadx-timeout", type=int, default=None,
+        help="Override jadx decompile timeout in seconds (default: 600). "
+        "Large multi-DEX APKs (KakaoTalk-scale, 200MB+ with 15+ DEX) often "
+        "need 1800+ to finish.",
+    )
+    audit_parser.add_argument(
+        "--jadx-threads", type=int, default=None,
+        help="jadx parallelism (-j N). Default 4 (jadx built-in). Bumping "
+        "this on a many-core machine cuts wall-clock on heavy APKs.",
+    )
+    audit_parser.add_argument(
+        "--jadx-fast", action="store_true",
+        help="Run jadx with -m simple to skip structure-restoring passes. "
+        "Output .java is uglier (linear, goto-style) but VenomHook rules "
+        "are insensitive to control-flow shape — they match literal "
+        "const-strings and method calls. 30-50%% wall-clock saving on "
+        "obfuscated APKs. Independent of --jadx-timeout / --apk-lib.",
     )
     audit_parser.add_argument(
         "--no-jadx", action="store_true",
@@ -629,7 +651,18 @@ def main(argv: list[str] | None = None) -> None:
     cache_diff_parser.set_defaults(func=cmd_android_cache_diff)
 
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format=LOG_FORMAT)
+    # Phase 10-1: --quiet drops the log level so progress / step messages
+    # disappear too (was already true for the stdout finding cards but the
+    # logger stayed at INFO and spammed `[1/9] ...` lines). --verbose still
+    # wins over --quiet so a debug run is possible while suppressing stdout
+    # findings.
+    if args.verbose:
+        log_level = logging.DEBUG
+    elif getattr(args, "quiet", False):
+        log_level = logging.WARNING
+    else:
+        log_level = logging.INFO
+    logging.basicConfig(level=log_level, format=LOG_FORMAT)
     args.func(args)
 
 
@@ -638,6 +671,13 @@ def _resolve_apk_to_binary(args: argparse.Namespace, default_extract_dir: Path |
 
     Mutually exclusive with --binary and --static-json. Raises SystemExit on conflict
     or extraction failure.
+
+    Phase 10-2 deprecation: ``offset-static --apk`` / ``offset-e2e --apk``
+    were two of three places the operator could pass an APK, which the
+    README documented inconsistently. The unified entry point is now
+    ``venomhook scan-apk`` (alias of ``android-audit``). The offset-*
+    APK modes still work but emit a one-line deprecation hint so users
+    converge on the single command.
     """
     apk_path = getattr(args, "apk", None)
     if not apk_path:
@@ -647,6 +687,13 @@ def _resolve_apk_to_binary(args: argparse.Namespace, default_extract_dir: Path |
         raise SystemExit("--apk and --binary are mutually exclusive")
     if getattr(args, "static_json", None):
         raise SystemExit("--apk and --static-json are mutually exclusive")
+
+    logging.warning(
+        "DEPRECATED: `--apk` on offset-* is the Ghidra-routed path only; the "
+        "recommended Android entry point is `venomhook scan-apk --apk %s` "
+        "(manifest + code + PoC + HTML, no Ghidra required).",
+        apk_path,
+    )
 
     try:
         meta = extract_apk_meta(apk_path)
@@ -994,7 +1041,24 @@ def cmd_android_audit(args: argparse.Namespace) -> None:
         logging.info("using temporary work dir: %s", work_dir)
 
     apktool_config = ApktoolConfig(apktool_path=args.apktool_path) if args.apktool_path else None
-    jadx_config = JadxConfig(jadx_path=args.jadx_path) if args.jadx_path else None
+    if (
+        args.jadx_path
+        or args.jadx_timeout is not None
+        or getattr(args, "jadx_threads", None) is not None
+        or getattr(args, "jadx_fast", False)
+    ):
+        jadx_kwargs: dict = {}
+        if args.jadx_path:
+            jadx_kwargs["jadx_path"] = args.jadx_path
+        if args.jadx_timeout is not None:
+            jadx_kwargs["timeout_sec"] = args.jadx_timeout
+        if getattr(args, "jadx_threads", None) is not None:
+            jadx_kwargs["threads"] = args.jadx_threads
+        if getattr(args, "jadx_fast", False):
+            jadx_kwargs["fast_mode"] = True
+        jadx_config = JadxConfig(**jadx_kwargs)
+    else:
+        jadx_config = None
 
     cache: AnalysisCache | None = None
     if args.cache_dir:

@@ -772,6 +772,14 @@ class CodeFinding:
     detail: str = ""
     remediation: str = ""
     references: list[str] = field(default_factory=list)
+    # Phase 10-4: which decompiled representation produced this finding.
+    # ``"java"`` (default) means a .java pattern via code_audit; ``"smali"``
+    # means the smali fallback that runs whenever apktool produces
+    # smali_classes*/ directories (always for any decoded APK), giving
+    # us a guarantee of *some* code findings even when jadx fails
+    # entirely. HTML / JSON consumers surface the tier next to each
+    # finding so the reader knows the evidence form.
+    evidence_tier: str = "java"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "CodeFinding":
@@ -786,6 +794,7 @@ class CodeFinding:
             detail=data.get("detail", ""),
             remediation=data.get("remediation", ""),
             references=list(data.get("references", [])),
+            evidence_tier=data.get("evidence_tier", "java"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -807,6 +816,9 @@ class CodeFinding:
             result["remediation"] = self.remediation
         if self.references:
             result["references"] = list(self.references)
+        # Only serialize non-default tier to keep older JSON dumps clean.
+        if self.evidence_tier and self.evidence_tier != "java":
+            result["evidence_tier"] = self.evidence_tier
         return result
 
 
@@ -823,6 +835,11 @@ class CodeAuditReport:
     package_name: str
     findings: list[CodeFinding] = field(default_factory=list)
     files_scanned: int = 0
+    # Phase 10-3: True when the underlying jadx decompile hit its timeout
+    # but produced enough .java files for an audit. Operators reading the
+    # HTML report need to know the audit ran on a subset so an empty
+    # bucket can be distinguished from "rule didn't fire on partial input".
+    partial: bool = False
 
     _SEVERITY_ORDER: tuple[str, ...] = field(
         default=("critical", "high", "medium", "low", "info"),
@@ -857,6 +874,7 @@ class CodeAuditReport:
             package_name=data.get("package_name", ""),
             findings=[CodeFinding.from_dict(f) for f in data.get("findings", [])],
             files_scanned=int(data.get("files_scanned", 0)),
+            partial=bool(data.get("partial", False)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -865,6 +883,7 @@ class CodeAuditReport:
             "findings": [f.to_dict() for f in self.findings],
             "files_scanned": self.files_scanned,
             "severity_counts": self.severity_counts,
+            "partial": self.partial,
         }
 
 

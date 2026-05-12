@@ -366,6 +366,48 @@ class TestAnalyzeApkMultiLib(unittest.TestCase):
             joined = " | ".join(result.warnings)
             self.assertIn("--apk-lib", joined)
 
+    def test_partial_jadx_marks_code_audit_partial(self):
+        """Phase 10-3: jadx timeout with partial sources → code_audit
+        runs on what's there and the report is flagged partial.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(
+                tdp,
+                {"arm64-v8a": ["libfoo.so"]},
+            )
+            # Create a "sources" dir as if jadx wrote some .java
+            sources_root = tdp / "work" / "jadx" / "sources"
+            sources_root.mkdir(parents=True)
+
+            from venomhook.jadx_runner import JadxResult
+
+            partial_result = JadxResult(
+                apk_path=str(apk),
+                output_dir=str(tdp / "work" / "jadx"),
+                returncode=-1,
+                java_files=2,
+                stderr_tail="jadx timed out after 600s — partial",
+                partial=True,
+            )
+
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                return_value=_stub_binary_meta("/tmp/libfoo.so", []),
+            ), mock.patch(
+                "venomhook.android_pipeline.decompile_apk",
+                return_value=(partial_result, []),
+            ):
+                result = analyze_apk(
+                    apk, tdp / "work",
+                    use_apktool=False,
+                )
+
+            self.assertTrue(any("타임아웃" in w or "timed out" in w for w in result.warnings),
+                            f"expected timeout warning, got {result.warnings!r}")
+            self.assertIsNotNone(result.code_audit_report)
+            self.assertTrue(result.code_audit_report.partial)
+
     def test_strings_by_symbol_populated_when_bridges_match(self):
         """Phase 9-4: bridge-matched JNI symbols receive co-locality hints."""
         with tempfile.TemporaryDirectory() as td:

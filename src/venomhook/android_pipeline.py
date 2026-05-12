@@ -33,9 +33,36 @@ jni_bridge, binary_meta, and the extended models.
 
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+
+
+logger = logging.getLogger(__name__)
+
+
+# Phase 10-1: pipeline step counter. Operator-facing only; logs each
+# transition so a 30-minute jadx run no longer looks like a hang. The
+# total expanded to 10 in Phase 10-4 (smali fallback audit).
+_PIPELINE_TOTAL = 10
+
+
+def _step_start(num: int, name: str) -> float:
+    logger.info("[%d/%d] %s ...", num, _PIPELINE_TOTAL, name)
+    return time.monotonic()
+
+
+def _step_end(num: int, name: str, t0: float) -> None:
+    elapsed = time.monotonic() - t0
+    logger.info(
+        "[%d/%d] %s (완료 — %.1fs)", num, _PIPELINE_TOTAL, name, elapsed,
+    )
+
+
+def _step_skip(num: int, name: str, reason: str) -> None:
+    logger.info("[%d/%d] %s (건너뜀 — %s)", num, _PIPELINE_TOTAL, name, reason)
 
 from venomhook.apk_decoder import (
     ApkDecoderError,
@@ -61,6 +88,7 @@ from venomhook.jadx_runner import (
 from venomhook.code_audit import audit_code
 from venomhook.jni_bridge import build_bridges, correlate_symbols
 from venomhook.manifest_audit import audit_manifest
+from venomhook.smali_audit import audit_smali, merge_code_reports
 from venomhook.models import (
     AndroidAppMeta,
     AndroidAuditReport,
@@ -292,10 +320,12 @@ def analyze_apk(
     warnings: list[str] = []
 
     # ----- Step 1: APK metadata -----
+    t0 = _step_start(1, "APK 메타데이터 추출")
     try:
         apk_meta = extract_apk_meta(apk)
     except ApkExtractError as e:
         raise AndroidPipelineError(f"apk_extractor failed: {e}") from e
+    _step_end(1, "APK 메타데이터 추출", t0)
 
     selected_abi: Optional[str] = None
     so_path: Optional[Path] = None
@@ -308,8 +338,14 @@ def analyze_apk(
         if require_native:
             raise AndroidPipelineError(msg)
         warnings.append(f"{msg} — 네이티브 분석을 건너뜁니다")
+        _step_skip(2, ".so 추출", "네이티브 라이브러리 없음")
+        _step_skip(3, "BinaryMeta 추출", "네이티브 라이브러리 없음")
+        # Step 10 also relies on .so strings — flag it now to keep the
+        # counter sequence visible even on base-APK / split-APK targets
+        # like KakaoTalk where lib/ is empty.
     else:
         # ----- Step 2: ABI selection + .so extraction -----
+        t0 = _step_start(2, ".so 추출")
         try:
             selected_abi = select_abi(apk_meta, abi)
         except ApkExtractError as e:
@@ -396,10 +432,18 @@ def analyze_apk(
                 if require_native:
                     raise AndroidPipelineError(msg) from e
                 warnings.append(f"{msg} — 네이티브 분석을 건너뜁니다")
+        _step_end(2, ".so 추출", t0)
+        _step_end(3, "BinaryMeta 추출",
+                  t0)  # 동일 시간 카운터 — lief 호출은 .so 추출 직후 즉시
 
     # ----- Step 4: AndroidManifest decode (optional) -----
     app_meta: Optional[AndroidAppMeta] = None
+    apktool_out: Optional[Path] = None
     if use_apktool:
+        t0 = _step_start(4, "AndroidManifest decode (apktool)")
+        logger.info(
+            "      ↳ apktool subprocess 실행 중 — 대용량 APK는 수 분 소요"
+        )
         apktool_out = work / "apktool"
         try:
             _, app_meta = decode_apk(apk, apktool_out, config=apktool_config)
@@ -410,11 +454,21 @@ def analyze_apk(
             warnings.append(msg)
         except ApkDecoderError as e:
             warnings.append(f"apktool 디코드 실패 (계속 진행): {e}")
+        _step_end(4, "AndroidManifest decode (apktool)", t0)
+    else:
+        _step_skip(4, "AndroidManifest decode", "use_apktool=False")
 
     # ----- Step 5: jadx decompile + native method extract (optional) -----
     java_natives: list[JavaNativeMethod] = []
     jadx_sources_dir: Optional[Path] = None
+    jadx_partial = False
     if use_jadx:
+        t0 = _step_start(5, "DEX → Java 디컴파일 (jadx)")
+        logger.info(
+            "      ↳ jadx subprocess 실행 중 — 진행률은 표시되지 않으며 "
+            "대용량 multi-DEX APK는 수십 분 가능 (default timeout %ss)",
+            (jadx_config.timeout_sec if jadx_config else 600),
+        )
         jadx_out = work / "jadx"
         try:
             jadx_result, java_natives = decompile_apk(
@@ -429,6 +483,19 @@ def analyze_apk(
                 sources_candidate if sources_candidate.is_dir()
                 else Path(jadx_result.output_dir)
             )
+            # Phase 10-3: jadx may timeout on KakaoTalk-scale APKs but
+            # still leave thousands of .java files on disk. The runner
+            # now flags this as partial=True instead of raising, and we
+            # surface a clear warning so the operator knows code_audit
+            # findings ran on a subset.
+            if jadx_result.partial:
+                jadx_partial = True
+                warnings.append(
+                    f"jadx 디컴파일이 타임아웃으로 부분 결과를 산출했습니다 "
+                    f"({jadx_result.java_files}개 .java). Code 감사는 "
+                    "이 부분 sources 위에서 진행 — 일부 결함을 놓칠 수 있어 "
+                    "보고서의 code findings는 'partial' 표시 가능."
+                )
         except JadxNotFoundError as e:
             msg = f"jadx를 사용할 수 없습니다 — Java 디컴파일을 건너뜁니다: {e}"
             if fail_on_missing_tools:
@@ -436,8 +503,12 @@ def analyze_apk(
             warnings.append(msg)
         except JadxError as e:
             warnings.append(f"jadx 디컴파일 실패 (계속 진행): {e}")
+        _step_end(5, "DEX → Java 디컴파일 (jadx)", t0)
+    else:
+        _step_skip(5, "jadx 디컴파일", "use_jadx=False")
 
     # ----- Step 6: JNI bridge construction + correlation -----
+    t0 = _step_start(6, "JNI bridge correlation")
     bridges: list[JniBridge] = []
     if java_natives and so_meta is not None:
         bridges = build_bridges(java_natives)
@@ -445,13 +516,16 @@ def analyze_apk(
         for extra in additional_so_metas:
             union_exports.extend(extra.exports)
         correlate_symbols(bridges, union_exports)
+    _step_end(6, "JNI bridge correlation", t0)
 
     # ----- Step 7: manifest audit + PoC generation (Phase 3) -----
+    t0 = _step_start(7, "Manifest 감사 + PoC 생성")
     audit_report: Optional[AndroidAuditReport] = None
     pocs: list[PoCArtifact] = []
     if app_meta is not None:
         audit_report = audit_manifest(app_meta)
         pocs = generate_pocs(app_meta, audit_report)
+    _step_end(7, "Manifest 감사 + PoC 생성", t0)
 
     # ----- Step 8: code-level static audit over jadx sources (Phase 7-1/2/4) -----
     # Runs only when jadx produced sources. Pure text-pattern scan; failure
@@ -460,12 +534,43 @@ def analyze_apk(
     # don't need to special-case them.
     code_audit_report: Optional[CodeAuditReport] = None
     if jadx_sources_dir is not None:
+        t0 = _step_start(8, "Code 감사 (Java sources)")
         try:
             code_audit_report = audit_code(jadx_sources_dir, app_meta)
-            if code_audit_report and app_meta is not None:
-                pocs.extend(generate_code_pocs(app_meta, code_audit_report))
+            if code_audit_report and jadx_partial:
+                # Propagate the partial-jadx signal so HTML / JSON
+                # consumers can warn the reader that an empty rule
+                # bucket may reflect missing input, not a clean app.
+                code_audit_report.partial = True
         except OSError as e:
             warnings.append(f"코드 감사 실패 (계속 진행): {e}")
+        _step_end(8, "Code 감사 (Java sources)", t0)
+    else:
+        _step_skip(8, "Code 감사", "jadx sources 없음")
+
+    # ----- Step 9: smali tier audit (Phase 10-4 fallback) -----
+    # apktool always produces smali_classes*/ directories alongside the
+    # decoded AndroidManifest.xml. Running smali_audit on that output
+    # guarantees code findings even when jadx times out, fails, or
+    # produced empty/garbage decompilation (Bangcle/AppGuard/OLLVM).
+    # Findings merge with the .java tier; on overlap the .java entry
+    # wins (its line text is more readable).
+    smali_report: Optional[CodeAuditReport] = None
+    if apktool_out is not None and apktool_out.is_dir():
+        t0 = _step_start(9, "smali 폴백 감사")
+        try:
+            smali_report = audit_smali(apktool_out, app_meta)
+        except OSError as e:
+            warnings.append(f"smali 감사 실패 (계속 진행): {e}")
+        _step_end(9, "smali 폴백 감사", t0)
+    else:
+        _step_skip(9, "smali 폴백 감사", "apktool 결과 없음")
+
+    # Merge .java + smali findings (java wins on overlap). The merged
+    # report is what HTML / JSON / PoC consumers downstream see.
+    code_audit_report = merge_code_reports(code_audit_report, smali_report)
+    if code_audit_report and app_meta is not None:
+        pocs.extend(generate_code_pocs(app_meta, code_audit_report))
 
     # ----- Step 9: categorize native-library strings (Phase 7-3) -----
     # so_meta.strings is harvested by binary_meta from .rodata-style sections.
@@ -475,7 +580,10 @@ def analyze_apk(
     # analyzed.
     native_string_hints: Optional[NativeStringHints] = None
     strings_by_symbol: dict[str, list[str]] = {}
-    if so_meta is not None:
+    if so_meta is None:
+        _step_skip(10, "네이티브 string categorize", "so_meta 없음")
+    else:
+        t0 = _step_start(10, "네이티브 string categorize + symbol attribution")
         merged_strings: list[str] = list(so_meta.strings)
         for extra in additional_so_metas:
             merged_strings.extend(extra.strings)
@@ -505,6 +613,7 @@ def analyze_apk(
             strings_by_symbol = attribute_strings_by_symbol_name(
                 candidate_symbols, native_string_hints
             )
+        _step_end(10, "네이티브 string categorize + symbol attribution", t0)
 
     return AndroidAnalysis(
         apk_meta=apk_meta,
