@@ -491,7 +491,10 @@ def main(argv: list[str] | None = None) -> None:
 
     audit_parser = subparsers.add_parser(
         "android-audit",
-        help="Decode APK manifest, run vulnerability audit, generate PoC recipes",
+        aliases=["scan-apk"],
+        help="Run the unified APK static analysis pipeline (manifest + code + "
+             "PoC + HTML). Also available as `scan-apk` — the recommended "
+             "single entry point for Android pentest workflows.",
     )
     audit_parser.add_argument("--apk", type=Path, required=True, help="Path to Android APK")
     audit_parser.add_argument(
@@ -655,6 +658,13 @@ def _resolve_apk_to_binary(args: argparse.Namespace, default_extract_dir: Path |
 
     Mutually exclusive with --binary and --static-json. Raises SystemExit on conflict
     or extraction failure.
+
+    Phase 10-2 deprecation: ``offset-static --apk`` / ``offset-e2e --apk``
+    were two of three places the operator could pass an APK, which the
+    README documented inconsistently. The unified entry point is now
+    ``venomhook scan-apk`` (alias of ``android-audit``). The offset-*
+    APK modes still work but emit a one-line deprecation hint so users
+    converge on the single command.
     """
     apk_path = getattr(args, "apk", None)
     if not apk_path:
@@ -664,6 +674,13 @@ def _resolve_apk_to_binary(args: argparse.Namespace, default_extract_dir: Path |
         raise SystemExit("--apk and --binary are mutually exclusive")
     if getattr(args, "static_json", None):
         raise SystemExit("--apk and --static-json are mutually exclusive")
+
+    logging.warning(
+        "DEPRECATED: `--apk` on offset-* is the Ghidra-routed path only; the "
+        "recommended Android entry point is `venomhook scan-apk --apk %s` "
+        "(manifest + code + PoC + HTML, no Ghidra required).",
+        apk_path,
+    )
 
     try:
         meta = extract_apk_meta(apk_path)

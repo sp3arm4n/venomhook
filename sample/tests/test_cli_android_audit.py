@@ -694,6 +694,85 @@ class AndroidAuditCliTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 1)
 
 
+class ScanApkAliasTests(unittest.TestCase):
+    """Phase 10-2: scan-apk is the new recommended entry point.
+
+    Argparse aliases share the same parser → same args.func → same
+    cmd_android_audit. We exercise the alias and confirm it produces
+    the same findings as the canonical command for the same input.
+    """
+
+    def _run(self, argv: list[str]) -> str:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            main(argv)
+        return buf.getvalue()
+
+    def test_scan_apk_alias_runs_same_pipeline(self):
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            apktool = _apktool_stub(tdp, _MANIFEST_DEBUGGABLE)
+
+            with mock.patch(
+                "venomhook.android_pipeline.extract_binary_meta",
+                return_value=_stub_binary_meta("/tmp/libfoo.so"),
+            ):
+                out = self._run([
+                    "scan-apk",
+                    "--apk", str(apk),
+                    "--out-dir", str(tdp / "work"),
+                    "--apktool-path", str(apktool),
+                    "--no-jadx",
+                ])
+        # Same surface as android-audit
+        self.assertIn("AndroidManifest 감사", out)
+        self.assertIn("MANIFEST-001", out)
+        self.assertIn("PoC 번들", out)
+
+    def test_scan_apk_alias_accepts_same_flags(self):
+        """Sanity: argparse alias inherits every audit_parser flag.
+
+        We don't invoke the full pipeline here — just confirm that the
+        argparse parser accepts a representative subset of the audit
+        flags under the `scan-apk` name (argparse exit code 2 means
+        an unknown / malformed arg, which would fail here if alias
+        plumbing were wrong).
+        """
+        from venomhook.cli import main as cli_main
+
+        captured: dict = {}
+
+        def fake_analyze(*args, **kwargs):
+            captured["called"] = True
+            from venomhook.android_pipeline import AndroidAnalysis
+            from venomhook.apk_extractor import ApkMeta
+            return AndroidAnalysis(
+                apk_meta=ApkMeta(path="x", name="x.apk", hash="sha256:0"),
+                selected_abi=None, extracted_so_path=None, so_meta=None,
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            apk = _make_apk_with_lib(tdp)
+            with mock.patch(
+                "venomhook.cli.analyze_apk", side_effect=fake_analyze,
+            ), self.assertRaises(SystemExit) as ctx:
+                cli_main([
+                    "scan-apk",
+                    "--apk", str(apk),
+                    "--out-dir", str(tdp / "work"),
+                    "--no-jadx",
+                    "--apk-lib", "all",
+                    "--jadx-timeout", "1800",
+                    "--severity-threshold", "high",
+                    "--quiet",
+                ])
+        # ANY exit code is fine except 2 (= argparse parse error).
+        self.assertNotEqual(ctx.exception.code, 2)
+        self.assertTrue(captured.get("called"), "analyze_apk must have been invoked")
+
+
 class JadxTimeoutCliTests(unittest.TestCase):
     """Phase 9 follow-up: --jadx-timeout overrides JadxConfig.timeout_sec.
 
