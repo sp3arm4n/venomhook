@@ -635,7 +635,18 @@ def main(argv: list[str] | None = None) -> None:
     cache_diff_parser.set_defaults(func=cmd_android_cache_diff)
 
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format=LOG_FORMAT)
+    # Phase 10-1: --quiet drops the log level so progress / step messages
+    # disappear too (was already true for the stdout finding cards but the
+    # logger stayed at INFO and spammed `[1/9] ...` lines). --verbose still
+    # wins over --quiet so a debug run is possible while suppressing stdout
+    # findings.
+    if args.verbose:
+        log_level = logging.DEBUG
+    elif getattr(args, "quiet", False):
+        log_level = logging.WARNING
+    else:
+        log_level = logging.INFO
+    logging.basicConfig(level=log_level, format=LOG_FORMAT)
     args.func(args)
 
 
