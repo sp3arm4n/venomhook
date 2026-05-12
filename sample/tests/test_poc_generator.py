@@ -775,6 +775,45 @@ class DedupPocsByTemplateTests(unittest.TestCase):
         self.assertEqual(out[0].component, "com.demo.A")
         self.assertEqual(out[0].applies_to, ["com.demo.B"])
 
+    def test_dedup_does_not_mutate_inputs(self):
+        a = self._p(
+            title="외부 노출 액티비티 'com.demo.A' 호출",
+            component="com.demo.A",
+            commands=["adb shell am start -n com.demo/com.demo.A"],
+        )
+        b = self._p(
+            title="외부 노출 액티비티 'com.demo.B' 호출",
+            component="com.demo.B",
+            commands=["adb shell am start -n com.demo/com.demo.B"],
+        )
+
+        out1 = dedup_pocs_by_template([a, b])
+        out2 = dedup_pocs_by_template([a, b])
+
+        self.assertIsNot(out1[0], a)
+        self.assertEqual(a.applies_to, [])
+        self.assertEqual(b.applies_to, [])
+        self.assertEqual(out1[0].applies_to, ["com.demo.B"])
+        self.assertEqual(out2[0].applies_to, ["com.demo.B"])
+
+    def test_existing_applies_to_targets_are_merged(self):
+        a = self._p(
+            title="외부 노출 액티비티 'com.demo.A' 호출",
+            component="com.demo.A",
+            commands=["adb shell am start -n com.demo/com.demo.A"],
+        )
+        b = self._p(
+            title="외부 노출 액티비티 'com.demo.B' 호출",
+            component="com.demo.B",
+            commands=["adb shell am start -n com.demo/com.demo.B"],
+        )
+        b.applies_to = ["com.demo.C"]
+
+        out = dedup_pocs_by_template([a, b])
+
+        self.assertEqual(out[0].applies_to, ["com.demo.B", "com.demo.C"])
+        self.assertEqual(b.applies_to, ["com.demo.C"])
+
     def test_three_components_collapse_to_one(self):
         ps = [
             self._p(

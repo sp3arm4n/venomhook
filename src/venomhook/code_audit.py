@@ -41,7 +41,7 @@ walk. No subprocess, no network.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -616,9 +616,68 @@ RULES: list[RuleFn] = [
 ]
 
 
-def dedup_findings_by_class(
-    findings: Iterable[CodeFinding],
-) -> list[CodeFinding]:
+def _copy_occurrence_for_rep(
+    occ: CodeOccurrence,
+    *,
+    source_file: str,
+    rep_file: str,
+) -> CodeOccurrence:
+    """Copy an occurrence while normalizing its file relative to a rep."""
+    effective_file = occ.file or source_file
+    return CodeOccurrence(
+        line_no=occ.line_no,
+        line_text=occ.line_text,
+        file=effective_file if effective_file != rep_file else "",
+        evidence_tier=occ.evidence_tier,
+    )
+
+
+def _copy_finding_for_dedup(finding: CodeFinding) -> CodeFinding:
+    return replace(
+        finding,
+        references=list(finding.references),
+        occurrences=[
+            _copy_occurrence_for_rep(
+                occ,
+                source_file=finding.file,
+                rep_file=finding.file,
+            )
+            for occ in finding.occurrences
+        ],
+    )
+
+
+def _finding_as_occurrence(finding: CodeFinding, rep_file: str) -> CodeOccurrence:
+    return CodeOccurrence(
+        line_no=finding.line_no,
+        line_text=finding.line_text,
+        file=finding.file if finding.file != rep_file else "",
+        evidence_tier=finding.evidence_tier,
+    )
+
+
+def _same_occurrence_file(occ: CodeOccurrence, rep_file: str) -> str:
+    return occ.file or rep_file
+
+
+def _has_occurrence(rep: CodeFinding, occ: CodeOccurrence) -> bool:
+    occ_file = _same_occurrence_file(occ, rep.file)
+    if rep.line_no == occ.line_no and rep.file == occ_file:
+        return True
+    return any(
+        existing.line_no == occ.line_no
+        and _same_occurrence_file(existing, rep.file) == occ_file
+        and existing.evidence_tier == occ.evidence_tier
+        for existing in rep.occurrences
+    )
+
+
+def _append_occurrence_if_new(rep: CodeFinding, occ: CodeOccurrence) -> None:
+    if not _has_occurrence(rep, occ):
+        rep.occurrences.append(occ)
+
+
+def dedup_findings_by_class(findings: Iterable[CodeFinding]) -> list[CodeFinding]:
     """Phase 11-1: collapse findings sharing (rule_id, class_fqn, severity)
     into one representative + occurrences list.
 
@@ -639,10 +698,11 @@ def dedup_findings_by_class(
     enclosing class can't be inferred (default-package code, header
     comments, etc.).
 
-    Stable: representatives appear in the order their first occurrence
-    came from the rules. Each occurrence retains its (line_no,
-    line_text, file, evidence_tier) so HTML can render a "주요 +
-    N개 추가" expandable section.
+    Stable and non-mutating: representatives appear in the order their
+    first occurrence came from the rules, and the returned findings are
+    shallow copies with copied list fields. Each occurrence retains its
+    (line_no, line_text, file, evidence_tier) so HTML can render a
+    "주요 + N개 추가" expandable section.
     """
     out: list[CodeFinding] = []
     index: dict[tuple[str, str, str], int] = {}
@@ -652,18 +712,19 @@ def dedup_findings_by_class(
         slot = index.get(key)
         if slot is None:
             index[key] = len(out)
-            out.append(f)
+            out.append(_copy_finding_for_dedup(f))
             continue
         existing = out[slot]
-        # Don't duplicate the representative line itself.
-        if f.line_no == existing.line_no and f.file == existing.file:
-            continue
-        existing.occurrences.append(CodeOccurrence(
-            line_no=f.line_no,
-            line_text=f.line_text,
-            file=f.file if f.file != existing.file else "",
-            evidence_tier=f.evidence_tier,
-        ))
+        _append_occurrence_if_new(existing, _finding_as_occurrence(f, existing.file))
+        for occ in f.occurrences:
+            _append_occurrence_if_new(
+                existing,
+                _copy_occurrence_for_rep(
+                    occ,
+                    source_file=f.file,
+                    rep_file=existing.file,
+                ),
+            )
     return out
 
 

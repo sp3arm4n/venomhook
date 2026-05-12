@@ -618,6 +618,18 @@ class DedupFindingsByClassTests(unittest.TestCase):
         # occurrence_count = primary + extras
         self.assertEqual(out[0].occurrence_count, 3)
 
+    def test_dedup_does_not_mutate_inputs(self):
+        f1 = self._f(line=10, text="http://a.test")
+        f2 = self._f(line=20, text="http://b.test")
+        out1 = dedup_findings_by_class([f1, f2])
+        out2 = dedup_findings_by_class([f1, f2])
+
+        self.assertIsNot(out1[0], f1)
+        self.assertEqual(f1.occurrences, [])
+        self.assertEqual(f2.occurrences, [])
+        self.assertEqual(out1[0].occurrence_count, 2)
+        self.assertEqual(out2[0].occurrence_count, 2)
+
     def test_same_class_same_line_not_duplicated(self):
         """Two rules firing on the same line still create one occurrence,
         and a single rule firing twice on the same line (defensive case)
