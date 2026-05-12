@@ -56,7 +56,10 @@ __all__ = [
 # represent a fresh-run report, so we bump again.
 # Phase 10-3 added CodeAuditReport.partial — v4 rows are forward-compat
 # (partial defaults to False on load) so we *don't* bump for this one.
-SCHEMA_VERSION = 4
+# Phase 10-4 added smali-tier findings. Old v4 rows can have a populated
+# Java code_audit_report yet still miss every smali finding, so replaying
+# them would silently under-report the new tier.
+SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True)

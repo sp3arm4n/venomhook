@@ -152,6 +152,47 @@ class AuditSmaliRulesTests(unittest.TestCase):
             report = audit_smali(out, _meta())
             self.assertIn("CODE-006", [f.rule_id for f in report.findings])
 
+    def test_code006_numeric_mode_on_open_file_output(self):
+        with TempApktoolOut(["smali"]) as out:
+            _write_smali(out / "smali", "com/demo/app/Cfg.smali", textwrap.dedent("""\
+                .class public Lcom/demo/app/Cfg;
+                .method public save(Landroid/content/Context;)V
+                    const-string v0, "creds.txt"
+                    const/4 v1, 0x1
+                    invoke-virtual {p1, v0, v1}, Landroid/content/Context;->openFileOutput(Ljava/lang/String;I)Ljava/io/FileOutputStream;
+                .end method
+            """))
+            report = audit_smali(out, _meta())
+            f = next(f for f in report.findings if f.rule_id == "CODE-006")
+            self.assertIn("MODE_WORLD_READABLE", f.detail)
+
+    def test_code006_numeric_mode_on_shared_preferences(self):
+        with TempApktoolOut(["smali"]) as out:
+            _write_smali(out / "smali", "com/demo/app/Cfg.smali", textwrap.dedent("""\
+                .class public Lcom/demo/app/Cfg;
+                .method public save(Landroid/content/Context;)V
+                    const-string v0, "prefs"
+                    const/4 v1, 0x2
+                    invoke-virtual {p1, v0, v1}, Landroid/content/Context;->getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;
+                .end method
+            """))
+            report = audit_smali(out, _meta())
+            f = next(f for f in report.findings if f.rule_id == "CODE-006")
+            self.assertIn("MODE_WORLD_WRITEABLE", f.detail)
+
+    def test_code006_private_numeric_mode_is_clean(self):
+        with TempApktoolOut(["smali"]) as out:
+            _write_smali(out / "smali", "com/demo/app/Cfg.smali", textwrap.dedent("""\
+                .class public Lcom/demo/app/Cfg;
+                .method public save(Landroid/content/Context;)V
+                    const-string v0, "creds.txt"
+                    const/4 v1, 0x0
+                    invoke-virtual {p1, v0, v1}, Landroid/content/Context;->openFileOutput(Ljava/lang/String;I)Ljava/io/FileOutputStream;
+                .end method
+            """))
+            report = audit_smali(out, _meta())
+            self.assertNotIn("CODE-006", [f.rule_id for f in report.findings])
+
     def test_no_findings_in_clean_smali(self):
         with TempApktoolOut(["smali"]) as out:
             _write_smali(out / "smali", "com/demo/app/Clean.smali", textwrap.dedent("""\

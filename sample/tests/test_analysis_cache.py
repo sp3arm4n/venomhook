@@ -155,6 +155,9 @@ class CachePutGetTests(unittest.TestCase):
 
 
 class CacheVersioningTests(unittest.TestCase):
+    def test_schema_version_invalidates_pre_smali_tier_rows(self):
+        self.assertGreaterEqual(SCHEMA_VERSION, 5)
+
     def test_different_versions_coexist(self):
         with tempfile.TemporaryDirectory() as td:
             db = Path(td) / "v.db"
