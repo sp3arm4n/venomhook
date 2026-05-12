@@ -98,6 +98,11 @@ class JadxResult:
     java_files: int               # number of .java files generated
     stdout_tail: str = ""         # last 4KB of stdout
     stderr_tail: str = ""         # last 4KB of stderr
+    # Phase 10-3: True when jadx hit the configured timeout but had
+    # already produced .java sources on disk. Callers (android_pipeline)
+    # treat the partial output as audit-grade input, with a warning on
+    # the audit report. Stays False on successful runs.
+    partial: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -107,6 +112,7 @@ class JadxResult:
             "java_files": self.java_files,
             "stdout_tail": self.stdout_tail,
             "stderr_tail": self.stderr_tail,
+            "partial": self.partial,
         }
 
 
@@ -191,6 +197,9 @@ def run_jadx(
     cmd.extend(cfg.extra_args)
     cmd.append(str(apk))
 
+    timed_out = False
+    timeout_stdout = ""
+    timeout_stderr = ""
     try:
         completed = subprocess.run(
             cmd,
@@ -204,9 +213,25 @@ def run_jadx(
             timeout=cfg.timeout_sec,
         )
     except subprocess.TimeoutExpired as e:
-        raise JadxRunError(
-            f"jadx timed out after {cfg.timeout_sec}s on {apk}"
-        ) from e
+        # Phase 10-3: graceful timeout. KakaoTalk-scale APKs hit the
+        # configured ceiling but jadx has typically already written
+        # tens of thousands of .java files by then. Raising here used
+        # to discard that work entirely; instead we mark the result
+        # ``partial=True`` and return it so audit_code can still run.
+        timed_out = True
+        # TimeoutExpired's stdout/stderr are bytes when the call was
+        # text=True with a timeout (Python quirk); coerce safely.
+        raw_out = e.stdout or b""
+        raw_err = e.stderr or b""
+        if isinstance(raw_out, bytes):
+            timeout_stdout = raw_out.decode("utf-8", errors="replace")
+        else:
+            timeout_stdout = raw_out
+        if isinstance(raw_err, bytes):
+            timeout_stderr = raw_err.decode("utf-8", errors="replace")
+        else:
+            timeout_stderr = raw_err
+        completed = None  # for the static type narrower
     except FileNotFoundError as e:
         raise JadxNotFoundError(
             f"could not exec jadx binary at {binary!r}: {e}"
@@ -217,6 +242,29 @@ def run_jadx(
         ) from e
 
     java_files = sum(1 for _ in out.rglob("*.java"))
+
+    if timed_out:
+        # Disk has whatever jadx managed to write before the kill. If
+        # the count is non-zero, surface partial=True so the pipeline
+        # uses it. Still raise when nothing was produced — there is
+        # nothing for downstream code_audit to inspect.
+        if java_files == 0:
+            raise JadxRunError(
+                f"jadx timed out after {cfg.timeout_sec}s on {apk}"
+            )
+        return JadxResult(
+            apk_path=str(apk),
+            output_dir=str(out),
+            returncode=-1,
+            java_files=java_files,
+            stdout_tail=timeout_stdout[-4096:],
+            stderr_tail=timeout_stderr[-4096:] or (
+                f"jadx timed out after {cfg.timeout_sec}s — "
+                f"{java_files} partial .java files retained"
+            ),
+            partial=True,
+        )
+
     stdout_tail = (completed.stdout or "")[-4096:]
     stderr_tail = (completed.stderr or "")[-4096:]
 
@@ -233,6 +281,7 @@ def run_jadx(
         java_files=java_files,
         stdout_tail=stdout_tail,
         stderr_tail=stderr_tail,
+        partial=False,
     )
 
 

@@ -458,6 +458,7 @@ def analyze_apk(
     # ----- Step 5: jadx decompile + native method extract (optional) -----
     java_natives: list[JavaNativeMethod] = []
     jadx_sources_dir: Optional[Path] = None
+    jadx_partial = False
     if use_jadx:
         t0 = _step_start(5, "DEX → Java 디컴파일 (jadx)")
         logger.info(
@@ -479,6 +480,19 @@ def analyze_apk(
                 sources_candidate if sources_candidate.is_dir()
                 else Path(jadx_result.output_dir)
             )
+            # Phase 10-3: jadx may timeout on KakaoTalk-scale APKs but
+            # still leave thousands of .java files on disk. The runner
+            # now flags this as partial=True instead of raising, and we
+            # surface a clear warning so the operator knows code_audit
+            # findings ran on a subset.
+            if jadx_result.partial:
+                jadx_partial = True
+                warnings.append(
+                    f"jadx 디컴파일이 타임아웃으로 부분 결과를 산출했습니다 "
+                    f"({jadx_result.java_files}개 .java). Code 감사는 "
+                    "이 부분 sources 위에서 진행 — 일부 결함을 놓칠 수 있어 "
+                    "보고서의 code findings는 'partial' 표시 가능."
+                )
         except JadxNotFoundError as e:
             msg = f"jadx를 사용할 수 없습니다 — Java 디컴파일을 건너뜁니다: {e}"
             if fail_on_missing_tools:
@@ -520,6 +534,11 @@ def analyze_apk(
         t0 = _step_start(8, "Code 감사 (Java sources)")
         try:
             code_audit_report = audit_code(jadx_sources_dir, app_meta)
+            if code_audit_report and jadx_partial:
+                # Propagate the partial-jadx signal so HTML / JSON
+                # consumers can warn the reader that an empty rule
+                # bucket may reflect missing input, not a clean app.
+                code_audit_report.partial = True
             if code_audit_report and app_meta is not None:
                 pocs.extend(generate_code_pocs(app_meta, code_audit_report))
         except OSError as e:
